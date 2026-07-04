@@ -86,10 +86,7 @@ export default function App() {
         <div className="mx-auto mt-24 w-full max-w-sm rounded-lg border bg-card p-8">
           <h2 className="font-serif text-xl">Connect to Trove</h2>
           <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
-            This service requires a token. Paste one from{" "}
-            <span className="font-mono text-[12px]">TROVE_SERVICE_TOKENS</span> in{" "}
-            <span className="font-mono text-[12px]">~/dev/trove/.env</span> — the read token is
-            enough for the dashboard.
+            Enter your API key to open the dashboard.
           </p>
           <form
             className="mt-5 flex flex-col gap-3"
@@ -105,7 +102,7 @@ export default function App() {
             <input
               name="token"
               type="password"
-              placeholder="gm_read_…"
+              placeholder="API key"
               autoFocus
               className="h-9 rounded-md border bg-background px-3 font-mono text-sm outline-none placeholder:text-muted-foreground focus:border-ring"
             />
