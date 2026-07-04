@@ -14,7 +14,7 @@ const PHASES = [
   { cmd: 'graph.capture("Sarah joined as the designer")', caption: "Agents capture facts, with the source attached" },
   { cmd: "graph.link(sarah → website-redesign)", caption: "Facts connect into a graph" },
   { cmd: 'graph.update("deadline moved to Friday")', caption: "Beliefs update on the record. History stays." },
-  { cmd: 'graph.recall("where is the redesign at?")', caption: "Recall returns a cited pack, sized to your budget" },
+  { cmd: 'graph.recall("where is the redesign at?")', caption: "Recall surfaces the facts that matter, sized to your budget" },
 ];
 
 // Story nodes, coordinates in a 0-100 field (percent of the scene box).
@@ -249,36 +249,6 @@ export function MemoryStory() {
           )}
         </AnimatePresence>
 
-        {/* recall context pack */}
-        <AnimatePresence>
-          {recalling && (
-            <motion.div
-              initial={{ opacity: 0, x: 24 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1], delay: 0.5 }}
-              className="absolute -right-2 top-1 w-52 rounded-lg border bg-card/95 p-3.5 shadow-lg backdrop-blur sm:-right-10 sm:w-60"
-            >
-              <p className="font-mono text-[9px] uppercase tracking-[0.12em] text-muted-foreground">context pack</p>
-              <ul className="mt-2 space-y-1.5 text-[11px] leading-snug">
-                <li>Sarah is the designer <sup className="text-muted-foreground">1</sup></li>
-                <li>Deadline is Friday <sup className="text-muted-foreground">2</sup></li>
-                <li className="text-muted-foreground line-through">was Wednesday · superseded</li>
-              </ul>
-              <div className="mt-3">
-                <div className="h-1 w-full overflow-hidden rounded-full bg-secondary">
-                  <motion.div
-                    initial={{ width: 0 }}
-                    animate={{ width: "58%" }}
-                    transition={{ duration: 0.8, ease: "easeOut", delay: 0.9 }}
-                    className="h-full rounded-full bg-foreground/70"
-                  />
-                </div>
-                <p className="mt-1.5 font-mono text-[9px] text-muted-foreground">2,340 / 4,000 tokens</p>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
       </div>
 
       {/* caption + progress */}
