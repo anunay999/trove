@@ -290,6 +290,29 @@ export function ApiKeys() {
                     {token.tokenPreview}  ·  {token.scopes.join(", ")}
                   </p>
                 </div>
+                <button
+                  type="button"
+                  title="Copy token"
+                  aria-label={`Copy ${token.actorId} token`}
+                  onClick={() => {
+                    void navigator.clipboard.writeText(token.token).then(() => {
+                      setCopiedKeyId(`svc-${token.actorId}`);
+                      window.setTimeout(() => setCopiedKeyId((current) => (current === `svc-${token.actorId}` ? null : current)), 1600);
+                    });
+                  }}
+                  className="flex size-8 shrink-0 items-center justify-center rounded-md border text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  {copiedKeyId === `svc-${token.actorId}` ? (
+                    <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden>
+                      <path d="M3 8.5 6.5 12 13 4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  ) : (
+                    <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden>
+                      <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+                      <path d="M10.5 5.5V4a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+                    </svg>
+                  )}
+                </button>
                 <span className="shrink-0 rounded-full bg-secondary px-2.5 py-1 font-mono text-[11px] uppercase tracking-[0.05em] text-muted-foreground">
                   env
                 </span>
