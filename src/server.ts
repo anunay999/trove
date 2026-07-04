@@ -48,7 +48,7 @@ import { createGraphStore } from "./createStore.js";
 import { startJobWorker } from "./jobWorker.js";
 import { createTroveMcpServer } from "./mcpTools.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
-import { graphMindTools } from "./toolDefinitions.js";
+import { troveTools } from "./toolDefinitions.js";
 import { UserStore, type ApiKeySummary } from "./users.js";
 
 const app = new Hono();
@@ -121,7 +121,7 @@ app.get("/v1/tools", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   return context.json({
-    tools: graphMindTools.map((tool) => ({
+    tools: troveTools.map((tool) => ({
       name: tool.name,
       description: tool.description,
     })),

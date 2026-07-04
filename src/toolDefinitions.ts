@@ -21,7 +21,7 @@ import {
   updateInputSchema,
 } from "./contracts.js";
 
-export const graphMindTools = [
+export const troveTools = [
   {
     name: "graph.search",
     description: "Search Trove nodes with lexical, semantic, and graph-aware retrieval.",
