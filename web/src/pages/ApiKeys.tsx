@@ -7,6 +7,82 @@ const SCOPE_OPTIONS = [
   { scope: "graph:export", label: "Export", hint: "Obsidian / markdown projections" },
 ];
 
+const MCP_TOOLS = ["Claude Code", "Codex", "Cursor"] as const;
+type McpTool = (typeof MCP_TOOLS)[number];
+
+function mcpSnippet(tool: McpTool, key: string): { text: string; hint: string } {
+  const url = `${window.location.origin}/mcp`;
+  if (tool === "Claude Code") {
+    return {
+      text: `claude mcp add trove --transport http ${url} --header "Authorization: Bearer ${key}"`,
+      hint: "Run in any terminal. Tools appear as graph.* in every Claude Code session.",
+    };
+  }
+  if (tool === "Codex") {
+    return {
+      text: `[mcp_servers.trove]\ncommand = "npx"\nargs = ["-y", "mcp-remote", "${url}", "--header", "Authorization: Bearer ${key}"]`,
+      hint: "Add to ~/.codex/config.toml. mcp-remote bridges Codex's stdio MCP to the hosted endpoint.",
+    };
+  }
+  return {
+    text: `{\n  "mcpServers": {\n    "trove": {\n      "url": "${url}",\n      "headers": { "Authorization": "Bearer ${key}" }\n    }\n  }\n}`,
+    hint: "Add to ~/.cursor/mcp.json (or via Cursor Settings → MCP → Add server).",
+  };
+}
+
+function McpSetup({ keySecret }: { keySecret: string | null }) {
+  const [tool, setTool] = useState<McpTool>("Claude Code");
+  const [copiedSnippet, setCopiedSnippet] = useState(false);
+  const key = keySecret ?? "<your-api-key>";
+  const snippet = mcpSnippet(tool, key);
+
+  return (
+    <div className="mt-10">
+      <h3 className="text-sm font-semibold">Connect an agent</h3>
+      <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">
+        {keySecret
+          ? "Snippets below use your most recent active key."
+          : "Create a key above first; snippets will fill it in automatically."}
+      </p>
+      <div className="mt-3 flex gap-2">
+        {MCP_TOOLS.map((candidate) => (
+          <button
+            key={candidate}
+            type="button"
+            onClick={() => { setTool(candidate); setCopiedSnippet(false); }}
+            className={`rounded-md border px-3 py-1.5 text-[13px] transition-colors ${
+              tool === candidate ? "border-foreground/40 bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {candidate}
+          </button>
+        ))}
+      </div>
+      <div className="mt-3 rounded-lg border bg-card">
+        <div className="flex items-center justify-between border-b px-4 py-2">
+          <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground">
+            {tool === "Claude Code" ? "terminal" : tool === "Codex" ? "~/.codex/config.toml" : "~/.cursor/mcp.json"}
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              void navigator.clipboard.writeText(snippet.text).then(() => {
+                setCopiedSnippet(true);
+                window.setTimeout(() => setCopiedSnippet(false), 1600);
+              });
+            }}
+            className="rounded-md border px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+          >
+            {copiedSnippet ? "Copied" : "Copy"}
+          </button>
+        </div>
+        <pre className="overflow-x-auto px-4 py-3 font-mono text-[12px] leading-relaxed">{snippet.text}</pre>
+      </div>
+      <p className="mt-2 text-[12px] text-muted-foreground">{snippet.hint}</p>
+    </div>
+  );
+}
+
 export function ApiKeys() {
   const [keys, setKeys] = useState<ApiKeySummary[] | null>(null);
   const [serviceTokens, setServiceTokens] = useState<ServiceTokenSummary[]>([]);
@@ -16,6 +92,7 @@ export function ApiKeys() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -151,6 +228,31 @@ export function ApiKeys() {
                 </div>
                 <button
                   type="button"
+                  disabled={!key.secret}
+                  title={key.secret ? "Copy key" : "Created before keys were retrievable; recreate to copy"}
+                  onClick={() => {
+                    if (!key.secret) return;
+                    void navigator.clipboard.writeText(key.secret).then(() => {
+                      setCopiedKeyId(key.id);
+                      window.setTimeout(() => setCopiedKeyId((current) => (current === key.id ? null : current)), 1600);
+                    });
+                  }}
+                  aria-label={`Copy ${key.name} key`}
+                  className="flex size-8 shrink-0 items-center justify-center rounded-md border text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {copiedKeyId === key.id ? (
+                    <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden>
+                      <path d="M3 8.5 6.5 12 13 4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  ) : (
+                    <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden>
+                      <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+                      <path d="M10.5 5.5V4a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+                    </svg>
+                  )}
+                </button>
+                <button
+                  type="button"
                   onClick={() => {
                     if (window.confirm(`Revoke "${key.name}"? Agents using it will lose access immediately.`)) {
                       void revokeKey(key.id).then(load);
@@ -170,6 +272,8 @@ export function ApiKeys() {
           </p>
         )}
       </div>
+
+      <McpSetup keySecret={active.find((key) => key.secret)?.secret ?? null} />
 
       {serviceTokens.length > 0 && (
         <div className="mt-10">

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { AgentLogos } from "@/components/AgentLogos";
-import { GraphAnimation } from "@/components/GraphAnimation";
+import { MemoryStory } from "@/components/MemoryStory";
 
 // Layout adapted from shadcnblocks hero146 (masked grid backdrop, gradient
 // headline, metallic CTA) and waitlist3 (badge + inline email join form),
@@ -36,10 +36,9 @@ export function Landing({ dark, onJoin, onLogin, onConnectKey }: {
           Memory your agents keep, so you don't have to
         </h1>
 
-        <p className="mt-5 max-w-[34rem] text-center text-base leading-relaxed text-muted-foreground md:text-lg">
-          Trove is a knowledge graph your AI agents read and write across sessions.
-          Every fact keeps its source, beliefs change on the record, and recall fits
-          the context window — not the other way around.
+        <p className="mt-5 max-w-[32rem] text-center text-base leading-relaxed text-muted-foreground md:text-lg">
+          The memory layer for your AI agents. Every fact keeps its source.
+          Every change stays on the record. Recall arrives sized to the context window.
         </p>
 
         <form
@@ -75,20 +74,9 @@ export function Landing({ dark, onJoin, onLogin, onConnectKey }: {
           </button>
         </p>
 
-        <AgentLogos />
+        <MemoryStory />
 
-        <div className="relative mt-14 w-full max-w-4xl">
-          <div className="rounded-2xl border bg-card/60 p-3 backdrop-blur-sm">
-            <div className="relative h-[340px] overflow-hidden rounded-lg border bg-background/70 md:h-[420px]">
-              <GraphAnimation dark={dark} density={64} className="absolute inset-0 h-full w-full" />
-              <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between bg-gradient-to-t from-background/85 to-transparent px-5 pb-4 pt-16">
-                <p className="font-mono text-[11px] uppercase tracking-[0.1em] text-muted-foreground">
-                  Live memory graph · bitemporal edges · evidence-linked
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
+        <AgentLogos />
 
         <div className="mb-20 mt-14 grid w-full max-w-4xl grid-cols-1 gap-px overflow-hidden rounded-lg border bg-border md:grid-cols-3">
           {[

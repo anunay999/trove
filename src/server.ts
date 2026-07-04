@@ -539,10 +539,8 @@ app.post("/v1/keys", async (context) => {
     return context.json({ error: "waitlisted", message: "Your account is on the waitlist." }, 403);
   }
   const input = await parseJsonOrThrow(context.req.json(), createKeyInputSchema);
-  const key = await userStore!.createApiKey(identity.userId, input);
-  const { secret, ...summary } = key;
-  // The secret appears in this response only; we store just its hash.
-  return context.json({ key: summary satisfies ApiKeySummary, secret }, 201);
+  const key: ApiKeySummary = await userStore!.createApiKey(identity.userId, input);
+  return context.json({ key, secret: key.secret }, 201);
 });
 
 app.delete("/v1/keys/:id", async (context) => {

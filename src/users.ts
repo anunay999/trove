@@ -23,6 +23,8 @@ export type ApiKeySummary = {
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
+  /** Retrievable secret; null for keys minted before migration 005. */
+  secret: string | null;
 };
 
 export type ResolvedApiKey = {
@@ -123,10 +125,10 @@ export class UserStore {
     }
     const { secret, prefix, hash } = generateApiKey();
     const result = await this.pool.query(
-      `insert into user_api_key (user_id, name, key_prefix, key_hash, scopes)
-       values ($1, $2, $3, $4, $5)
+      `insert into user_api_key (user_id, name, key_prefix, key_hash, scopes, secret)
+       values ($1, $2, $3, $4, $5, $6)
        returning id, name, key_prefix, scopes, created_at, last_used_at, revoked_at`,
-      [userId, input.name, prefix, hash, input.scopes],
+      [userId, input.name, prefix, hash, input.scopes, secret],
     );
     const row = result.rows[0];
     return {
@@ -143,7 +145,7 @@ export class UserStore {
 
   async listApiKeys(userId: string): Promise<ApiKeySummary[]> {
     const result = await this.pool.query(
-      `select id, name, key_prefix, scopes, created_at, last_used_at, revoked_at
+      `select id, name, key_prefix, scopes, created_at, last_used_at, revoked_at, secret
        from user_api_key where user_id = $1 order by created_at desc`,
       [userId],
     );
@@ -155,6 +157,7 @@ export class UserStore {
       createdAt: new Date(row.created_at).toISOString(),
       lastUsedAt: row.last_used_at ? new Date(row.last_used_at).toISOString() : null,
       revokedAt: row.revoked_at ? new Date(row.revoked_at).toISOString() : null,
+      secret: row.secret == null ? null : String(row.secret),
     }));
   }
 

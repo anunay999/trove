@@ -36,6 +36,12 @@ export default function App() {
   // Until Clerk finishes restoring the session, showing the landing would
   // flash it at every signed-in reload; hold a quiet splash instead.
   const [clerkLoaded, setClerkLoaded] = useState(!clerkEnabled);
+
+  useEffect(() => {
+    // If Clerk can't initialize (outage, wrong domain), don't brick the page.
+    const fallback = window.setTimeout(() => setClerkLoaded(true), 4000);
+    return () => window.clearTimeout(fallback);
+  }, []);
   // With Clerk enabled, a stored API key no longer auto-opens the dashboard —
   // the landing is the front door; the key path is an explicit choice.
   const [tokenDashboard, setTokenDashboard] = useState(false);
@@ -161,7 +167,7 @@ export default function App() {
                 <path d="M8 1.5 A6.5 6.5 0 0 1 8 14.5 Z" fill="currentColor" />
               </svg>
             </button>
-            {clerkEnabled && <AuthControls onOpenLogin={openLogin} onSessionChange={onSessionChange} />}
+            {clerkEnabled && <AuthControls onOpenLogin={openLogin} onSessionChange={onSessionChange} dark={dark} />}
           </div>
         </div>
       </header>

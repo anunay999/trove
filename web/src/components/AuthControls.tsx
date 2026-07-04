@@ -1,14 +1,16 @@
 import { useEffect } from "react";
 import { SignedIn, SignedOut, UserButton, useAuth } from "@clerk/clerk-react";
+import { dark as clerkDark } from "@clerk/themes";
 import { setSessionTokenProvider } from "@/lib/api";
 
 /**
  * Header auth widget. Also bridges the Clerk session into the API layer:
  * while signed in, every fetch carries a fresh session JWT.
  */
-export function AuthControls({ onOpenLogin, onSessionChange }: {
+export function AuthControls({ onOpenLogin, onSessionChange, dark }: {
   onOpenLogin: () => void;
   onSessionChange: (signedIn: boolean, loaded: boolean) => void;
+  dark: boolean;
 }) {
   const { isSignedIn, isLoaded, getToken } = useAuth();
 
@@ -33,7 +35,7 @@ export function AuthControls({ onOpenLogin, onSessionChange }: {
         </button>
       </SignedOut>
       <SignedIn>
-        <UserButton afterSignOutUrl="/" />
+        <UserButton afterSignOutUrl="/" appearance={dark ? { baseTheme: clerkDark } : undefined} />
       </SignedIn>
     </>
   );

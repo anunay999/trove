@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { SignIn, SignUp } from "@clerk/clerk-react";
+import { dark as clerkDark } from "@clerk/themes";
 import { GraphAnimation } from "@/components/GraphAnimation";
 
 export function LoginDrawer({ open, mode, onClose, dark, prefillEmail }: {
@@ -56,13 +57,13 @@ export function LoginDrawer({ open, mode, onClose, dark, prefillEmail }: {
               routing="hash"
               signInUrl="#/sign-in"
               initialValues={prefillEmail ? { emailAddress: prefillEmail } : undefined}
-              appearance={{ elements: { rootBox: "mx-auto", cardBox: "shadow-xl" } }}
+              appearance={{ ...(dark ? { baseTheme: clerkDark } : {}), elements: { rootBox: "mx-auto", cardBox: "shadow-xl" } }}
             />
           ) : (
             <SignIn
               routing="hash"
               signUpUrl="#/sign-up"
-              appearance={{ elements: { rootBox: "mx-auto", cardBox: "shadow-xl" } }}
+              appearance={{ ...(dark ? { baseTheme: clerkDark } : {}), elements: { rootBox: "mx-auto", cardBox: "shadow-xl" } }}
             />
           )}
         </div>

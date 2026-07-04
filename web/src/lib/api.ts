@@ -180,6 +180,7 @@ export type ApiKeySummary = {
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
+  secret: string | null;
 };
 
 export type AppUser = {

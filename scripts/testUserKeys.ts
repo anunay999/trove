@@ -57,11 +57,13 @@ try {
     throw new Error("Resolved key should carry the owner clerk id as actor.");
   }
 
-  // 6. Listing never exposes the secret or hash.
+  // 6. Listing returns the retrievable secret to the owner (copy-later UX),
+  //    but never the hash.
   const listed = await users.listApiKeys(created.id);
   const entry = listed.find((key) => key.id === issued.id);
   if (!entry || entry.name !== "laptop" || !entry.keyPrefix) throw new Error("Key missing from listing.");
-  if ("secret" in entry || "keyHash" in entry) throw new Error("Listing leaked key material.");
+  if (entry.secret !== issued.secret) throw new Error("Listing should return the retrievable secret.");
+  if ("keyHash" in entry || "key_hash" in entry) throw new Error("Listing leaked the key hash.");
 
   // 7. Revocation kills resolution immediately.
   await users.revokeApiKey(created.id, issued.id);
