@@ -446,9 +446,13 @@ export class InMemoryGraphStore implements GraphStore {
 
   events(input: EventFeedInput = { limit: 100 }): GraphEventFeed {
     const after = input.afterCursor ? decodeEventCursor(input.afterCursor) : null;
-    const sorted = [...this.eventLog].sort(compareEventsAsc);
+    const descending = input.order === "desc";
+    let sorted = [...this.eventLog].sort(compareEventsAsc);
+    if (descending) sorted = sorted.reverse();
     const filtered = after
-      ? sorted.filter((event) => compareEventToCursor(event, after) > 0)
+      ? sorted.filter((event) => (descending
+        ? compareEventToCursor(event, after) < 0
+        : compareEventToCursor(event, after) > 0))
       : sorted;
     const page = filtered.slice(0, input.limit);
     const last = page.at(-1);

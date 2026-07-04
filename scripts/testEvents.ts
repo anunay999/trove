@@ -41,6 +41,19 @@ try {
     throw new Error("Cursor event feed did not return a next cursor.");
   }
 
+  // Newest-first read: the dashboard activity feed must see fresh writes even
+  // when the log outgrows any forward-walk window.
+  const recent = await store.events({ limit: 20, order: "desc" });
+  if (recent.events.length < 2) throw new Error("Descending feed returned too few events.");
+  for (let i = 1; i < recent.events.length; i += 1) {
+    if ((recent.events[i - 1]?.createdAt ?? "") < (recent.events[i]?.createdAt ?? "")) {
+      throw new Error("Descending feed is not newest-first.");
+    }
+  }
+  if (!recent.events.some((event) => event.entityId === node.id)) {
+    throw new Error("Descending feed missed the just-captured event.");
+  }
+
   console.log(JSON.stringify({
     ok: true,
     driver,

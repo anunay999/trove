@@ -179,13 +179,13 @@ app.get("/v1/stats", async (context) => {
 
   const allEvents: Awaited<ReturnType<typeof store.timeline>> = [];
   let cursor: string | undefined;
-  for (let page = 0; page < 6; page += 1) {
+  for (let page = 0; page < 20; page += 1) {
     const feedPage = await store.events(cursor ? { afterCursor: cursor, limit: 500 } : { limit: 500 });
     allEvents.push(...feedPage.events.filter((event) => !isSmokeEvent(event)));
     if (!feedPage.hasMore || !feedPage.nextCursor) break;
     cursor = feedPage.nextCursor;
   }
-  const feed = { events: allEvents, hasMore: allEvents.length >= 3000 };
+  const feed = { events: allEvents, hasMore: allEvents.length >= 10_000 };
 
   const countBy = <T>(items: T[], key: (item: T) => string): Array<{ key: string; count: number }> => {
     const counts = new Map<string, number>();
@@ -223,13 +223,23 @@ app.get("/v1/stats", async (context) => {
     }));
 
   // Job-queue churn is summarized on the health card; the activity feed shows
-  // memory writes. Draw from the full walked pool: a busy worker can flood the
-  // small timeline window with job events.
+  // memory writes. Read newest-first so recency never depends on how far the
+  // forward aggregate walk got (the log outgrew that window once already).
   const JOB_ACTIONS = new Set(["enqueue_job", "run_job", "fail_job"]);
-  const recentEvents = feed.events
-    .filter((event) => !JOB_ACTIONS.has(event.action))
-    .slice(-12)
-    .reverse();
+  const recentEvents: typeof feed.events = [];
+  let recentCursor: string | undefined;
+  for (let page = 0; page < 5 && recentEvents.length < 12; page += 1) {
+    const recentPage = await store.events({
+      ...(recentCursor ? { afterCursor: recentCursor } : {}),
+      limit: 100,
+      order: "desc",
+    });
+    recentEvents.push(...recentPage.events.filter((event) =>
+      !isSmokeEvent(event) && !JOB_ACTIONS.has(event.action)));
+    if (!recentPage.hasMore || !recentPage.nextCursor) break;
+    recentCursor = recentPage.nextCursor;
+  }
+  recentEvents.splice(12);
 
   return context.json({
     totals: {

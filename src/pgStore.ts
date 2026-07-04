@@ -751,13 +751,16 @@ export class PgGraphStore implements GraphStore {
 
   async events(input: EventFeedInput = { limit: 100 }): Promise<GraphEventFeed> {
     const after = input.afterCursor ? decodeEventCursor(input.afterCursor) : null;
+    const descending = input.order === "desc";
     const result = await this.pool.query(
       `select ge.id, ge.action, ge.entity_table, ge.entity_id, ge.actor_id, a.handle as actor_handle,
               ge.interface_id, ge.request_id, ge.created_at
        from graph_event ge
        left join actor a on a.id = ge.actor_id
-       where ($1::timestamptz is null or (ge.created_at, ge.id) > ($1::timestamptz, $2::uuid))
-       order by ge.created_at asc, ge.id asc
+       where ($1::timestamptz is null or ${descending
+         ? "(ge.created_at, ge.id) < ($1::timestamptz, $2::uuid)"
+         : "(ge.created_at, ge.id) > ($1::timestamptz, $2::uuid)"})
+       order by ge.created_at ${descending ? "desc" : "asc"}, ge.id ${descending ? "desc" : "asc"}
        limit $3`,
       [after?.createdAt ?? null, after?.id ?? null, input.limit + 1],
     );

@@ -294,6 +294,7 @@ export const runJobInputSchema = z.object({
 export const eventFeedInputSchema = z.object({
   afterCursor: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(500).default(100),
+  order: z.enum(["asc", "desc"]).optional(),
 }).default({ limit: 100 });
 
 export type GraphSource = z.infer<typeof graphSourceSchema>;
