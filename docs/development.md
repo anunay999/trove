@@ -126,7 +126,11 @@ The export writes `Trove Index.md`, `Trove Log.md`, `Trove Views.md`, `Trove.can
 
 ## Jobs and embeddings
 
-Graph mutations enqueue maintenance jobs (`refresh_embeddings`, `lint_graph`, `refresh_obsidian_projection`) into `graph_job`. There is no built-in background worker: drain the queue with `npm run jobs:run`, `POST /v1/jobs/run` (admin scope), or the `graph.run_job` MCP tool. Embedding refresh is provider-gated (`TROVE_EMBEDDING_PROVIDER`) and embeds up to `TROVE_EMBEDDING_JOB_LIMIT` (default 24) missing rows per run. Search stays functional without embeddings via the lexical path.
+Graph mutations enqueue maintenance jobs (`refresh_embeddings`, `lint_graph`, `refresh_obsidian_projection`) into `graph_job`, deduped by a `maintenance:<kind>` key while pending.
+
+The API server runs a background worker (`src/jobWorker.ts`) that drains the queue every `TROVE_JOB_INTERVAL_MS` (default 30s). Each tick runs up to 20 jobs; when a `refresh_embeddings` batch reports more missing rows than it embedded, the worker re-enqueues a follow-up batch, so large imports catch up across ticks. Claiming uses `for update skip locked`, so multiple instances never double-run a job. Disable with `TROVE_AUTORUN_JOBS=0`; manual draining still works via `npm run jobs:run`, `POST /v1/jobs/run` (admin scope), or the `graph.run_job` MCP tool.
+
+Embedding refresh is provider-gated (`TROVE_EMBEDDING_PROVIDER`) and embeds up to `TROVE_EMBEDDING_JOB_LIMIT` (default 24) missing rows per run. Search stays functional without embeddings via the lexical path.
 
 ## Test suites
 

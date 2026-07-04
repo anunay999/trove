@@ -42,6 +42,7 @@ import {
   type TroveScope,
 } from "./auth.js";
 import { createGraphStore } from "./createStore.js";
+import { startJobWorker } from "./jobWorker.js";
 import { createTroveMcpServer } from "./mcpTools.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
 import { graphMindTools } from "./toolDefinitions.js";
@@ -499,3 +500,21 @@ const port = Number(process.env.PORT ?? "8787");
 serve({ fetch: app.fetch, port }, (info) => {
   console.log(`Trove listening on http://localhost:${info.port} (${driver})`);
 });
+
+// Background maintenance: drain graph_job (embeddings, lint, projections) so
+// ingests become semantically searchable without a manual jobs:run. Claiming
+// uses `for update skip locked`, so extra instances stay safe. Opt out with
+// TROVE_AUTORUN_JOBS=0.
+if ((process.env.TROVE_AUTORUN_JOBS ?? "1") !== "0") {
+  const intervalMs = Number(process.env.TROVE_JOB_INTERVAL_MS ?? 30_000);
+  const worker = startJobWorker(store, {
+    intervalMs,
+    log: (message) => console.log(`[job-worker] ${message}`),
+  });
+  console.log(`Job worker running (every ${Math.round(intervalMs / 1000)}s; TROVE_AUTORUN_JOBS=0 disables).`);
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.once(signal, () => {
+      void worker.stop().finally(() => process.exit(0));
+    });
+  }
+}

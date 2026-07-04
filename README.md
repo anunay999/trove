@@ -96,11 +96,7 @@ TROVE_EMBEDDING_DIMENSIONS=1536
 OPENAI_API_KEY=sk-...
 ```
 
-New ingests queue embedding work; drain the queue with:
-
-```bash
-npm run jobs:run
-```
+New ingests are embedded automatically: a background worker in the server drains the job queue every 30 seconds. Nothing to run, nothing to schedule.
 
 ## Deploy
 

@@ -36,7 +36,8 @@
     "export:obsidian": "tsx scripts/exportObsidianVault.ts",
     "export:obsidian:test": "tsx scripts/testObsidianExport.ts",
     "import:scribe": "tsx scripts/importScribeVault.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "worker:test": "tsx scripts/testJobWorker.ts"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.8",
