@@ -1210,7 +1210,10 @@ export class PgGraphStore implements GraphStore {
 
     const provider = createEmbeddingProviderFromEnv();
     const model = provider?.model ?? process.env.GRAPHMIND_EMBEDDING_MODEL ?? "unconfigured";
-    const [nodeRevisions, textUnits, sources] = await Promise.all([
+    // Only the owner types the backfill actually embeds (and search actually
+    // reads) are counted; whole-source vectors are a future feature, and
+    // counting them here made every job report look permanently unfinished.
+    const [nodeRevisions, textUnits] = await Promise.all([
       this.pool.query(
         `select count(*)::int as count
          from node n
@@ -1237,24 +1240,11 @@ export class PgGraphStore implements GraphStore {
          )`,
         [model],
       ),
-      this.pool.query(
-        `select count(*)::int as count
-         from source s
-         where not exists (
-           select 1 from embedding e
-           where e.owner_table = 'source'
-             and e.owner_id = s.id
-             and e.model = $1
-             and e.content_sha256 = s.content_sha256
-         )`,
-        [model],
-      ),
     ]);
 
     const missing = {
       nodeRevisions: Number(nodeRevisions.rows[0]?.count ?? 0),
       textUnits: Number(textUnits.rows[0]?.count ?? 0),
-      sources: Number(sources.rows[0]?.count ?? 0),
     };
 
     if (!provider) {

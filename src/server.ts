@@ -1,3 +1,9 @@
+try {
+  process.loadEnvFile(new URL("../.env", import.meta.url).pathname);
+} catch {
+  // .env is optional; real environment variables always win.
+}
+
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
