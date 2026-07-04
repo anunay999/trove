@@ -82,12 +82,46 @@ export default function App() {
         </div>
       </header>
 
-      {error ? (
+      {error && error.includes("401") ? (
+        <div className="mx-auto mt-24 w-full max-w-sm rounded-lg border bg-card p-8">
+          <h2 className="font-serif text-xl">Connect to Trove</h2>
+          <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
+            This service requires a token. Paste one from{" "}
+            <span className="font-mono text-[12px]">TROVE_SERVICE_TOKENS</span> in{" "}
+            <span className="font-mono text-[12px]">~/dev/trove/.env</span> — the read token is
+            enough for the dashboard.
+          </p>
+          <form
+            className="mt-5 flex flex-col gap-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const value = new FormData(event.currentTarget).get("token");
+              if (typeof value === "string" && value.trim()) {
+                window.localStorage.setItem("trove_token", value.trim());
+                void load();
+              }
+            }}
+          >
+            <input
+              name="token"
+              type="password"
+              placeholder="gm_read_…"
+              autoFocus
+              className="h-9 rounded-md border bg-background px-3 font-mono text-sm outline-none placeholder:text-muted-foreground focus:border-ring"
+            />
+            <button
+              type="submit"
+              className="h-9 rounded-md bg-primary text-sm font-medium text-primary-foreground transition-transform active:scale-[0.98]"
+            >
+              Connect
+            </button>
+          </form>
+        </div>
+      ) : error ? (
         <div className="mx-auto mt-16 max-w-md rounded-lg border bg-card p-6 text-center">
           <p className="text-sm text-muted-foreground">{error}</p>
           <p className="mt-2 font-mono text-[11px] text-muted-foreground">
-            Is the Trove API running on :8787? Set a token in localStorage under
-            trove_token if the service requires auth.
+            Is the Trove API running on :8787?
           </p>
         </div>
       ) : tab === "overview" ? (
