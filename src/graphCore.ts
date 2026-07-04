@@ -493,7 +493,7 @@ export function renderMarkdownProjection(
   const related = neighborhood.nodes.filter((neighbor) => neighbor.id !== node.id);
   return [
     "---",
-    `graphmind_id: ${node.id}`,
+    `trove_id: ${node.id}`,
     `revision_id: ${node.revisionId}`,
     `type: ${node.type}`,
     `updated_at: ${node.updatedAt}`,

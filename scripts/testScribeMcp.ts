@@ -3,7 +3,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { CallToolResultSchema, ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
 
 const client = new Client({
-  name: "graphmind-scribe-smoke-client",
+  name: "trove-scribe-smoke-client",
   version: "0.1.0",
 });
 
@@ -31,7 +31,7 @@ try {
     }
   }
 
-  const query = await callTool("scribe.query", { query: "GraphMind", limit: 1 });
+  const query = await callTool("scribe.query", { query: "Trove", limit: 1 });
   const lint = await callTool("scribe.lint", {});
   const exportResult = await callTool("scribe.export_obsidian", {});
 
@@ -41,7 +41,7 @@ try {
 
   if (!Array.isArray(parsedQuery.nodes)) throw new Error("scribe.query did not return nodes.");
   if (!parsedLint.summary || !Array.isArray(parsedLint.findings)) throw new Error("scribe.lint did not return a report.");
-  if (!parsedExport.files?.["GraphMind.canvas"] || !parsedExport.manifest) {
+  if (!parsedExport.files?.["Trove.canvas"] || !parsedExport.manifest) {
     throw new Error("scribe.export_obsidian did not return an Obsidian projection.");
   }
 

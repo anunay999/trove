@@ -1,9 +1,9 @@
 ---
-name: graphmind-lint
-description: Use to health-check the GraphMind memory graph - orphan nodes, missing evidence, duplicate titles, dangling edges. Interprets graph.lint findings, separates real issues from noise, and proposes fixes (linking passes, evidence backfill, merges) without auto-applying them.
+name: trove-lint
+description: Use to health-check the Trove memory graph - orphan nodes, missing evidence, duplicate titles, dangling edges. Interprets graph.lint findings, separates real issues from noise, and proposes fixes (linking passes, evidence backfill, merges) without auto-applying them.
 ---
 
-# graphmind-lint
+# trove-lint
 
 > A memory that isn't inspected quietly rots.
 
@@ -17,7 +17,7 @@ description: Use to health-check the GraphMind memory graph - orphan nodes, miss
 
 ### Step 1 — run
 
-`graph.lint` (or read the `graphmind://lint` resource). Findings: `orphan_node`, `missing_evidence`, `duplicate_title`, `dangling_edge`.
+`graph.lint` (or read the `trove://lint` resource). Findings: `orphan_node`, `missing_evidence`, `duplicate_title`, `dangling_edge`.
 
 ### Step 2 — triage
 

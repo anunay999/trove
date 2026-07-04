@@ -1,9 +1,9 @@
 ---
-name: graphmind-recall
-description: Use when a question should be answered from the GraphMind memory graph rather than re-derived - prior projects, decisions, system knowledge, preferences, "what was I working on". Calls graph.recall for a token-budgeted context pack, synthesizes with citations, and captures non-trivial answers back so exploration compounds.
+name: trove-recall
+description: Use when a question should be answered from the Trove memory graph rather than re-derived - prior projects, decisions, system knowledge, preferences, "what was I working on". Calls graph.recall for a token-budgeted context pack, synthesizes with citations, and captures non-trivial answers back so exploration compounds.
 ---
 
-# graphmind-recall
+# trove-recall
 
 > Good answers don't disappear into chat history — they become graph atoms.
 
@@ -16,7 +16,7 @@ description: Use when a question should be answered from the GraphMind memory gr
 When **not** to use:
 
 - The answer is in the current working directory's code — read it directly.
-- Fresh research with no coverage — research first, then offer `graphmind-ingest`.
+- Fresh research with no coverage — research first, then offer `trove-ingest`.
 
 ## Process
 
@@ -40,8 +40,8 @@ graph.recall { query: "<the question, as natural language>", tokenBudget: 2000 }
 
 - Lead sentence answers the question.
 - Cite node titles/slugs for every non-trivial claim.
-- Surface gaps explicitly; offer `graphmind-ingest` for missing coverage.
-- Surface contradictions with both citations; recommend `graphmind-lint`.
+- Surface gaps explicitly; offer `trove-ingest` for missing coverage.
+- Surface contradictions with both citations; recommend `trove-lint`.
 
 ### Step 4 — file the answer back (when non-trivial)
 

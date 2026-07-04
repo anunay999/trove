@@ -39,10 +39,10 @@ import {
   operationContextFromAuth,
   requireAuthFromHeaders,
   type AuthContext,
-  type GraphMindScope,
+  type TroveScope,
 } from "./auth.js";
 import { createGraphStore } from "./createStore.js";
-import { createGraphMindMcpServer } from "./mcpTools.js";
+import { createTroveMcpServer } from "./mcpTools.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
 import { graphMindTools } from "./toolDefinitions.js";
 
@@ -55,7 +55,7 @@ app.use("/mcp", cors({
   allowHeaders: [
     "Authorization",
     "Content-Type",
-    "X-GraphMind-Interface",
+    "X-Trove-Interface",
     "X-Request-Id",
     "mcp-session-id",
     "Last-Event-ID",
@@ -67,20 +67,20 @@ app.use("/mcp", cors({
 app.get("/health", (context) => {
   return context.json({
     ok: true,
-    service: "graphmind",
+    service: "trove",
     store: driver,
-    auth: process.env.GRAPHMIND_SERVICE_TOKENS?.trim() ? "token" : "disabled",
+    auth: process.env.TROVE_SERVICE_TOKENS?.trim() ? "token" : "disabled",
   });
 });
 
 app.get("/ready", async (context) => {
   try {
     await store.health();
-    return context.json({ ok: true, service: "graphmind", store: driver });
+    return context.json({ ok: true, service: "trove", store: driver });
   } catch (error) {
     return context.json({
       ok: false,
-      service: "graphmind",
+      service: "trove",
       store: driver,
       error: error instanceof Error ? error.message : "Unknown readiness error",
     }, 503);
@@ -91,7 +91,7 @@ app.all("/mcp", async (context) => {
   try {
     const authContext = requireAuthFromHeaders(context.req.raw.headers, ["graph:read"], "mcp");
     const transport = new WebStandardStreamableHTTPServerTransport();
-    const mcpServer = createGraphMindMcpServer(store, authContext);
+    const mcpServer = createTroveMcpServer(store, authContext);
     await mcpServer.connect(transport);
     return transport.handleRequest(context.req.raw);
   } catch (error) {
@@ -469,7 +469,7 @@ app.get("/v1/scribe/export/obsidian", async (context) => {
   ));
 });
 
-function authorizeRequest(headers: Headers, scopes: GraphMindScope[]): AuthContext | Response {
+function authorizeRequest(headers: Headers, scopes: TroveScope[]): AuthContext | Response {
   try {
     return requireAuthFromHeaders(headers, scopes, "http");
   } catch (error) {
@@ -497,5 +497,5 @@ app.get("/", serveStatic({ path: "./web/dist/index.html" }));
 const port = Number(process.env.PORT ?? "8787");
 
 serve({ fetch: app.fetch, port }, (info) => {
-  console.log(`GraphMind listening on http://localhost:${info.port} (${driver})`);
+  console.log(`Trove listening on http://localhost:${info.port} (${driver})`);
 });

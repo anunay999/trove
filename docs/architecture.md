@@ -1,4 +1,4 @@
-# GraphMind Architecture
+# Trove Architecture
 
 ## Thesis
 
@@ -14,11 +14,11 @@ Today, the useful pattern is already clear:
 
 The fragile part is that markdown files are doing every job at once: storage, sync, locking, UI, graph model, audit trail, and agent API. That works locally, but it gets awkward when many devices and many agents need to coordinate.
 
-GraphMind should make the evidence-backed graph the product:
+Trove should make the evidence-backed graph the product:
 
 ```mermaid
 flowchart LR
-  Sources["Raw long-form sources"] --> API["GraphMind API"]
+  Sources["Raw long-form sources"] --> API["Trove API"]
   Agents["Agents via MCP"] --> API
   Apps["Obsidian, web map, CLI, mobile"] --> API
   API --> DB[("Postgres source of truth")]
@@ -76,7 +76,7 @@ Official references:
 - Postgres JSON path/functions: https://www.postgresql.org/docs/current/functions-json.html
 - pgvector: https://github.com/pgvector/pgvector
 
-The storage decision is explicit in [storage-decision.md](/Users/anunay/dev/graphmind/docs/storage-decision.md): Postgres is the canonical write store, Kuzu is the preferred future traversal projection, and vector databases remain optional read indexes.
+The storage decision is explicit in [storage-decision.md](/Users/anunay/dev/trove/docs/storage-decision.md): Postgres is the canonical write store, Kuzu is the preferred future traversal projection, and vector databases remain optional read indexes.
 
 ### Runtime: TypeScript Service
 
@@ -140,7 +140,7 @@ The substrate should separate durable primitives:
 
 This avoids the main markdown trap: a page can contain many facts, a long source can support many facts, and a fact can belong to multiple pages/views.
 
-See [representation.md](/Users/anunay/dev/graphmind/docs/representation.md) for the deeper model.
+See [representation.md](/Users/anunay/dev/trove/docs/representation.md) for the deeper model.
 
 ## Markdown Projection
 
@@ -160,7 +160,7 @@ flowchart TD
 Rules:
 
 - generated markdown has stable ordering
-- frontmatter includes `graphmind_id`, `revision_id`, and `updated_at`
+- frontmatter includes `trove_id`, `revision_id`, and `updated_at`
 - wikilinks are rendered from edges
 - `index.md` and `log.md` are generated from graph tables
 - manual Obsidian edits are imported as proposals, not blindly applied
@@ -277,7 +277,7 @@ An Obsidian plugin is valuable, but it should call the service. If plugin state 
 ### Phase 4: Interfaces
 
 - simple web graph explorer
-- Obsidian plugin that reads/writes through GraphMind
+- Obsidian plugin that reads/writes through Trove
 - CLI for import/export/admin
 - mobile capture endpoint
 
@@ -286,7 +286,7 @@ An Obsidian plugin is valuable, but it should call the service. If plugin state 
 The system is real when this works:
 
 1. A new agent can connect through MCP and ask "what am I working on?"
-2. GraphMind answers from the hosted graph, not from local synced files.
+2. Trove answers from the hosted graph, not from local synced files.
 3. The agent writes a useful synthesis back with citations.
 4. A second interface immediately sees the update.
 5. Obsidian export produces a clean markdown diff.

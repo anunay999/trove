@@ -13,17 +13,17 @@ const vaultExport = buildObsidianVaultExport(
   store.exportGraph(),
   "2026-07-04T00:00:00.000Z",
 );
-const outputDir = await mkdtemp(join(tmpdir(), "graphmind-obsidian-"));
+const outputDir = await mkdtemp(join(tmpdir(), "trove-obsidian-"));
 const result = await writeObsidianVaultExport(outputDir, vaultExport);
 
 assert.equal(result.written, Object.keys(vaultExport.files).length);
-assert.ok(vaultExport.files["GraphMind Index.md"]?.includes("# GraphMind Index"));
-assert.ok(vaultExport.files["GraphMind Log.md"]?.includes("# GraphMind Log"));
-assert.ok(vaultExport.files["GraphMind.canvas"]?.includes("\"nodes\""));
-assert.ok(vaultExport.files["GraphMind.canvas"]?.includes("\"edges\""));
+assert.ok(vaultExport.files["Trove Index.md"]?.includes("# Trove Index"));
+assert.ok(vaultExport.files["Trove Log.md"]?.includes("# Trove Log"));
+assert.ok(vaultExport.files["Trove.canvas"]?.includes("\"nodes\""));
+assert.ok(vaultExport.files["Trove.canvas"]?.includes("\"edges\""));
 assert.ok(Object.keys(vaultExport.files).some((path) => path.startsWith("nodes/") && path.endsWith(".md")));
 
-const manifestRaw = await readFile(join(outputDir, ".graphmind", "manifest.json"), "utf8");
+const manifestRaw = await readFile(join(outputDir, ".trove", "manifest.json"), "utf8");
 const manifest = JSON.parse(manifestRaw) as typeof vaultExport.manifest;
 assert.equal(manifest.contentSha256, vaultExport.manifest.contentSha256);
 assert.equal(manifest.fileCount, vaultExport.manifest.fileCount);

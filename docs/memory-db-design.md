@@ -33,7 +33,7 @@ A new storage engine. Every serious system composes:
 - Cloudflare Agent Memory: SQLite-in-Durable-Objects + Vectorize
 - LangChain Agent Builder: Postgres, exposed to the agent as a virtual filesystem
 
-The Kuzu CIDR 2023 paper's own criteria say a dedicated graph engine earns its keep only when recursive/multi-hop joins are the hot path; at personal/small-team scale (thousands–low-millions of atoms), recursive CTEs are fine and pgvector's known limits (HNSW build pain starts ~10M rows) are irrelevant. **The purpose-built part is the semantic layer and the query operators, not the pages-and-B-trees layer.** GraphMind's existing Postgres decision survives the step-back intact.
+The Kuzu CIDR 2023 paper's own criteria say a dedicated graph engine earns its keep only when recursive/multi-hop joins are the hot path; at personal/small-team scale (thousands–low-millions of atoms), recursive CTEs are fine and pgvector's known limits (HNSW build pain starts ~10M rows) are irrelevant. **The purpose-built part is the semantic layer and the query operators, not the pages-and-B-trees layer.** Trove's existing Postgres decision survives the step-back intact.
 
 Also verified: memory interop is greenfeld — no framework's wire format has been adopted by any other (Letta's `.af` is the closest and even Letta calls cross-framework loading theoretical). A documented export format (the Obsidian projection already is one) is a differentiator, not a compliance requirement. MCP standardizes the *protocol*, nobody has standardized the *content format*.
 
@@ -45,7 +45,7 @@ If "MemDB" were a product, its data model and query surface would be:
 Every claim and edge carries `valid_from`, `valid_until` (world time) and `recorded_at`, `expired_at` (system time), plus `invalidated_by` pointing at the superseding atom. Supersession = setting `valid_until`/`expired_at`, never `DELETE`. Queries default to "currently believed" (`expired_at IS NULL AND valid_until IS NULL`) but can time-travel on either axis: *"what did I believe about the sync worker on May 3?"*
 
 ### 2. Mandatory provenance
-No semantic atom without a path back to an episode/span (or an explicit `agent_inference` marker). GraphMind already has this via `annotation` + `text_unit`; it is the right call and rarer than it should be — Graphiti's episode subgraph is the only major production analogue.
+No semantic atom without a path back to an episode/span (or an explicit `agent_inference` marker). Trove already has this via `annotation` + `text_unit`; it is the right call and rarer than it should be — Graphiti's episode subgraph is the only major production analogue.
 
 ### 3. Write-time reconciliation (semantic compaction)
 `capture` is not an INSERT; it is: extract → resolve entities against existing nodes → detect contradictions among temporally overlapping claims → invalidate losers → link evidence → append event. Synchronously do the cheap part (exact/embedding-similarity candidate lookup); enqueue the LLM-judged part as a `graph_job`. The event log already makes this replayable.
@@ -63,9 +63,9 @@ graph.recall({ query, token_budget, as_of?, mode? })
 
 Internally: hybrid retrieval (FTS + pgvector fused with RRF) seeds a 1–2-hop traversal; candidates are activation-ranked; the packer greedily fills the budget with claims-first-then-evidence, always carrying citations. This is the operator that makes the store "agent-native" rather than "a database an agent can use."
 
-Index-side lessons to adopt from LongMemEval (all three verified to measurably improve recall): index extracted facts alongside raw text (fact-augmented keys — GraphMind's claims already are this; embed them), decompose long sources into session/section-granular units (already done via `text_unit`), and expand queries with temporal scoping (needs the bitemporal columns to exist).
+Index-side lessons to adopt from LongMemEval (all three verified to measurably improve recall): index extracted facts alongside raw text (fact-augmented keys — Trove's claims already are this; embed them), decompose long sources into session/section-granular units (already done via `text_unit`), and expand queries with temporal scoping (needs the bitemporal columns to exist).
 
-## GraphMind v2 Delta
+## Trove v2 Delta
 
 Ordered by leverage; the schema is already ~70% of the way there.
 

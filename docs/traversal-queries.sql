@@ -1,4 +1,4 @@
--- GraphMind traversal and retrieval query recipes.
+-- Trove traversal and retrieval query recipes.
 -- These are the v1 Postgres patterns before adding Kuzu as a materialized graph index.
 
 -- 1. Bounded neighborhood expansion for mind maps and agent context.

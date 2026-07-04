@@ -1,13 +1,13 @@
 import { createGraphStore } from "../src/createStore.js";
 
-const maxJobs = Number(process.env.GRAPHMIND_WORKER_MAX_JOBS ?? process.argv[2] ?? 10);
+const maxJobs = Number(process.env.TROVE_WORKER_MAX_JOBS ?? process.argv[2] ?? 10);
 if (!Number.isInteger(maxJobs) || maxJobs < 1) {
-  throw new Error("GRAPHMIND_WORKER_MAX_JOBS must be a positive integer.");
+  throw new Error("TROVE_WORKER_MAX_JOBS must be a positive integer.");
 }
 
 const { store, driver } = createGraphStore();
 const context = {
-  actorId: process.env.GRAPHMIND_WORKER_ACTOR ?? "graphmind-worker",
+  actorId: process.env.TROVE_WORKER_ACTOR ?? "trove-worker",
   interfaceId: "worker",
   requestId: `worker-${Date.now()}`,
 };

@@ -1,9 +1,9 @@
 ---
-name: graphmind-ingest
-description: Use when the user shares a source (URL, file path, paste, transcript) that should be indexed into the GraphMind memory graph. Stores the raw evidence first via graph.ingest, then captures semantic atoms citing exact text units.
+name: trove-ingest
+description: Use when the user shares a source (URL, file path, paste, transcript) that should be indexed into the Trove memory graph. Stores the raw evidence first via graph.ingest, then captures semantic atoms citing exact text units.
 ---
 
-# graphmind-ingest
+# trove-ingest
 
 > Evidence first, meaning second. The graph never contains a claim it cannot prove.
 
@@ -14,7 +14,7 @@ description: Use when the user shares a source (URL, file path, paste, transcrip
 
 When **not** to use:
 
-- Conversation-born knowledge with no external source → `graphmind-capture`.
+- Conversation-born knowledge with no external source → `trove-capture`.
 - The source is a vault page — the importer handles those (`npm run import:scribe`).
 
 ## Process
@@ -49,7 +49,7 @@ Every atom cites the exact text unit that supports it. Link atoms to existing pr
 
 ### Step 5 — confirm
 
-Source id + how many text units; atoms captured with slugs; anything that contradicted existing nodes (recommend `graphmind-update` or `graphmind-lint`).
+Source id + how many text units; atoms captured with slugs; anything that contradicted existing nodes (recommend `trove-update` or `trove-lint`).
 
 ## Anti-patterns
 

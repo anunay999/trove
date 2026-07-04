@@ -1,16 +1,16 @@
 # CLI and HTTP Client
 
-The GraphMind CLI is a thin reference client for the hosted HTTP API. It is useful for shell workflows, Raycast or Shortcuts wrappers, and as a concrete contract for future Obsidian or web clients.
+The Trove CLI is a thin reference client for the hosted HTTP API. It is useful for shell workflows, Raycast or Shortcuts wrappers, and as a concrete contract for future Obsidian or web clients.
 
 ## Environment
 
 ```bash
-export GRAPHMIND_BASE_URL=http://localhost:8787
-export GRAPHMIND_SERVICE_TOKEN=local-dev-token
-export GRAPHMIND_INTERFACE_ID=cli
+export TROVE_BASE_URL=http://localhost:8787
+export TROVE_SERVICE_TOKEN=local-dev-token
+export TROVE_INTERFACE_ID=cli
 ```
 
-`GRAPHMIND_INTERFACE_ID` is stored on `graph_event.interface_id` for writes.
+`TROVE_INTERFACE_ID` is stored on `graph_event.interface_id` for writes.
 
 ## Commands
 
@@ -23,7 +23,7 @@ npm run cli -- ready
 Query:
 
 ```bash
-npm run cli -- query "GraphMind" --limit 5 --text-units false
+npm run cli -- query "Trove" --limit 5 --text-units false
 npm run cli -- query "transactional provenance" --mode lexical
 ```
 
@@ -53,9 +53,9 @@ npm run cli -- events --after-cursor <cursor-from-previous-response>
 Create and read a saved mind-map view:
 
 ```bash
-npm run cli -- create-view --title "GraphMind Search Map" --query GraphMind
+npm run cli -- create-view --title "Trove Search Map" --query Trove
 npm run cli -- views
-npm run cli -- read-view graphmind-search-map
+npm run cli -- read-view trove-search-map
 ```
 
 List pending maintenance jobs:

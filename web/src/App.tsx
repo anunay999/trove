@@ -6,7 +6,7 @@ import { fetchGraph, fetchStats, type GraphSnapshot, type Stats } from "@/lib/ap
 type Tab = "overview" | "graph";
 
 function initialDark(): boolean {
-  const saved = window.localStorage.getItem("graphmind_theme");
+  const saved = window.localStorage.getItem("trove_theme");
   if (saved) return saved === "dark";
   return window.matchMedia("(prefers-color-scheme: dark)").matches;
 }
@@ -20,7 +20,7 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
-    window.localStorage.setItem("graphmind_theme", dark ? "dark" : "light");
+    window.localStorage.setItem("trove_theme", dark ? "dark" : "light");
   }, [dark]);
 
   const load = useCallback(async () => {
@@ -30,7 +30,7 @@ export default function App() {
       setStats(statsResult);
       setSnapshot(graphResult);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Failed to load GraphMind data.");
+      setError(cause instanceof Error ? cause.message : "Failed to load Trove data.");
     }
   }, []);
 
@@ -42,7 +42,7 @@ export default function App() {
     <div className={tab === "graph" ? "flex h-dvh flex-col overflow-hidden" : "flex min-h-screen flex-col"}>
       <header className="sticky top-0 z-20 shrink-0 border-b bg-background/90 backdrop-blur">
         <div className="mx-auto flex h-14 w-full max-w-6xl items-center gap-6 px-6">
-          <h1 className="font-serif text-xl tracking-tight">GraphMind</h1>
+          <h1 className="font-serif text-xl tracking-tight">Trove</h1>
           <nav className="flex items-center gap-1">
             {(["overview", "graph"] as Tab[]).map((candidate) => (
               <button
@@ -86,8 +86,8 @@ export default function App() {
         <div className="mx-auto mt-16 max-w-md rounded-lg border bg-card p-6 text-center">
           <p className="text-sm text-muted-foreground">{error}</p>
           <p className="mt-2 font-mono text-[11px] text-muted-foreground">
-            Is the GraphMind API running on :8787? Set a token in localStorage under
-            graphmind_token if the service requires auth.
+            Is the Trove API running on :8787? Set a token in localStorage under
+            trove_token if the service requires auth.
           </p>
         </div>
       ) : tab === "overview" ? (

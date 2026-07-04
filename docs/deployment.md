@@ -1,21 +1,21 @@
 # Deployment
 
-GraphMind can run as a compiled Node service or as a Docker Compose app service.
+Trove can run as a compiled Node service or as a Docker Compose app service.
 
 ## Runtime Contract
 
 Required in hosted mode:
 
 - `DATABASE_URL`
-- `GRAPHMIND_SERVICE_TOKENS`
+- `TROVE_SERVICE_TOKENS`
 
 Optional:
 
 - `PORT`, default `8787`
 - `RAW_BLOB_BUCKET`, reserved for object storage integration
-- `GRAPHMIND_WORKER_ID`, default `inline-worker`
-- `GRAPHMIND_WORKER_MAX_JOBS`, default `10` for the worker command
-- `GRAPHMIND_EMBEDDING_PROVIDER=openai`, `GRAPHMIND_EMBEDDING_MODEL`, `GRAPHMIND_EMBEDDING_DIMENSIONS`, and `OPENAI_API_KEY` for real embedding refresh
+- `TROVE_WORKER_ID`, default `inline-worker`
+- `TROVE_WORKER_MAX_JOBS`, default `10` for the worker command
+- `TROVE_EMBEDDING_PROVIDER=openai`, `TROVE_EMBEDDING_MODEL`, `TROVE_EMBEDDING_DIMENSIONS`, and `OPENAI_API_KEY` for real embedding refresh
 
 Service tokens use:
 
@@ -26,7 +26,7 @@ token|actor_id|scope,scope
 Example:
 
 ```bash
-GRAPHMIND_SERVICE_TOKENS='agent-token|agent|graph:read,graph:write,graph:export;admin-token|admin-agent|graph:admin'
+TROVE_SERVICE_TOKENS='agent-token|agent|graph:read,graph:write,graph:export;admin-token|admin-agent|graph:admin'
 ```
 
 ## Health Checks
@@ -41,9 +41,9 @@ Use `/ready` for load balancer and container health checks.
 ```bash
 npm ci
 npm run build
-DATABASE_URL=postgres://graphmind:graphmind@localhost:5432/graphmind npm run db:migrate:prod
-GRAPHMIND_SERVICE_TOKENS='agent-token|agent|graph:read,graph:write,graph:export;admin-token|admin-agent|graph:admin' \
-  DATABASE_URL=postgres://graphmind:graphmind@localhost:5432/graphmind \
+DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run db:migrate:prod
+TROVE_SERVICE_TOKENS='agent-token|agent|graph:read,graph:write,graph:export;admin-token|admin-agent|graph:admin' \
+  DATABASE_URL=postgres://trove:trove@localhost:5432/trove \
   npm run start:prod
 ```
 
@@ -58,7 +58,7 @@ docker compose up -d postgres
 Build and run the hosted service:
 
 ```bash
-export GRAPHMIND_SERVICE_TOKENS='local-dev-token|local-agent|graph:admin'
+export TROVE_SERVICE_TOKENS='local-dev-token|local-agent|graph:admin'
 docker compose --profile app up -d --build app
 ```
 
@@ -74,7 +74,7 @@ Verify:
 
 ```bash
 curl http://localhost:8787/ready
-GRAPHMIND_SERVICE_TOKEN=local-dev-token npm run mcp:http:test
+TROVE_SERVICE_TOKEN=local-dev-token npm run mcp:http:test
 ```
 
 ## Worker
@@ -88,10 +88,10 @@ Graph writes enqueue durable `graph_job` rows for:
 Run a bounded worker pass:
 
 ```bash
-DATABASE_URL=postgres://graphmind:graphmind@localhost:5432/graphmind npm run jobs:run
+DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run jobs:run
 ```
 
-In production, run `npm run jobs:run:prod` from a cron, platform scheduled job, or separate worker process. The worker claims pending jobs with database row locking, so multiple workers can run safely. Embedding jobs report missing coverage when no provider is configured; with `GRAPHMIND_EMBEDDING_PROVIDER=openai` and `OPENAI_API_KEY`, they batch missing node revisions and text units into `pgvector`.
+In production, run `npm run jobs:run:prod` from a cron, platform scheduled job, or separate worker process. The worker claims pending jobs with database row locking, so multiple workers can run safely. Embedding jobs report missing coverage when no provider is configured; with `TROVE_EMBEDDING_PROVIDER=openai` and `OPENAI_API_KEY`, they batch missing node revisions and text units into `pgvector`.
 
 Stop only the app:
 

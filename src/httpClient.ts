@@ -14,18 +14,18 @@ import type { GraphEventFeed, GraphJob, GraphLintReport, GraphViewSnapshot, Sear
 import type { GraphView } from "./contracts.js";
 import type { ObsidianVaultExport } from "./obsidianExport.js";
 
-export type GraphMindHttpClientOptions = {
+export type TroveHttpClientOptions = {
   baseUrl: string;
   token?: string;
   interfaceId?: string;
 };
 
-export class GraphMindHttpClient {
+export class TroveHttpClient {
   private readonly baseUrl: string;
   private readonly token: string | undefined;
   private readonly interfaceId: string;
 
-  constructor(options: GraphMindHttpClientOptions) {
+  constructor(options: TroveHttpClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.token = options.token;
     this.interfaceId = options.interfaceId ?? "cli";
@@ -102,7 +102,7 @@ export class GraphMindHttpClient {
       headers: {
         ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
         "content-type": "application/json",
-        "x-graphmind-interface": this.interfaceId,
+        "x-trove-interface": this.interfaceId,
       },
     };
     if (body !== undefined) init.body = JSON.stringify(body);

@@ -1,5 +1,5 @@
 {
-  "name": "graphmind",
+  "name": "trove",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,8 +9,8 @@
     "start": "tsx src/server.ts",
     "start:prod": "node dist/src/server.js",
     "start:container": "npm run db:migrate:prod && npm run start:prod",
-    "cli": "tsx scripts/graphmind.ts",
-    "cli:prod": "node dist/scripts/graphmind.js",
+    "cli": "tsx scripts/trove.ts",
+    "cli:prod": "node dist/scripts/trove.js",
     "mcp": "tsx src/mcpServer.ts",
     "mcp:prod": "node dist/src/mcpServer.js",
     "mcp:test": "tsx scripts/testMcp.ts",

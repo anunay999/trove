@@ -23,7 +23,7 @@ try {
     contentText: [
       "# Retrieval source",
       "",
-      "GraphMind stores long-form evidence with transactional provenance and indexed source spans.",
+      "Trove stores long-form evidence with transactional provenance and indexed source spans.",
       "Agents need to find this text without scanning markdown files directly.",
     ].join("\n"),
     metadata: { smoke: true },

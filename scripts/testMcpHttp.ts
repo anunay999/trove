@@ -8,11 +8,11 @@ import {
   ReadResourceResultSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-const endpoint = process.env.GRAPHMIND_MCP_URL ?? "http://localhost:8787/mcp";
-const serviceToken = process.env.GRAPHMIND_SERVICE_TOKEN;
+const endpoint = process.env.TROVE_MCP_URL ?? "http://localhost:8787/mcp";
+const serviceToken = process.env.TROVE_SERVICE_TOKEN;
 
 const client = new Client({
-  name: "graphmind-http-smoke-client",
+  name: "trove-http-smoke-client",
   version: "0.1.0",
 });
 
@@ -28,19 +28,19 @@ try {
   const resources = await client.request({ method: "resources/list", params: {} }, ListResourcesResultSchema);
   const prompts = await client.request({ method: "prompts/list", params: {} }, ListPromptsResultSchema);
   const timeline = await client.request(
-    { method: "resources/read", params: { uri: "graphmind://timeline" } },
+    { method: "resources/read", params: { uri: "trove://timeline" } },
     ReadResourceResultSchema,
   );
   const jobsResource = await client.request(
-    { method: "resources/read", params: { uri: "graphmind://jobs" } },
+    { method: "resources/read", params: { uri: "trove://jobs" } },
     ReadResourceResultSchema,
   );
   const viewsResource = await client.request(
-    { method: "resources/read", params: { uri: "graphmind://views" } },
+    { method: "resources/read", params: { uri: "trove://views" } },
     ReadResourceResultSchema,
   );
   const eventsResource = await client.request(
-    { method: "resources/read", params: { uri: "graphmind://events" } },
+    { method: "resources/read", params: { uri: "trove://events" } },
     ReadResourceResultSchema,
   );
   const search = await client.request(
@@ -49,7 +49,7 @@ try {
       params: {
         name: "graph.search",
         arguments: {
-          query: "GraphMind",
+          query: "Trove",
           includeTextUnits: true,
           limit: 2,
         },

@@ -1,9 +1,9 @@
 ---
-name: graphmind-update
-description: Use when a specific known fact in the GraphMind memory graph has changed - a project finished, a value corrected, a relationship replaced. Edits the node with optimistic revision checking and supersedes edges instead of deleting them, preserving belief history.
+name: trove-update
+description: Use when a specific known fact in the Trove memory graph has changed - a project finished, a value corrected, a relationship replaced. Edits the node with optimistic revision checking and supersedes edges instead of deleting them, preserving belief history.
 ---
 
-# graphmind-update
+# trove-update
 
 > The graph never forgets; it changes its mind on the record.
 
@@ -13,8 +13,8 @@ description: Use when a specific known fact in the GraphMind memory graph has ch
 
 When **not** to use:
 
-- New source to index → `graphmind-ingest`.
-- Open-ended session harvest → `graphmind-capture`.
+- New source to index → `trove-ingest`.
+- Open-ended session harvest → `trove-capture`.
 
 ## Process
 

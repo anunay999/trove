@@ -1,9 +1,9 @@
 ---
-name: graphmind-capture
-description: Use when the recent conversation produced decisions, facts, gotchas, or new concepts worth persisting to the GraphMind memory graph. Scans the session, proposes a checklist, and captures the selected items as evidence-linked graph atoms. Run at the end of substantial working sessions.
+name: trove-capture
+description: Use when the recent conversation produced decisions, facts, gotchas, or new concepts worth persisting to the Trove memory graph. Scans the session, proposes a checklist, and captures the selected items as evidence-linked graph atoms. Run at the end of substantial working sessions.
 ---
 
-# graphmind-capture
+# trove-capture
 
 > "We just had a useful conversation. Save the gold from it."
 
@@ -15,8 +15,8 @@ description: Use when the recent conversation produced decisions, facts, gotchas
 
 When **not** to use:
 
-- A specific external source to index → `graphmind-ingest`.
-- A specific known fact changed → `graphmind-update`.
+- A specific external source to index → `trove-ingest`.
+- A specific known fact changed → `trove-update`.
 - Trivial Q&A.
 
 ## Process

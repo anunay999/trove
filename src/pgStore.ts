@@ -1179,7 +1179,7 @@ export class PgGraphStore implements GraphStore {
          where id = $1
          returning id, kind, status, priority, payload, result, error, dedupe_key, attempts,
                    created_at, updated_at, started_at, finished_at`,
-        [result.rows[0].id, process.env.GRAPHMIND_WORKER_ID ?? "inline-worker"],
+        [result.rows[0].id, process.env.TROVE_WORKER_ID ?? "inline-worker"],
       );
       await client.query("commit");
       return mapJob(claimed.rows[0]);
@@ -1209,7 +1209,7 @@ export class PgGraphStore implements GraphStore {
     }
 
     const provider = createEmbeddingProviderFromEnv();
-    const model = provider?.model ?? process.env.GRAPHMIND_EMBEDDING_MODEL ?? "unconfigured";
+    const model = provider?.model ?? process.env.TROVE_EMBEDDING_MODEL ?? "unconfigured";
     // Only the owner types the backfill actually embeds (and search actually
     // reads) are counted; whole-source vectors are a future feature, and
     // counting them here made every job report look permanently unfinished.
@@ -1249,17 +1249,17 @@ export class PgGraphStore implements GraphStore {
 
     if (!provider) {
       return {
-        provider: process.env.GRAPHMIND_EMBEDDING_PROVIDER ?? "none",
+        provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "none",
         model,
         status: "skipped_no_embedding_provider",
         missing,
       };
     }
 
-    const limit = Number(asRecord(job.payload).limit ?? process.env.GRAPHMIND_EMBEDDING_JOB_LIMIT ?? 24);
+    const limit = Number(asRecord(job.payload).limit ?? process.env.TROVE_EMBEDDING_JOB_LIMIT ?? 24);
     const embedded = await this.refreshMissingEmbeddings(provider, Number.isFinite(limit) ? limit : 24);
     return {
-      provider: process.env.GRAPHMIND_EMBEDDING_PROVIDER ?? "openai",
+      provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "openai",
       model,
       status: "refreshed",
       missingBefore: missing,

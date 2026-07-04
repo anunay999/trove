@@ -1,6 +1,6 @@
 # Agent API Contract
 
-GraphMind should feel like a native tool to agents, not like a folder they have to mutate carefully.
+Trove should feel like a native tool to agents, not like a folder they have to mutate carefully.
 
 ## Interfaces
 
@@ -143,9 +143,9 @@ Scribe-compatible aliases map to the same canonical graph operations:
 
 `graph.export_obsidian`
 
-- Regenerates markdown node pages, `GraphMind Index.md`, `GraphMind Log.md`, `GraphMind.canvas`, and `.graphmind/manifest.json`.
+- Regenerates markdown node pages, `Trove Index.md`, `Trove Log.md`, `Trove.canvas`, and `.trove/manifest.json`.
 - Export is deterministic, so a diff is meaningful.
-- The disk writer removes only files listed in the previous GraphMind manifest, preserving unrelated local Obsidian files.
+- The disk writer removes only files listed in the previous Trove manifest, preserving unrelated local Obsidian files.
 
 `graph.project`
 
@@ -163,21 +163,21 @@ Scribe-compatible aliases map to the same canonical graph operations:
 Use stable URI shapes:
 
 ```text
-graphmind://health
-graphmind://lint
-graphmind://timeline
-graphmind://events
-graphmind://jobs
-graphmind://views
-graphmind://graph
-graphmind://projection/obsidian/manifest
-graphmind://node/{node_id}                         # planned
-graphmind://slug/{slug}                            # planned
-graphmind://source/{source_id}                     # planned
-graphmind://text-unit/{text_unit_id}               # planned
-graphmind://annotation/{annotation_id}             # planned
-graphmind://view/{view_id}                         # planned
-graphmind://search?q=deterministic+dedup           # planned
+trove://health
+trove://lint
+trove://timeline
+trove://events
+trove://jobs
+trove://views
+trove://graph
+trove://projection/obsidian/manifest
+trove://node/{node_id}                         # planned
+trove://slug/{slug}                            # planned
+trove://source/{source_id}                     # planned
+trove://text-unit/{text_unit_id}               # planned
+trove://annotation/{annotation_id}             # planned
+trove://view/{view_id}                         # planned
+trove://search?q=deterministic+dedup           # planned
 ```
 
 Current MCP resources expose health, lint, timeline, cursor events, jobs, saved views, graph snapshot, and Obsidian manifest. Node/source URI templates are the next resource expansion.
@@ -198,7 +198,7 @@ Destructive changes should be soft deletes first. A compaction job can hard-dele
 Current implementation:
 
 - service-token `actor_id` values are upserted into the `actor` table as agent actors
-- HTTP writes default to `interfaceId = "http"` unless `X-GraphMind-Interface` is set
+- HTTP writes default to `interfaceId = "http"` unless `X-Trove-Interface` is set
 - MCP Streamable HTTP writes default to `interfaceId = "mcp"`
 - `X-Request-Id` is preserved as `graph_event.request_id`; otherwise the service generates one
 - local stdio MCP writes use `local-stdio-agent` and `stdio-mcp`
@@ -220,7 +220,7 @@ Suggested scopes:
 
 Do not give every agent broad write access. Most agents need search/read plus capture/update with revision checks.
 
-Development mode may run without `GRAPHMIND_SERVICE_TOKENS`. Hosted mode should set scoped service tokens or OAuth. Service-token entries use `token|actor_id|scope,scope`; callers send `Authorization: Bearer <token>`.
+Development mode may run without `TROVE_SERVICE_TOKENS`. Hosted mode should set scoped service tokens or OAuth. Service-token entries use `token|actor_id|scope,scope`; callers send `Authorization: Bearer <token>`.
 
 ## Prompt Injection Boundary
 

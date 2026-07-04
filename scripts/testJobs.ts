@@ -12,7 +12,7 @@ try {
     title: `Job smoke ${Date.now()}`,
     type: "claim",
     summary: "Graph writes should enqueue durable maintenance jobs.",
-    content: "This node verifies that GraphMind schedules projection, lint, and embedding refresh work after mutations.",
+    content: "This node verifies that Trove schedules projection, lint, and embedding refresh work after mutations.",
     evidence: [],
     links: [],
   }, context);

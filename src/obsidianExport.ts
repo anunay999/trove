@@ -35,11 +35,11 @@ export function buildObsidianVaultExport(
     return path;
   });
 
-  files["GraphMind Index.md"] = renderIndex(nodePaths);
-  files["GraphMind Log.md"] = renderLog(timeline);
+  files["Trove Index.md"] = renderIndex(nodePaths);
+  files["Trove Log.md"] = renderLog(timeline);
   if (graph) {
-    files["GraphMind.canvas"] = renderCanvas(graph);
-    files["GraphMind Views.md"] = renderViewsIndex(graph.views ?? []);
+    files["Trove.canvas"] = renderCanvas(graph);
+    files["Trove Views.md"] = renderViewsIndex(graph.views ?? []);
     for (const view of graph.views ?? []) {
       const viewNodes = graph.nodes.filter((node) => view.includedNodeIds.includes(node.id));
       const viewNodeIds = new Set(viewNodes.map((node) => node.id));
@@ -56,7 +56,7 @@ export function buildObsidianVaultExport(
   }
 
   const manifest = buildManifest(files, generatedAt);
-  files[".graphmind/manifest.json"] = `${JSON.stringify(manifest, null, 2)}\n`;
+  files[".trove/manifest.json"] = `${JSON.stringify(manifest, null, 2)}\n`;
 
   return {
     manifest: buildManifest(files, generatedAt),
@@ -68,7 +68,7 @@ export async function writeObsidianVaultExport(
   outputDir: string,
   vaultExport: ObsidianVaultExport,
 ): Promise<{ outputDir: string; written: number; removed: number }> {
-  const previousManifestPath = join(outputDir, ".graphmind", "manifest.json");
+  const previousManifestPath = join(outputDir, ".trove", "manifest.json");
   const previousManifest = await readPreviousManifest(previousManifestPath);
   const nextPaths = new Set(Object.keys(vaultExport.files));
   let removed = 0;
@@ -92,11 +92,11 @@ export async function writeObsidianVaultExport(
 function renderIndex(nodePaths: string[]): string {
   return [
     "---",
-    "graphmind_projection: obsidian",
-    "graphmind_role: index",
+    "trove_projection: obsidian",
+    "trove_role: index",
     "---",
     "",
-    "# GraphMind Index",
+    "# Trove Index",
     "",
     ...nodePaths.map((path) => {
       const basename = path.split("/").at(-1)?.replace(/\.md$/, "") ?? path;
@@ -109,11 +109,11 @@ function renderIndex(nodePaths: string[]): string {
 function renderLog(timeline: GraphEvent[]): string {
   return [
     "---",
-    "graphmind_projection: obsidian",
-    "graphmind_role: log",
+    "trove_projection: obsidian",
+    "trove_role: log",
     "---",
     "",
-    "# GraphMind Log",
+    "# Trove Log",
     "",
     ...timeline.slice(0, 100).map((event) => {
       const actor = event.actorHandle ? ` by ${event.actorHandle}` : "";
@@ -128,11 +128,11 @@ function renderLog(timeline: GraphEvent[]): string {
 function renderViewsIndex(views: NonNullable<GraphSnapshot["views"]>): string {
   return [
     "---",
-    "graphmind_projection: obsidian",
-    "graphmind_role: views",
+    "trove_projection: obsidian",
+    "trove_role: views",
     "---",
     "",
-    "# GraphMind Views",
+    "# Trove Views",
     "",
     ...views
       .slice()
@@ -176,7 +176,7 @@ function renderCanvas(graph: GraphSnapshot): string {
 
 function buildManifest(files: Record<string, string>, generatedAt: string): ObsidianManifest {
   const manifestFiles = Object.entries(files)
-    .filter(([path]) => path !== ".graphmind/manifest.json")
+    .filter(([path]) => path !== ".trove/manifest.json")
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([path, content]) => ({
       path,

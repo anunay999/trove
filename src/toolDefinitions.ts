@@ -24,7 +24,7 @@ import {
 export const graphMindTools = [
   {
     name: "graph.search",
-    description: "Search GraphMind nodes with lexical, semantic, and graph-aware retrieval.",
+    description: "Search Trove nodes with lexical, semantic, and graph-aware retrieval.",
     inputSchema: searchInputSchema,
   },
   {
@@ -136,27 +136,27 @@ export const graphMindTools = [
   },
   {
     name: "scribe.query",
-    description: "Scribe-compatible query over GraphMind.",
+    description: "Scribe-compatible query over Trove.",
     inputSchema: searchInputSchema,
   },
   {
     name: "scribe.capture",
-    description: "Scribe-compatible durable capture backed by GraphMind.",
+    description: "Scribe-compatible durable capture backed by Trove.",
     inputSchema: captureInputSchema,
   },
   {
     name: "scribe.ingest",
-    description: "Scribe-compatible source ingestion backed by GraphMind.",
+    description: "Scribe-compatible source ingestion backed by Trove.",
     inputSchema: ingestInputSchema,
   },
   {
     name: "scribe.update",
-    description: "Scribe-compatible revision-checked update backed by GraphMind.",
+    description: "Scribe-compatible revision-checked update backed by Trove.",
     inputSchema: updateInputSchema,
   },
   {
     name: "scribe.lint",
-    description: "Scribe-compatible wiki health check backed by GraphMind lint.",
+    description: "Scribe-compatible wiki health check backed by Trove lint.",
   },
   {
     name: "scribe.export_obsidian",

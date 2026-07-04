@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { GraphMindHttpClient } from "../src/httpClient.js";
+import { TroveHttpClient } from "../src/httpClient.js";
 import { writeObsidianVaultExport } from "../src/obsidianExport.js";
 import type {
   CaptureInput,
@@ -17,11 +17,11 @@ type ParsedArgs = {
 
 const parsed = parseArgs(process.argv.slice(2));
 const clientOptions = {
-  baseUrl: process.env.GRAPHMIND_BASE_URL ?? "http://localhost:8787",
-  interfaceId: process.env.GRAPHMIND_INTERFACE_ID ?? "cli",
-  ...(process.env.GRAPHMIND_SERVICE_TOKEN ? { token: process.env.GRAPHMIND_SERVICE_TOKEN } : {}),
+  baseUrl: process.env.TROVE_BASE_URL ?? "http://localhost:8787",
+  interfaceId: process.env.TROVE_INTERFACE_ID ?? "cli",
+  ...(process.env.TROVE_SERVICE_TOKEN ? { token: process.env.TROVE_SERVICE_TOKEN } : {}),
 };
-const client = new GraphMindHttpClient(clientOptions);
+const client = new TroveHttpClient(clientOptions);
 
 try {
   switch (parsed.command) {
@@ -304,12 +304,12 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function printHelp(): void {
   console.log([
-    "GraphMind CLI",
+    "Trove CLI",
     "",
     "Environment:",
-    "  GRAPHMIND_BASE_URL       default http://localhost:8787",
-    "  GRAPHMIND_SERVICE_TOKEN  Bearer token for hosted service calls",
-    "  GRAPHMIND_INTERFACE_ID   default cli",
+    "  TROVE_BASE_URL       default http://localhost:8787",
+    "  TROVE_SERVICE_TOKEN  Bearer token for hosted service calls",
+    "  TROVE_INTERFACE_ID   default cli",
     "",
     "Commands:",
     "  ready",

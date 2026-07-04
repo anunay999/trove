@@ -1,11 +1,11 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { AuthContext } from "./auth.js";
 import { createGraphStore } from "./createStore.js";
-import { createGraphMindMcpServer } from "./mcpTools.js";
+import { createTroveMcpServer } from "./mcpTools.js";
 
 const { store, driver } = createGraphStore();
 const localStdioAuthContext: AuthContext = {
-  actorId: process.env.GRAPHMIND_ACTOR_ID ?? "local-stdio-agent",
+  actorId: process.env.TROVE_ACTOR_ID ?? "local-stdio-agent",
   scopes: [
     "graph:admin",
     "graph:read",
@@ -18,17 +18,17 @@ const localStdioAuthContext: AuthContext = {
   ],
   mode: "disabled",
   interfaceId: "stdio-mcp",
-  requestId: process.env.GRAPHMIND_REQUEST_ID ?? "stdio-session",
+  requestId: process.env.TROVE_REQUEST_ID ?? "stdio-session",
 };
-const server = createGraphMindMcpServer(store, localStdioAuthContext);
+const server = createTroveMcpServer(store, localStdioAuthContext);
 
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`GraphMind MCP server running on stdio (${driver})`);
+  console.error(`Trove MCP server running on stdio (${driver})`);
 }
 
 main().catch((error: unknown) => {
-  console.error("GraphMind MCP server error:", error);
+  console.error("Trove MCP server error:", error);
   process.exit(1);
 });

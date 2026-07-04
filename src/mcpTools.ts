@@ -22,24 +22,24 @@ import {
   searchInputSchema,
   updateInputSchema,
 } from "./contracts.js";
-import { assertScopes, operationContextFromAuth, type AuthContext, type GraphMindScope } from "./auth.js";
+import { assertScopes, operationContextFromAuth, type AuthContext, type TroveScope } from "./auth.js";
 import type { GraphStore } from "./graphCore.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
 
-export function createGraphMindMcpServer(store: GraphStore, authContext?: AuthContext): McpServer {
+export function createTroveMcpServer(store: GraphStore, authContext?: AuthContext): McpServer {
   const operationContext = authContext ? operationContextFromAuth(authContext) : undefined;
   const server = new McpServer({
-    name: "graphmind",
+    name: "trove",
     version: "0.1.0",
   });
 
-  registerGraphMindResources(server, store, authContext);
-  registerGraphMindPrompts(server);
+  registerTroveResources(server, store, authContext);
+  registerTrovePrompts(server);
 
   server.registerTool(
     "graph.search",
     {
-      title: "Search GraphMind",
+      title: "Search Trove",
       description: "Search semantic nodes and long-form source text units.",
       inputSchema: searchInputSchema,
     },
@@ -49,7 +49,7 @@ export function createGraphMindMcpServer(store: GraphStore, authContext?: AuthCo
   server.registerTool(
     "graph.read",
     {
-      title: "Read GraphMind Node",
+      title: "Read Trove Node",
       description: "Read a semantic node with evidence and annotations.",
       inputSchema: readInputSchema,
     },
@@ -173,7 +173,7 @@ export function createGraphMindMcpServer(store: GraphStore, authContext?: AuthCo
   server.registerTool(
     "graph.project",
     {
-      title: "Project GraphMind Node",
+      title: "Project Trove Node",
       description: "Render a node as markdown, a mind map, or an agent context pack.",
       inputSchema: projectInputSchema,
     },
@@ -202,7 +202,7 @@ export function createGraphMindMcpServer(store: GraphStore, authContext?: AuthCo
   server.registerTool(
     "graph.lint",
     {
-      title: "Lint GraphMind",
+      title: "Lint Trove",
       description: "Find graph health issues such as orphan nodes, missing evidence, duplicate titles, and dangling edges.",
     },
     async () => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.lint())),
@@ -211,7 +211,7 @@ export function createGraphMindMcpServer(store: GraphStore, authContext?: AuthCo
   server.registerTool(
     "graph.views",
     {
-      title: "List GraphMind Views",
+      title: "List Trove Views",
       description: "List saved mind-map and projection views.",
       inputSchema: listViewsInputSchema,
     },
@@ -221,7 +221,7 @@ export function createGraphMindMcpServer(store: GraphStore, authContext?: AuthCo
   server.registerTool(
     "graph.read_view",
     {
-      title: "Read GraphMind View",
+      title: "Read Trove View",
       description: "Read a saved mind-map view with included nodes and edges.",
       inputSchema: readViewInputSchema,
     },
@@ -231,7 +231,7 @@ export function createGraphMindMcpServer(store: GraphStore, authContext?: AuthCo
   server.registerTool(
     "graph.create_view",
     {
-      title: "Create GraphMind View",
+      title: "Create Trove View",
       description: "Create a durable saved mind-map view from a root node, search query, or explicit node set.",
       inputSchema: createViewInputSchema,
     },
@@ -245,7 +245,7 @@ export function createGraphMindMcpServer(store: GraphStore, authContext?: AuthCo
   server.registerTool(
     "graph.delete_view",
     {
-      title: "Delete GraphMind View",
+      title: "Delete Trove View",
       description: "Delete a saved mind-map view by id or slug.",
       inputSchema: deleteViewInputSchema,
     },
@@ -259,7 +259,7 @@ export function createGraphMindMcpServer(store: GraphStore, authContext?: AuthCo
   server.registerTool(
     "graph.jobs",
     {
-      title: "List GraphMind Jobs",
+      title: "List Trove Jobs",
       description: "List durable maintenance jobs for projections, lint, and embedding refresh.",
       inputSchema: listJobsInputSchema,
     },
@@ -269,7 +269,7 @@ export function createGraphMindMcpServer(store: GraphStore, authContext?: AuthCo
   server.registerTool(
     "graph.enqueue_job",
     {
-      title: "Enqueue GraphMind Job",
+      title: "Enqueue Trove Job",
       description: "Enqueue a durable maintenance job. Admin scope required.",
       inputSchema: enqueueJobInputSchema,
     },
@@ -283,7 +283,7 @@ export function createGraphMindMcpServer(store: GraphStore, authContext?: AuthCo
   server.registerTool(
     "graph.run_job",
     {
-      title: "Run GraphMind Job",
+      title: "Run Trove Job",
       description: "Claim and run one pending durable maintenance job inline. Admin scope required.",
       inputSchema: runJobInputSchema,
     },
@@ -312,7 +312,7 @@ export function createGraphMindMcpServer(store: GraphStore, authContext?: AuthCo
     "scribe.query",
     {
       title: "Scribe Query",
-      description: "Scribe-compatible query over the hosted GraphMind knowledge graph.",
+      description: "Scribe-compatible query over the hosted Trove knowledge graph.",
       inputSchema: searchInputSchema,
     },
     async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.search(input))),
@@ -364,7 +364,7 @@ export function createGraphMindMcpServer(store: GraphStore, authContext?: AuthCo
     "scribe.lint",
     {
       title: "Scribe Lint",
-      description: "Scribe-compatible wiki health check backed by GraphMind lint.",
+      description: "Scribe-compatible wiki health check backed by Trove lint.",
     },
     async () => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.lint())),
   );
@@ -386,28 +386,28 @@ export function createGraphMindMcpServer(store: GraphStore, authContext?: AuthCo
   return server;
 }
 
-function registerGraphMindResources(
+function registerTroveResources(
   server: McpServer,
   store: GraphStore,
   authContext: AuthContext | undefined,
 ): void {
   server.registerResource(
-    "graphmind-health",
-    "graphmind://health",
+    "trove-health",
+    "trove://health",
     {
-      title: "GraphMind Health",
-      description: "Read GraphMind store health and service status.",
+      title: "Trove Health",
+      description: "Read Trove store health and service status.",
       mimeType: "application/json",
     },
     async (uri) => withScopes(authContext, ["graph:read"], async () =>
-      jsonResource(uri, { service: "graphmind", health: await store.health() })),
+      jsonResource(uri, { service: "trove", health: await store.health() })),
   );
 
   server.registerResource(
-    "graphmind-lint",
-    "graphmind://lint",
+    "trove-lint",
+    "trove://lint",
     {
-      title: "GraphMind Lint Report",
+      title: "Trove Lint Report",
       description: "Read the current graph health report.",
       mimeType: "application/json",
     },
@@ -416,10 +416,10 @@ function registerGraphMindResources(
   );
 
   server.registerResource(
-    "graphmind-timeline",
-    "graphmind://timeline",
+    "trove-timeline",
+    "trove://timeline",
     {
-      title: "GraphMind Timeline",
+      title: "Trove Timeline",
       description: "Read recent graph mutation events.",
       mimeType: "application/json",
     },
@@ -428,10 +428,10 @@ function registerGraphMindResources(
   );
 
   server.registerResource(
-    "graphmind-events",
-    "graphmind://events",
+    "trove-events",
+    "trove://events",
     {
-      title: "GraphMind Event Feed",
+      title: "Trove Event Feed",
       description: "Read the first page of cursor-paginated graph mutation events.",
       mimeType: "application/json",
     },
@@ -440,10 +440,10 @@ function registerGraphMindResources(
   );
 
   server.registerResource(
-    "graphmind-jobs",
-    "graphmind://jobs",
+    "trove-jobs",
+    "trove://jobs",
     {
-      title: "GraphMind Jobs",
+      title: "Trove Jobs",
       description: "Read recent durable maintenance jobs.",
       mimeType: "application/json",
     },
@@ -452,10 +452,10 @@ function registerGraphMindResources(
   );
 
   server.registerResource(
-    "graphmind-views",
-    "graphmind://views",
+    "trove-views",
+    "trove://views",
     {
-      title: "GraphMind Views",
+      title: "Trove Views",
       description: "Read saved mind-map and projection views.",
       mimeType: "application/json",
     },
@@ -464,10 +464,10 @@ function registerGraphMindResources(
   );
 
   server.registerResource(
-    "graphmind-graph",
-    "graphmind://graph",
+    "trove-graph",
+    "trove://graph",
     {
-      title: "GraphMind Graph Snapshot",
+      title: "Trove Graph Snapshot",
       description: "Read the canonical node and edge snapshot used for projections.",
       mimeType: "application/json",
     },
@@ -476,10 +476,10 @@ function registerGraphMindResources(
   );
 
   server.registerResource(
-    "graphmind-obsidian-manifest",
-    "graphmind://projection/obsidian/manifest",
+    "trove-obsidian-manifest",
+    "trove://projection/obsidian/manifest",
     {
-      title: "GraphMind Obsidian Projection Manifest",
+      title: "Trove Obsidian Projection Manifest",
       description: "Read the deterministic manifest for the current Obsidian projection.",
       mimeType: "application/json",
     },
@@ -494,14 +494,14 @@ function registerGraphMindResources(
   );
 }
 
-function registerGraphMindPrompts(server: McpServer): void {
+function registerTrovePrompts(server: McpServer): void {
   server.registerPrompt(
     "scribe-query",
     {
       title: "Scribe Query",
-      description: "Query GraphMind like the old Scribe wiki, with citations and next actions.",
+      description: "Query Trove like the old Scribe wiki, with citations and next actions.",
       argsSchema: {
-        question: z.string().describe("Question or topic to query in GraphMind."),
+        question: z.string().describe("Question or topic to query in Trove."),
       },
     },
     async ({ question }) => ({
@@ -511,7 +511,7 @@ function registerGraphMindPrompts(server: McpServer): void {
           content: {
             type: "text" as const,
             text: [
-              `Query GraphMind for: ${question}`,
+              `Query Trove for: ${question}`,
               "",
               "Use scribe.query or graph.search first. Then read the most relevant node.",
               "Return a concise answer with cited node slugs or source evidence when available.",
@@ -527,7 +527,7 @@ function registerGraphMindPrompts(server: McpServer): void {
     "scribe-capture",
     {
       title: "Scribe Capture",
-      description: "Capture durable knowledge into GraphMind with evidence-first discipline.",
+      description: "Capture durable knowledge into Trove with evidence-first discipline.",
       argsSchema: {
         topic: z.string().describe("The thing that should become durable knowledge."),
       },
@@ -539,7 +539,7 @@ function registerGraphMindPrompts(server: McpServer): void {
           content: {
             type: "text" as const,
             text: [
-              `Prepare a GraphMind capture for: ${topic}`,
+              `Prepare a Trove capture for: ${topic}`,
               "",
               "Prefer scribe.ingest for raw long-form material, then scribe.capture for the semantic atom.",
               "Include title, type, summary, content, links, and evidence references when available.",
@@ -555,7 +555,7 @@ function registerGraphMindPrompts(server: McpServer): void {
     "scribe-lint",
     {
       title: "Scribe Lint",
-      description: "Review GraphMind health and propose safe cleanup steps.",
+      description: "Review Trove health and propose safe cleanup steps.",
     },
     async () => ({
       messages: [
@@ -577,7 +577,7 @@ function registerGraphMindPrompts(server: McpServer): void {
 
 async function withScopes<T>(
   authContext: AuthContext | undefined,
-  requiredScopes: GraphMindScope[],
+  requiredScopes: TroveScope[],
   action: () => Promise<T>,
 ): Promise<T> {
   if (authContext) assertScopes(authContext, requiredScopes);

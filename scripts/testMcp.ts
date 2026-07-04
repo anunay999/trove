@@ -14,7 +14,7 @@ const env = Object.fromEntries(
 );
 
 const client = new Client({
-  name: "graphmind-smoke-client",
+  name: "trove-smoke-client",
   version: "0.1.0",
 });
 
@@ -37,23 +37,23 @@ try {
   const resources = await client.request({ method: "resources/list", params: {} }, ListResourcesResultSchema);
   const prompts = await client.request({ method: "prompts/list", params: {} }, ListPromptsResultSchema);
   const lintResource = await client.request(
-    { method: "resources/read", params: { uri: "graphmind://lint" } },
+    { method: "resources/read", params: { uri: "trove://lint" } },
     ReadResourceResultSchema,
   );
   const jobsResource = await client.request(
-    { method: "resources/read", params: { uri: "graphmind://jobs" } },
+    { method: "resources/read", params: { uri: "trove://jobs" } },
     ReadResourceResultSchema,
   );
   const viewsResource = await client.request(
-    { method: "resources/read", params: { uri: "graphmind://views" } },
+    { method: "resources/read", params: { uri: "trove://views" } },
     ReadResourceResultSchema,
   );
   const eventsResource = await client.request(
-    { method: "resources/read", params: { uri: "graphmind://events" } },
+    { method: "resources/read", params: { uri: "trove://events" } },
     ReadResourceResultSchema,
   );
   const queryPrompt = await client.request(
-    { method: "prompts/get", params: { name: "scribe-query", arguments: { question: "GraphMind" } } },
+    { method: "prompts/get", params: { name: "scribe-query", arguments: { question: "Trove" } } },
     GetPromptResultSchema,
   );
   const search = await client.request(
@@ -62,7 +62,7 @@ try {
       params: {
         name: "graph.search",
         arguments: {
-          query: "GraphMind",
+          query: "Trove",
           includeTextUnits: true,
           limit: 2,
         },

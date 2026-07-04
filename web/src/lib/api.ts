@@ -88,7 +88,7 @@ export type NodeDetail = {
 };
 
 async function getJson<T>(path: string): Promise<T> {
-  const token = window.localStorage.getItem("graphmind_token");
+  const token = window.localStorage.getItem("trove_token");
   const response = await fetch(path, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
@@ -119,7 +119,7 @@ export type LogicalDocument = {
 };
 
 export async function fetchDocument(uri: string): Promise<LogicalDocument> {
-  const token = window.localStorage.getItem("graphmind_token");
+  const token = window.localStorage.getItem("trove_token");
   const response = await fetch("/v1/document", {
     method: "POST",
     headers: {
@@ -134,7 +134,7 @@ export async function fetchDocument(uri: string): Promise<LogicalDocument> {
 }
 
 export async function fetchSource(sourceId: string): Promise<SourceDocument> {
-  const token = window.localStorage.getItem("graphmind_token");
+  const token = window.localStorage.getItem("trove_token");
   const response = await fetch("/v1/source", {
     method: "POST",
     headers: {
@@ -149,7 +149,7 @@ export async function fetchSource(sourceId: string): Promise<SourceDocument> {
 }
 
 export async function fetchNode(nodeId: string): Promise<NodeDetail> {
-  const token = window.localStorage.getItem("graphmind_token");
+  const token = window.localStorage.getItem("trove_token");
   const response = await fetch("/v1/read", {
     method: "POST",
     headers: {

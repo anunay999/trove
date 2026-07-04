@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 
-export type GraphMindScope =
+export type TroveScope =
   | "graph:admin"
   | "graph:read"
   | "graph:write"
@@ -12,7 +12,7 @@ export type GraphMindScope =
 
 export type AuthContext = {
   actorId: string;
-  scopes: GraphMindScope[];
+  scopes: TroveScope[];
   mode: "disabled" | "token";
   interfaceId: string;
   requestId: string;
@@ -31,10 +31,10 @@ export class AuthError extends Error {
 type ServiceToken = {
   token: string;
   actorId: string;
-  scopes: GraphMindScope[];
+  scopes: TroveScope[];
 };
 
-const allLocalScopes: GraphMindScope[] = [
+const allLocalScopes: TroveScope[] = [
   "graph:admin",
   "graph:read",
   "graph:write",
@@ -47,10 +47,10 @@ const allLocalScopes: GraphMindScope[] = [
 
 export function requireAuthFromHeaders(
   headers: Headers,
-  requiredScopes: GraphMindScope[],
+  requiredScopes: TroveScope[],
   defaultInterfaceId = "http",
 ): AuthContext {
-  const tokens = parseServiceTokens(process.env.GRAPHMIND_SERVICE_TOKENS);
+  const tokens = parseServiceTokens(process.env.TROVE_SERVICE_TOKENS);
 
   if (tokens.length === 0) {
     return {
@@ -93,7 +93,7 @@ export function operationContextFromAuth(context: AuthContext) {
   };
 }
 
-export function assertScopes(context: AuthContext, requiredScopes: GraphMindScope[]): void {
+export function assertScopes(context: AuthContext, requiredScopes: TroveScope[]): void {
   const missing = requiredScopes.filter((scope) => !hasScope(context.scopes, scope));
   if (missing.length > 0) {
     throw new AuthError(403, "insufficient_scope", `Missing required scope: ${missing.join(", ")}`);
@@ -114,7 +114,7 @@ function parseBearerToken(authorization: string | null): string | null {
 }
 
 function interfaceIdFromHeaders(headers: Headers, defaultInterfaceId: string): string {
-  return headers.get("x-graphmind-interface")?.trim() || defaultInterfaceId;
+  return headers.get("x-trove-interface")?.trim() || defaultInterfaceId;
 }
 
 function requestIdFromHeaders(headers: Headers): string {
@@ -131,13 +131,13 @@ function parseServiceTokens(raw: string | undefined): ServiceToken[] {
     const scopes = scopesRaw
       .split(",")
       .map((scope) => scope.trim())
-      .filter(isGraphMindScope);
+      .filter(isTroveScope);
 
     return scopes.length > 0 ? [{ token, actorId, scopes }] : [];
   });
 }
 
-function isGraphMindScope(scope: string): scope is GraphMindScope {
+function isTroveScope(scope: string): scope is TroveScope {
   return [
     "graph:admin",
     "graph:read",
@@ -150,7 +150,7 @@ function isGraphMindScope(scope: string): scope is GraphMindScope {
   ].includes(scope);
 }
 
-function hasScope(scopes: GraphMindScope[], required: GraphMindScope): boolean {
+function hasScope(scopes: TroveScope[], required: TroveScope): boolean {
   if (scopes.includes("graph:admin")) return true;
   if (scopes.includes(required)) return true;
   if (required.startsWith("graph:write") && scopes.includes("graph:write")) return true;

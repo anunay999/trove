@@ -690,7 +690,7 @@ export class InMemoryGraphStore implements GraphStore {
     }
 
     return {
-      provider: process.env.GRAPHMIND_EMBEDDING_PROVIDER ?? "none",
+      provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "none",
       status: "skipped_no_embedding_provider",
       missing: {
         nodes: this.nodes.size,
@@ -814,12 +814,12 @@ export class InMemoryGraphStore implements GraphStore {
 
   private seed(): void {
     const { textUnits } = this.ingest({
-      title: "Initial GraphMind architecture note",
+      title: "Initial Trove architecture note",
       kind: "agent_note",
       contentText: [
-        "# GraphMind",
+        "# Trove",
         "",
-        "GraphMind is an evidence-backed information graph for agent-maintained memory.",
+        "Trove is an evidence-backed information graph for agent-maintained memory.",
         "",
         "Markdown, mind maps, dashboards, and agent context packs are projections over the same source-of-truth graph.",
       ].join("\n"),
@@ -828,7 +828,7 @@ export class InMemoryGraphStore implements GraphStore {
 
     const firstUnit = textUnits[0];
     const root = this.capture({
-      title: "GraphMind",
+      title: "Trove",
       type: "project",
       summary: "Hosted evidence graph for Scribe-style memory.",
       content: "Canonical storage separates raw sources, addressable text units, semantic graph atoms, and projections.",

@@ -2,10 +2,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { CallToolResultSchema, ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
 
-const baseUrl = process.env.GRAPHMIND_BASE_URL ?? "http://localhost:8787";
-const readToken = process.env.GRAPHMIND_READ_TOKEN ?? "read-token";
-const writeToken = process.env.GRAPHMIND_WRITE_TOKEN ?? "write-token";
-const adminToken = process.env.GRAPHMIND_ADMIN_TOKEN ?? "admin-token";
+const baseUrl = process.env.TROVE_BASE_URL ?? "http://localhost:8787";
+const readToken = process.env.TROVE_READ_TOKEN ?? "read-token";
+const writeToken = process.env.TROVE_WRITE_TOKEN ?? "write-token";
+const adminToken = process.env.TROVE_ADMIN_TOKEN ?? "admin-token";
 
 await expectStatus("/v1/tools", undefined, 401);
 await expectStatus("/v1/tools", readToken, 200);
@@ -21,7 +21,7 @@ await expectJsonStatus("/v1/jobs", readToken, 403, {
 });
 await expectJsonStatus("/v1/views", readToken, 403, {
   title: "Read token must not create views",
-  query: "GraphMind",
+  query: "Trove",
 });
 await expectJsonStatus("/v1/jobs/run", writeToken, 403, {});
 
@@ -98,7 +98,7 @@ async function expectMcpSearch(token: string): Promise<void> {
         params: {
           name: "graph.search",
           arguments: {
-            query: "GraphMind",
+            query: "Trove",
             limit: 1,
           },
         },
@@ -147,7 +147,7 @@ async function expectHttpCaptureAttributed(token: string): Promise<void> {
     headers: {
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
-      "x-graphmind-interface": "auth-smoke-http",
+      "x-trove-interface": "auth-smoke-http",
       "x-request-id": requestId,
     },
     body: JSON.stringify({
@@ -248,7 +248,7 @@ async function expectTimelineEvent(
 
 async function connectMcp(token: string, requestId?: string): Promise<Client> {
   const client = new Client({
-    name: "graphmind-auth-smoke-client",
+    name: "trove-auth-smoke-client",
     version: "0.1.0",
   });
 

@@ -12,7 +12,7 @@ try {
     title: `View smoke root ${Date.now()}`,
     type: "project",
     summary: "Saved views should persist durable mind-map projections.",
-    content: "This node is the root for a saved GraphMind view smoke test.",
+    content: "This node is the root for a saved Trove view smoke test.",
     evidence: [],
     links: [],
   }, context);

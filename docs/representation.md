@@ -112,7 +112,7 @@ The atomic unit should be an evidence-backed semantic atom:
 ```json
 {
   "kind": "claim",
-  "statement": "GraphMind should treat markdown as a projection, not the source of truth.",
+  "statement": "Trove should treat markdown as a projection, not the source of truth.",
   "status": "active",
   "derived_from": [
     {
@@ -128,7 +128,7 @@ The atomic unit should be an evidence-backed semantic atom:
   "edges": [
     {
       "predicate": "supports",
-      "to": "decision_graphmind_information_substrate"
+      "to": "decision_trove_information_substrate"
     }
   ]
 }
@@ -145,7 +145,7 @@ Use four retrieval modes together:
 3. Semantic search: embeddings over text units and graph atoms.
 4. Graph expansion: neighbors, communities, timelines, contradictions, dependencies.
 
-Postgres full text search is the live lexical retrieval path for GraphMind nodes, revisions, and text units. `pgvector` handles semantic retrieval in the same database when embedding refresh is configured with a real provider; otherwise hybrid search falls back to lexical rather than storing fake vectors. If scale demands it later, Qdrant or another vector store can become a specialized index, but not the canonical memory.
+Postgres full text search is the live lexical retrieval path for Trove nodes, revisions, and text units. `pgvector` handles semantic retrieval in the same database when embedding refresh is configured with a real provider; otherwise hybrid search falls back to lexical rather than storing fake vectors. If scale demands it later, Qdrant or another vector store can become a specialized index, but not the canonical memory.
 
 References:
 
@@ -187,7 +187,7 @@ Interfaces should be generated from the substrate:
 
 No projection should be the only place where meaning lives.
 
-GraphMind now treats a mind map as a `graph_view`: a durable saved projection with a root node or search query, included node ids, included edge ids, layout JSON, and a summary. Obsidian Canvas files are generated from those views, so the visual map is portable while the view definition stays canonical in Postgres.
+Trove now treats a mind map as a `graph_view`: a durable saved projection with a root node or search query, included node ids, included edge ids, layout JSON, and a summary. Obsidian Canvas files are generated from those views, so the visual map is portable while the view definition stays canonical in Postgres.
 
 ## Agent Write Model
 
@@ -213,7 +213,7 @@ That is a much better compression boundary than a giant markdown note.
 
 ## First-Principles Decision
 
-Build GraphMind as an evidence graph, not a note app.
+Build Trove as an evidence graph, not a note app.
 
 The canonical entities are:
 

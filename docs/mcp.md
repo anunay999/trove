@@ -1,8 +1,8 @@
 # MCP Access
 
-GraphMind exposes the same evidence graph through MCP so agents can read, write, link, and project knowledge without touching storage directly.
+Trove exposes the same evidence graph through MCP so agents can read, write, link, and project knowledge without touching storage directly.
 
-Use stdio when an agent runs on the same machine and can spawn GraphMind as a child process. Use Streamable HTTP when GraphMind is hosted and multiple agents or interfaces need one shared service endpoint.
+Use stdio when an agent runs on the same machine and can spawn Trove as a child process. Use Streamable HTTP when Trove is hosted and multiple agents or interfaces need one shared service endpoint.
 
 Relevant MCP references:
 
@@ -14,7 +14,7 @@ Relevant MCP references:
 Run against the local Postgres store:
 
 ```bash
-DATABASE_URL=postgres://graphmind:graphmind@localhost:5432/graphmind npm run mcp
+DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run mcp
 ```
 
 Run against the in-memory development store:
@@ -30,9 +30,9 @@ For an agent client that spawns stdio MCP servers:
 ```json
 {
   "command": "npx",
-  "args": ["tsx", "/Users/anunay/dev/graphmind/src/mcpServer.ts"],
+  "args": ["tsx", "/Users/anunay/dev/trove/src/mcpServer.ts"],
   "env": {
-    "DATABASE_URL": "postgres://graphmind:graphmind@localhost:5432/graphmind"
+    "DATABASE_URL": "postgres://trove:trove@localhost:5432/trove"
   }
 }
 ```
@@ -42,7 +42,7 @@ For an agent client that spawns stdio MCP servers:
 Start the API:
 
 ```bash
-DATABASE_URL=postgres://graphmind:graphmind@localhost:5432/graphmind npm start
+DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm start
 ```
 
 Then point remote MCP clients at:
@@ -55,12 +55,12 @@ For production, put this endpoint behind TLS plus OAuth or scoped service tokens
 
 ### Service Tokens
 
-Local development runs without auth if `GRAPHMIND_SERVICE_TOKENS` is unset. Hosted deployments should set it.
+Local development runs without auth if `TROVE_SERVICE_TOKENS` is unset. Hosted deployments should set it.
 
 Token format:
 
 ```bash
-GRAPHMIND_SERVICE_TOKENS='read-token|reader|graph:read;agent-token|agent|graph:read,graph:write,graph:export;admin-token|admin-agent|graph:admin'
+TROVE_SERVICE_TOKENS='read-token|reader|graph:read;agent-token|agent|graph:read,graph:write,graph:export;admin-token|admin-agent|graph:admin'
 ```
 
 Each entry is:
@@ -78,7 +78,7 @@ Authorization: Bearer agent-token
 Optional attribution headers:
 
 ```http
-X-GraphMind-Interface: obsidian-plugin
+X-Trove-Interface: obsidian-plugin
 X-Request-Id: request-123
 ```
 
@@ -124,21 +124,21 @@ Scribe-compatible aliases:
 - `scribe.capture` - save a durable semantic note
 - `scribe.ingest` - ingest a raw source into the evidence layer
 - `scribe.update` - update a graph node with revision checking
-- `scribe.lint` - run the GraphMind health check with Scribe naming
+- `scribe.lint` - run the Trove health check with Scribe naming
 - `scribe.export_obsidian` - export the Obsidian projection
 
 ## Resources
 
-GraphMind exposes read-only MCP resources for stable agent context:
+Trove exposes read-only MCP resources for stable agent context:
 
-- `graphmind://health` - store health
-- `graphmind://lint` - current graph health report
-- `graphmind://timeline` - recent graph mutation events
-- `graphmind://events` - first page of the cursor event feed
-- `graphmind://jobs` - recent durable maintenance jobs
-- `graphmind://views` - saved mind-map and projection views
-- `graphmind://graph` - current node and edge snapshot
-- `graphmind://projection/obsidian/manifest` - current Obsidian projection manifest
+- `trove://health` - store health
+- `trove://lint` - current graph health report
+- `trove://timeline` - recent graph mutation events
+- `trove://events` - first page of the cursor event feed
+- `trove://jobs` - recent durable maintenance jobs
+- `trove://views` - saved mind-map and projection views
+- `trove://graph` - current node and edge snapshot
+- `trove://projection/obsidian/manifest` - current Obsidian projection manifest
 
 Agents should prefer resources for read-only context and tools for operations that need input, write access, or large exports.
 
@@ -159,18 +159,18 @@ Reusable Scribe workflow prompts:
 
 The generated files include:
 
-- `GraphMind Index.md`
-- `GraphMind Log.md`
-- `GraphMind.canvas`
-- `GraphMind Views.md`
+- `Trove Index.md`
+- `Trove Log.md`
+- `Trove.canvas`
+- `Trove Views.md`
 - `views/*.canvas`
 - `nodes/*.md`
-- `.graphmind/manifest.json`
+- `.trove/manifest.json`
 
 To write the projection to disk:
 
 ```bash
-DATABASE_URL=postgres://graphmind:graphmind@localhost:5432/graphmind npm run export:obsidian -- exports/obsidian
+DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run export:obsidian -- exports/obsidian
 ```
 
 The writer uses the previous manifest to remove stale generated files without touching unrelated files in the target folder.
@@ -178,30 +178,30 @@ The writer uses the previous manifest to remove stale generated files without to
 ## Smoke Test
 
 ```bash
-DATABASE_URL=postgres://graphmind:graphmind@localhost:5432/graphmind npm run mcp:test
-DATABASE_URL=postgres://graphmind:graphmind@localhost:5432/graphmind npm run scribe:mcp:test
+DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run mcp:test
+DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run scribe:mcp:test
 ```
 
 HTTP MCP smoke test:
 
 ```bash
-DATABASE_URL=postgres://graphmind:graphmind@localhost:5432/graphmind npm start
-GRAPHMIND_MCP_URL=http://localhost:8787/mcp npm run mcp:http:test
+DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm start
+TROVE_MCP_URL=http://localhost:8787/mcp npm run mcp:http:test
 ```
 
 Token-mode auth smoke test:
 
 ```bash
-GRAPHMIND_SERVICE_TOKENS='read-token|reader|graph:read;write-token|agent|graph:read,graph:write,graph:export' \
-  DATABASE_URL=postgres://graphmind:graphmind@localhost:5432/graphmind \
+TROVE_SERVICE_TOKENS='read-token|reader|graph:read;write-token|agent|graph:read,graph:write,graph:export' \
+  DATABASE_URL=postgres://trove:trove@localhost:5432/trove \
   npm start
 
-GRAPHMIND_READ_TOKEN=read-token GRAPHMIND_WRITE_TOKEN=write-token npm run auth:test
-GRAPHMIND_SERVICE_TOKEN=write-token npm run mcp:http:test
-DATABASE_URL=postgres://graphmind:graphmind@localhost:5432/graphmind npm run events:test
-DATABASE_URL=postgres://graphmind:graphmind@localhost:5432/graphmind npm run retrieval:test
-DATABASE_URL=postgres://graphmind:graphmind@localhost:5432/graphmind npm run views:test
-DATABASE_URL=postgres://graphmind:graphmind@localhost:5432/graphmind npm run jobs:test
+TROVE_READ_TOKEN=read-token TROVE_WRITE_TOKEN=write-token npm run auth:test
+TROVE_SERVICE_TOKEN=write-token npm run mcp:http:test
+DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run events:test
+DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run retrieval:test
+DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run views:test
+DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run jobs:test
 npm run export:obsidian:test
 ```
 
@@ -209,13 +209,13 @@ Expected result:
 
 - MCP server starts on stdio.
 - Tool list includes all `graph.*` tools.
-- Resource list includes `graphmind://lint` and other stable graph URIs.
+- Resource list includes `trove://lint` and other stable graph URIs.
 - Prompt list includes the `scribe-*` workflows.
 - `graph.search` returns results from the configured store.
 - `graph.events` returns a cursor-paginated feed with `nextCursor` and `hasMore`.
 - Lexical search uses Postgres full text ranking over nodes, revisions, and text units; semantic/hybrid search uses pgvector only when real embeddings exist.
-- `graph.jobs` and `graphmind://jobs` expose queue state.
-- `graph.views` and `graphmind://views` expose saved mind maps.
+- `graph.jobs` and `trove://jobs` expose queue state.
+- `graph.views` and `trove://views` expose saved mind maps.
 - A read-only token can search but cannot capture or export.
 - HTTP and MCP writes appear in `graph.timeline` with actor, interface, and request attribution.
 - Obsidian projection includes index, log, canvas mind map, node files, and a hash manifest.

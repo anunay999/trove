@@ -1,4 +1,4 @@
--- GraphMind starter schema.
+-- Trove starter schema.
 -- This is intentionally plain Postgres: relational graph first, specialized indexes later.
 
 create extension if not exists pgcrypto;

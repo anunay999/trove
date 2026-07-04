@@ -12,11 +12,11 @@ Use this stack:
 6. Traversal v2: Kuzu as a materialized property-graph index fed from the Postgres event log.
 7. Interchange: JSON-LD and Web Annotation style selectors for portable annotations, not as the first canonical database.
 
-This gives GraphMind one robust source of truth while keeping a clean escape hatch for graph-native traversal.
+This gives Trove one robust source of truth while keeping a clean escape hatch for graph-native traversal.
 
 ## Why This Is The Right Shape
 
-GraphMind has two different workloads:
+Trove has two different workloads:
 
 - writes that must be safe: ingest, capture, update, annotate, revise, audit
 - reads that must be exploratory: semantic search, graph traversal, mind-map expansion, community summaries
@@ -93,7 +93,7 @@ Source:
 
 ### Kuzu
 
-Kuzu is the most interesting traversal companion. It is embedded, property-graph oriented, supports Cypher, and is designed for analytical workloads over large graphs. That makes it a good materialized index for GraphMind views and graph exploration.
+Kuzu is the most interesting traversal companion. It is embedded, property-graph oriented, supports Cypher, and is designed for analytical workloads over large graphs. That makes it a good materialized index for Trove views and graph exploration.
 
 Use it after the event log exists:
 
@@ -101,7 +101,7 @@ Use it after the event log exists:
 Postgres graph_event -> projection worker -> Kuzu graph index -> graph traversal / mind map / analytics
 ```
 
-Do not make Kuzu the first source of truth because GraphMind's hardest problem is not graph analytics. It is safe, provenance-rich, multi-agent writes.
+Do not make Kuzu the first source of truth because Trove's hardest problem is not graph analytics. It is safe, provenance-rich, multi-agent writes.
 
 Source:
 
@@ -124,7 +124,7 @@ Sources:
 
 ### Neo4j And Memgraph
 
-Neo4j and Memgraph are graph-first. They become attractive when the graph itself dominates the workload. GraphMind starts from long evidence, agent writes, revision history, source spans, and projections. A graph-first primary database would make those non-graph concerns feel bolted on too early.
+Neo4j and Memgraph are graph-first. They become attractive when the graph itself dominates the workload. Trove starts from long evidence, agent writes, revision history, source spans, and projections. A graph-first primary database would make those non-graph concerns feel bolted on too early.
 
 Sources:
 
@@ -133,7 +133,7 @@ Sources:
 
 ### RDF / Jena Fuseki
 
-RDF and SPARQL are compelling if external semantic interoperability is the main product. For GraphMind, they are better as export/import formats. JSON-LD can preserve linked semantics in normal JSON, and Web Annotation selectors can describe exact source targets without forcing the whole system into SPARQL.
+RDF and SPARQL are compelling if external semantic interoperability is the main product. For Trove, they are better as export/import formats. JSON-LD can preserve linked semantics in normal JSON, and Web Annotation selectors can describe exact source targets without forcing the whole system into SPARQL.
 
 Sources:
 
@@ -154,7 +154,7 @@ Sources:
 
 ```mermaid
 flowchart TD
-  Interfaces["Agents, web, Obsidian, CLI, mobile"] --> API["GraphMind API + MCP"]
+  Interfaces["Agents, web, Obsidian, CLI, mobile"] --> API["Trove API + MCP"]
   API --> PG[("Postgres canonical store")]
   API --> Blob["R2/S3 raw blobs"]
   PG --> FTS["Postgres FTS"]

@@ -5,7 +5,7 @@ export type EmbeddingProvider = {
 };
 
 export function createEmbeddingProviderFromEnv(): EmbeddingProvider | null {
-  const provider = process.env.GRAPHMIND_EMBEDDING_PROVIDER?.trim().toLowerCase();
+  const provider = process.env.TROVE_EMBEDDING_PROVIDER?.trim().toLowerCase();
   if (!provider || provider === "none") return null;
   if (provider !== "openai") {
     throw new Error(`Unsupported embedding provider: ${provider}`);
@@ -17,8 +17,8 @@ export function createEmbeddingProviderFromEnv(): EmbeddingProvider | null {
   return new OpenAiEmbeddingProvider({
     apiKey,
     baseUrl: process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1",
-    model: process.env.GRAPHMIND_EMBEDDING_MODEL ?? "text-embedding-3-small",
-    dimensions: Number(process.env.GRAPHMIND_EMBEDDING_DIMENSIONS ?? "1536"),
+    model: process.env.TROVE_EMBEDDING_MODEL ?? "text-embedding-3-small",
+    dimensions: Number(process.env.TROVE_EMBEDDING_DIMENSIONS ?? "1536"),
   });
 }
 
@@ -45,7 +45,7 @@ class OpenAiEmbeddingProvider implements EmbeddingProvider {
     this.model = options.model;
     this.dimensions = options.dimensions;
     if (this.dimensions !== 1536) {
-      throw new Error("GraphMind embedding table currently requires 1536-dimensional vectors.");
+      throw new Error("Trove embedding table currently requires 1536-dimensional vectors.");
     }
   }
 
