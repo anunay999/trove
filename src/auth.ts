@@ -10,12 +10,31 @@ export type TroveScope =
   | "graph:write:ingest"
   | "graph:export";
 
+export type AuthIdentity = {
+  userId: string;
+  clerkUserId: string;
+  email: string | null;
+  role: "admin" | "member";
+  status: "waitlisted" | "active" | "suspended";
+};
+
 export type AuthContext = {
   actorId: string;
   scopes: TroveScope[];
-  mode: "disabled" | "token";
+  mode: "disabled" | "token" | "api_key" | "clerk";
   interfaceId: string;
   requestId: string;
+  identity?: AuthIdentity;
+};
+
+/**
+ * Pluggable async credential resolvers. `resolveApiKey` handles DB-backed
+ * `trove_*` keys; `resolveClerkToken` handles Clerk session JWTs. Either may
+ * return null to signal "not mine / not valid".
+ */
+export type AuthResolvers = {
+  resolveApiKey?: (secret: string) => Promise<{ actorId: string; scopes: TroveScope[]; identity?: AuthIdentity } | null>;
+  resolveClerkToken?: (token: string) => Promise<{ actorId: string; scopes: TroveScope[]; identity: AuthIdentity } | null>;
 };
 
 export class AuthError extends Error {
@@ -45,20 +64,23 @@ const allLocalScopes: TroveScope[] = [
   "graph:export",
 ];
 
-export function requireAuthFromHeaders(
+export async function requireAuthFromHeaders(
   headers: Headers,
   requiredScopes: TroveScope[],
   defaultInterfaceId = "http",
-): AuthContext {
+  resolvers: AuthResolvers = {},
+): Promise<AuthContext> {
   const tokens = parseServiceTokens(process.env.TROVE_SERVICE_TOKENS);
+  const interfaceId = interfaceIdFromHeaders(headers, defaultInterfaceId);
+  const requestId = requestIdFromHeaders(headers);
 
   if (tokens.length === 0) {
     return {
       actorId: "local-dev",
       scopes: allLocalScopes,
       mode: "disabled",
-      interfaceId: interfaceIdFromHeaders(headers, defaultInterfaceId),
-      requestId: requestIdFromHeaders(headers),
+      interfaceId,
+      requestId,
     };
   }
 
@@ -68,21 +90,41 @@ export function requireAuthFromHeaders(
     throw new AuthError(401, "missing_token", "Missing Bearer token.");
   }
 
+  // 1. Environment service tokens (agents, MCP, ops).
   const match = tokens.find((candidate) => constantTimeEqual(candidate.token, bearerToken));
-  if (!match) {
-    throw new AuthError(401, "invalid_token", "Invalid Bearer token.");
+  if (match) {
+    const context: AuthContext = {
+      actorId: match.actorId,
+      scopes: match.scopes,
+      mode: "token",
+      interfaceId,
+      requestId,
+    };
+    assertScopes(context, requiredScopes);
+    return context;
   }
 
-  const context: AuthContext = {
-    actorId: match.actorId,
-    scopes: match.scopes,
-    mode: "token",
-    interfaceId: interfaceIdFromHeaders(headers, defaultInterfaceId),
-    requestId: requestIdFromHeaders(headers),
-  };
+  // 2. DB-backed per-user API keys.
+  if (bearerToken.startsWith("trove_") && resolvers.resolveApiKey) {
+    const resolved = await resolvers.resolveApiKey(bearerToken);
+    if (resolved) {
+      const context: AuthContext = { ...resolved, mode: "api_key", interfaceId, requestId };
+      assertScopes(context, requiredScopes);
+      return context;
+    }
+  }
 
-  assertScopes(context, requiredScopes);
-  return context;
+  // 3. Clerk session JWTs from the dashboard.
+  if (bearerToken.split(".").length === 3 && resolvers.resolveClerkToken) {
+    const resolved = await resolvers.resolveClerkToken(bearerToken);
+    if (resolved) {
+      const context: AuthContext = { ...resolved, mode: "clerk", interfaceId, requestId };
+      assertScopes(context, requiredScopes);
+      return context;
+    }
+  }
+
+  throw new AuthError(401, "invalid_token", "Invalid Bearer token.");
 }
 
 export function operationContextFromAuth(context: AuthContext) {

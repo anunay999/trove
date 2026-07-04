@@ -39,16 +39,31 @@ import {
   operationContextFromAuth,
   requireAuthFromHeaders,
   type AuthContext,
+  type AuthResolvers,
   type TroveScope,
 } from "./auth.js";
+import { createApiKeyResolver, createClerkResolver } from "./clerkAuth.js";
 import { createGraphStore } from "./createStore.js";
 import { startJobWorker } from "./jobWorker.js";
 import { createTroveMcpServer } from "./mcpTools.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
 import { graphMindTools } from "./toolDefinitions.js";
+import { UserStore, type ApiKeySummary } from "./users.js";
 
 const app = new Hono();
 const { store, driver } = createGraphStore();
+
+// User accounts and per-user API keys need Postgres; without it (in-memory
+// dev store) the Clerk/key resolvers stay off and env tokens rule alone.
+const userStore = process.env.DATABASE_URL
+  ? new UserStore({ connectionString: process.env.DATABASE_URL })
+  : null;
+const authResolvers: AuthResolvers = {};
+if (userStore) {
+  authResolvers.resolveApiKey = createApiKeyResolver(userStore);
+  const clerkResolver = createClerkResolver(userStore);
+  if (clerkResolver) authResolvers.resolveClerkToken = clerkResolver;
+}
 
 app.use("/mcp", cors({
   origin: "*",
@@ -90,7 +105,7 @@ app.get("/ready", async (context) => {
 
 app.all("/mcp", async (context) => {
   try {
-    const authContext = requireAuthFromHeaders(context.req.raw.headers, ["graph:read"], "mcp");
+    const authContext = await requireAuthFromHeaders(context.req.raw.headers, ["graph:read"], "mcp", authResolvers);
     const transport = new WebStandardStreamableHTTPServerTransport();
     const mcpServer = createTroveMcpServer(store, authContext);
     await mcpServer.connect(transport);
@@ -101,8 +116,8 @@ app.all("/mcp", async (context) => {
   }
 });
 
-app.get("/v1/tools", (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+app.get("/v1/tools", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   return context.json({
     tools: graphMindTools.map((tool) => ({
@@ -113,13 +128,13 @@ app.get("/v1/tools", (context) => {
 });
 
 app.get("/v1/graph", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   return context.json(await store.exportGraph());
 });
 
 app.get("/v1/stats", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
 
   const [snapshot, jobList, lintReport, latest, sourceRows] = await Promise.all([
@@ -241,14 +256,14 @@ app.get("/v1/stats", async (context) => {
 });
 
 app.post("/v1/search", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), searchInputSchema);
   return context.json(await store.search(input));
 });
 
 app.post("/v1/read", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), readInputSchema);
   const node = await store.read(input);
@@ -257,14 +272,14 @@ app.post("/v1/read", async (context) => {
 });
 
 app.post("/v1/neighborhood", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), neighborhoodInputSchema);
   return context.json(await store.neighborhood(input));
 });
 
 app.post("/v1/document", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), readDocumentInputSchema);
   const document = await store.readDocument(input);
@@ -273,7 +288,7 @@ app.post("/v1/document", async (context) => {
 });
 
 app.post("/v1/source", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), readSourceInputSchema);
   const source = await store.readSource(input);
@@ -282,14 +297,14 @@ app.post("/v1/source", async (context) => {
 });
 
 app.post("/v1/recall", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), recallInputSchema);
   return context.json(await store.recall(input));
 });
 
 app.post("/v1/invalidate-edge", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:write:link"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:link"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), invalidateEdgeInputSchema);
   const edge = await store.invalidateEdge(input, operationContextFromAuth(auth));
@@ -298,7 +313,7 @@ app.post("/v1/invalidate-edge", async (context) => {
 });
 
 app.post("/v1/link", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:write:link"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:link"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), linkInputSchema);
   const edge = await store.link(input, operationContextFromAuth(auth));
@@ -307,28 +322,28 @@ app.post("/v1/link", async (context) => {
 });
 
 app.post("/v1/ingest", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:write:ingest"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:ingest"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), ingestInputSchema);
   return context.json(await store.ingest(input, operationContextFromAuth(auth)), 201);
 });
 
 app.post("/v1/capture", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:write:capture"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:capture"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), captureInputSchema);
   return context.json({ node: await store.capture(input, operationContextFromAuth(auth)) }, 201);
 });
 
 app.post("/v1/annotate", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:write:update"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:update"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), annotateInputSchema);
   return context.json({ annotation: await store.annotate(input, operationContextFromAuth(auth)) }, 201);
 });
 
 app.post("/v1/update", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:write:update"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:update"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), updateInputSchema);
   const result = await store.update(input, operationContextFromAuth(auth));
@@ -338,7 +353,7 @@ app.post("/v1/update", async (context) => {
 });
 
 app.post("/v1/project", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), projectInputSchema);
   const result = await store.project(input);
@@ -347,13 +362,13 @@ app.post("/v1/project", async (context) => {
 });
 
 app.get("/v1/timeline", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   return context.json({ events: await store.timeline() });
 });
 
 app.get("/v1/events", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = eventFeedInputSchema.parse({
     afterCursor: context.req.query("afterCursor") || undefined,
@@ -363,13 +378,13 @@ app.get("/v1/events", async (context) => {
 });
 
 app.get("/v1/lint", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   return context.json(await store.lint());
 });
 
 app.get("/v1/jobs", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = listJobsInputSchema.parse({
     status: context.req.query("status"),
@@ -380,7 +395,7 @@ app.get("/v1/jobs", async (context) => {
 });
 
 app.get("/v1/views", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = listViewsInputSchema.parse({
     query: context.req.query("query") || undefined,
@@ -390,7 +405,7 @@ app.get("/v1/views", async (context) => {
 });
 
 app.post("/v1/views/read", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), readViewInputSchema);
   const view = await store.readView(input);
@@ -399,7 +414,7 @@ app.post("/v1/views/read", async (context) => {
 });
 
 app.post("/v1/views", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:write:update"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:update"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), createViewInputSchema);
   try {
@@ -413,7 +428,7 @@ app.post("/v1/views", async (context) => {
 });
 
 app.post("/v1/views/delete", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:write:update"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:update"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), deleteViewInputSchema);
   const result = await store.deleteView(input, operationContextFromAuth(auth));
@@ -422,14 +437,14 @@ app.post("/v1/views/delete", async (context) => {
 });
 
 app.post("/v1/jobs", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:admin"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:admin"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), enqueueJobInputSchema);
   return context.json({ job: await store.enqueueJob(input, operationContextFromAuth(auth)) }, 201);
 });
 
 app.post("/v1/jobs/run", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:admin"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:admin"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), runJobInputSchema);
   const job = await store.runJob(input, operationContextFromAuth(auth));
@@ -438,7 +453,7 @@ app.post("/v1/jobs/run", async (context) => {
 });
 
 app.get("/v1/export/obsidian", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:export"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:export"]);
   if (auth instanceof Response) return auth;
   return context.json(buildObsidianVaultExport(
     await store.exportMarkdown(),
@@ -448,20 +463,20 @@ app.get("/v1/export/obsidian", async (context) => {
 });
 
 app.post("/v1/scribe/query", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), searchInputSchema);
   return context.json(await store.search(input));
 });
 
 app.get("/v1/scribe/lint", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   return context.json(await store.lint());
 });
 
 app.get("/v1/scribe/export/obsidian", async (context) => {
-  const auth = authorizeRequest(context.req.raw.headers, ["graph:export"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:export"]);
   if (auth instanceof Response) return auth;
   return context.json(buildObsidianVaultExport(
     await store.exportMarkdown(),
@@ -470,9 +485,105 @@ app.get("/v1/scribe/export/obsidian", async (context) => {
   ));
 });
 
-function authorizeRequest(headers: Headers, scopes: TroveScope[]): AuthContext | Response {
+// ---- Identity, per-user API keys, admin ----------------------------------
+
+const createKeyInputSchema = z.object({
+  name: z.string().min(1).max(80),
+  scopes: z.array(z.enum(["graph:read", "graph:write", "graph:export"])).min(1),
+});
+
+const approveUserInputSchema = z.object({
+  clerkUserId: z.string().min(1),
+});
+
+// Who am I? Passes with zero scopes so waitlisted users can see their status.
+app.get("/v1/me", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, []);
+  if (auth instanceof Response) return auth;
+  return context.json({
+    actorId: auth.actorId,
+    mode: auth.mode,
+    scopes: auth.scopes,
+    identity: auth.identity ?? null,
+  });
+});
+
+function requireIdentity(auth: AuthContext): Response | NonNullable<AuthContext["identity"]> {
+  if (!auth.identity || !userStore) {
+    return new Response(
+      JSON.stringify({ error: "clerk_required", message: "Sign in with Clerk to manage API keys." }),
+      { status: 403, headers: { "content-type": "application/json" } },
+    );
+  }
+  return auth.identity;
+}
+
+app.get("/v1/keys", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, []);
+  if (auth instanceof Response) return auth;
+  const identity = requireIdentity(auth);
+  if (identity instanceof Response) return identity;
+  return context.json({ keys: await userStore!.listApiKeys(identity.userId) });
+});
+
+app.post("/v1/keys", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, []);
+  if (auth instanceof Response) return auth;
+  const identity = requireIdentity(auth);
+  if (identity instanceof Response) return identity;
+  if (identity.status !== "active") {
+    return context.json({ error: "waitlisted", message: "Your account is on the waitlist." }, 403);
+  }
+  const input = await parseJsonOrThrow(context.req.json(), createKeyInputSchema);
+  const key = await userStore!.createApiKey(identity.userId, input);
+  const { secret, ...summary } = key;
+  // The secret appears in this response only; we store just its hash.
+  return context.json({ key: summary satisfies ApiKeySummary, secret }, 201);
+});
+
+app.delete("/v1/keys/:id", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, []);
+  if (auth instanceof Response) return auth;
+  const identity = requireIdentity(auth);
+  if (identity instanceof Response) return identity;
+  const revoked = await userStore!.revokeApiKey(identity.userId, context.req.param("id"));
+  return context.json({ revoked });
+});
+
+function requireAdmin(auth: AuthContext): Response | NonNullable<AuthContext["identity"]> {
+  const identity = requireIdentity(auth);
+  if (identity instanceof Response) return identity;
+  if (identity.role !== "admin" || identity.status !== "active") {
+    return new Response(
+      JSON.stringify({ error: "admin_required", message: "Superuser access required." }),
+      { status: 403, headers: { "content-type": "application/json" } },
+    );
+  }
+  return identity;
+}
+
+app.get("/v1/admin/users", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, []);
+  if (auth instanceof Response) return auth;
+  const identity = requireAdmin(auth);
+  if (identity instanceof Response) return identity;
+  return context.json({ users: await userStore!.listUsers() });
+});
+
+app.post("/v1/admin/users/approve", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, []);
+  if (auth instanceof Response) return auth;
+  const identity = requireAdmin(auth);
+  if (identity instanceof Response) return identity;
+  const input = await parseJsonOrThrow(context.req.json(), approveUserInputSchema);
+  const approved = await userStore!.approveUser(input.clerkUserId, identity.userId);
+  if (!approved) return context.json({ error: "not_found", message: "No such user." }, 404);
+  return context.json({ user: approved });
+});
+
+async function authorizeRequest(headers: Headers, scopes: TroveScope[]): Promise<AuthContext | Response> {
   try {
-    return requireAuthFromHeaders(headers, scopes, "http");
+    return await requireAuthFromHeaders(headers, scopes, "http", authResolvers);
   } catch (error) {
     if (error instanceof AuthError) return new Response(JSON.stringify(authErrorBody(error)), {
       status: error.status,

@@ -38,9 +38,11 @@
     "import:scribe": "tsx scripts/importScribeVault.ts",
     "typecheck": "tsc --noEmit",
     "worker:test": "tsx scripts/testJobWorker.ts",
-    "update:test": "tsx scripts/testUpdate.ts"
+    "update:test": "tsx scripts/testUpdate.ts",
+    "userkeys:test": "tsx scripts/testUserKeys.ts"
   },
   "dependencies": {
+    "@clerk/backend": "^3.10.0",
     "@hono/node-server": "^2.0.8",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "hono": "^4.12.27",
