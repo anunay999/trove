@@ -140,9 +140,11 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
       .then((result) => {
         if (cancelled) return;
         setDetail(result);
+        // Newest evidence wins: after a rename/re-import the latest annotation
+        // points at the current document, older ones at historical snapshots.
         const sourceId =
-          result.node.annotations.find((annotation) => annotation.sourceId)?.sourceId ??
-          result.node.evidence.flatMap((item) => ("sourceId" in item ? [item.sourceId] : []))[0] ??
+          [...result.node.annotations].reverse().find((annotation) => annotation.sourceId)?.sourceId ??
+          result.node.evidence.flatMap((item) => ("sourceId" in item ? [item.sourceId] : [])).at(-1) ??
           null;
         if (sourceId) {
           fetchSource(sourceId)
