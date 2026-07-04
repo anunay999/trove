@@ -633,7 +633,7 @@ export class PgGraphStore implements GraphStore {
          from node n
          left join node_revision nr on nr.id = n.current_revision_id
          where n.id = $1 and n.deleted_at is null
-         for update`,
+         for update of n`,
         [input.nodeId],
       );
       if (current.rowCount === 0) {
