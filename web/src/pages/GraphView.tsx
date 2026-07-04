@@ -30,6 +30,37 @@ type VizLink = {
   predicate: string;
 };
 
+/** Click-to-copy node id, shown in the node card and document reader. */
+function NodeIdChip({ id }: { id: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      title="Copy node id"
+      onClick={() => {
+        void navigator.clipboard.writeText(id).then(() => {
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1400);
+        });
+      }}
+      className="mt-1.5 flex max-w-full items-center gap-1.5 font-mono text-[10px] text-muted-foreground transition-colors hover:text-foreground"
+    >
+      <span className="shrink-0 uppercase tracking-[0.08em]">id</span>
+      <span className="truncate">{id}</span>
+      {copied ? (
+        <svg width="11" height="11" viewBox="0 0 16 16" aria-hidden className="shrink-0">
+          <path d="M3 8.5 6.5 12 13 4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      ) : (
+        <svg width="11" height="11" viewBox="0 0 16 16" aria-hidden className="shrink-0">
+          <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+          <path d="M10.5 5.5V4a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 4v5A1.5 1.5 0 0 0 4 10.5h1.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
 export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; dark: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -390,6 +421,7 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
             {selected.degree} connections · recalled{" "}
             {detailNode ? detailNode.accessCount : selected.accessCount}x
           </p>
+          <NodeIdChip id={selected.id} />
           {!detail ? (
             <div className="mt-3 flex flex-col gap-2">
               <Skeleton className="h-3.5 w-full" />
@@ -460,6 +492,7 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
             {document.uri ? (
               <p className="mt-1.5 font-mono text-[10px] text-muted-foreground">{document.uri}</p>
             ) : null}
+            <NodeIdChip id={selected.id} />
           </header>
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
             <div

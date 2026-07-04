@@ -1,4 +1,3 @@
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatTile } from "@/components/StatTile";
 import { BarList } from "@/components/BarList";
@@ -9,24 +8,35 @@ import { HealthCard } from "@/components/HealthCard";
 import { typeColor, OTHER_LIGHT, OTHER_DARK, formatWhen } from "@/lib/viz";
 import type { NodeType, Stats } from "@/lib/api";
 
-function SectionCard({ title, meta, children }: { title: string; meta?: string; children: React.ReactNode }) {
+// Editorial layout: open sections separated by hairlines, not boxed cards.
+function Section({ title, meta, children, className = "" }: {
+  title: string;
+  meta?: string;
+  children: React.ReactNode;
+  className?: string;
+}) {
   return (
-    <Card className="flex h-full flex-col gap-4 rounded-lg border bg-card shadow-none">
-      <CardHeader className="flex-row items-baseline justify-between gap-2 space-y-0">
-        <CardTitle className="text-sm font-medium">{title}</CardTitle>
+    <section className={`flex min-w-0 flex-col py-6 ${className}`}>
+      <div className="flex items-baseline justify-between gap-2">
+        <h3 className="text-sm font-medium">{title}</h3>
         {meta ? <span className="font-mono text-[11px] text-muted-foreground">{meta}</span> : null}
-      </CardHeader>
-      <CardContent className="min-h-0 flex-1">{children}</CardContent>
-    </Card>
+      </div>
+      <div className="mt-5 min-h-0 flex-1">{children}</div>
+    </section>
   );
 }
 
 export function Overview({ stats, dark }: { stats: Stats | null; dark: boolean }) {
   if (!stats) {
     return (
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {Array.from({ length: 8 }, (_, index) => (
-          <Skeleton key={index} className="h-36 rounded-lg" />
+      <div className="flex flex-col gap-8 pt-4">
+        <div className="grid gap-6 border-y py-6 sm:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 4 }, (_, index) => (
+            <Skeleton key={index} className="h-20" />
+          ))}
+        </div>
+        {Array.from({ length: 3 }, (_, index) => (
+          <Skeleton key={index} className="h-56" />
         ))}
       </div>
     );
@@ -47,40 +57,49 @@ export function Overview({ stats, dark }: { stats: Stats | null; dark: boolean }
   }));
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="flex flex-col">
+      {/* KPI strip: numbers separated by hairlines, no boxes */}
+      <div className="grid border-y sm:grid-cols-2 xl:grid-cols-4">
         <StatTile
           label="Memories"
           value={stats.totals.nodes}
           meta={`${stats.totals.views} saved view${stats.totals.views === 1 ? "" : "s"}`}
+          className="py-6 pr-6 sm:border-r"
         />
-        <StatTile label="Active beliefs" value={stats.totals.edges} meta="edges currently held true" />
-        <StatTile label="Sources ingested" value={stats.totals.ingests} meta="evidence-backed documents" />
+        <StatTile
+          label="Active beliefs"
+          value={stats.totals.edges}
+          meta="edges currently held true"
+          className="border-t py-6 sm:border-t-0 sm:pl-6 xl:border-r xl:pr-6"
+        />
+        <StatTile
+          label="Sources ingested"
+          value={stats.totals.ingests}
+          meta="evidence-backed documents"
+          className="border-t py-6 pr-6 sm:border-r xl:border-t-0 xl:pl-6"
+        />
         <StatTile
           label="Recalls"
           value={stats.totals.totalRecalls}
           meta="reads strengthen activation"
+          className="border-t py-6 sm:pl-6 xl:border-t-0"
         />
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-5">
-        <div className="xl:col-span-3">
-          <SectionCard title="Memory timeline" meta="by document date">
-            <WritesChart stats={stats} />
-          </SectionCard>
-        </div>
-        <div className="xl:col-span-2">
-          <SectionCard title="Write cadence" meta="last 16 weeks">
-            <ActivityHeatmap stats={stats} dark={dark} />
-          </SectionCard>
-        </div>
+      <div className="grid xl:grid-cols-5">
+        <Section title="Memory timeline" meta="by document date" className="xl:col-span-3 xl:pr-8">
+          <WritesChart stats={stats} />
+        </Section>
+        <Section title="Write cadence" meta="last 16 weeks" className="border-t xl:col-span-2 xl:border-l xl:border-t-0 xl:pl-8">
+          <ActivityHeatmap stats={stats} dark={dark} />
+        </Section>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-3">
-        <SectionCard title="Composition" meta={`${stats.totals.nodes} nodes`}>
+      <div className="grid border-t xl:grid-cols-3">
+        <Section title="Composition" meta={`${stats.totals.nodes} nodes`} className="xl:pr-8">
           <BarList rows={composition} neutralColor={neutral} />
-        </SectionCard>
-        <SectionCard title="Most recalled" meta="by access count">
+        </Section>
+        <Section title="Most recalled" meta="by access count" className="border-t xl:border-l xl:border-t-0 xl:px-8">
           {recalled.length > 0 ? (
             <BarList rows={recalled} neutralColor={neutral} />
           ) : (
@@ -89,23 +108,19 @@ export function Overview({ stats, dark }: { stats: Stats | null; dark: boolean }
               retrieved memories surface here.
             </p>
           )}
-        </SectionCard>
-        <SectionCard title="Relationship types" meta={`${stats.totals.edges} edges`}>
+        </Section>
+        <Section title="Relationship types" meta={`${stats.totals.edges} edges`} className="border-t xl:border-l xl:border-t-0 xl:pl-8">
           <BarList rows={predicates} neutralColor={neutral} />
-        </SectionCard>
+        </Section>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-5">
-        <div className="xl:col-span-3">
-          <SectionCard title="Recent activity" meta="event log">
-            <RecentActivity stats={stats} />
-          </SectionCard>
-        </div>
-        <div className="xl:col-span-2">
-          <SectionCard title="Graph health" meta="lint">
-            <HealthCard stats={stats} />
-          </SectionCard>
-        </div>
+      <div className="grid border-t xl:grid-cols-5">
+        <Section title="Recent activity" meta="event log" className="xl:col-span-3 xl:pr-8">
+          <RecentActivity stats={stats} />
+        </Section>
+        <Section title="Graph health" meta="lint" className="border-t xl:col-span-2 xl:border-l xl:border-t-0 xl:pl-8">
+          <HealthCard stats={stats} />
+        </Section>
       </div>
     </div>
   );
