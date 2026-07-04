@@ -38,6 +38,23 @@ try {
     throw new Error("Updated content did not persist.");
   }
 
+  // Slug rename: update accepts a slug, normalizes it, and read-by-slug follows.
+  const renamed = await store.update({
+    nodeId: captured.id,
+    baseRevisionId: updated.revisionId,
+    slug: `Update Smoke Renamed ${Date.now()}`,
+  }, context);
+  if (!renamed || "conflict" in renamed) {
+    throw new Error(`Expected successful slug update, got ${JSON.stringify(renamed)}.`);
+  }
+  if (!/^update-smoke-renamed-\d+$/.test(renamed.slug)) {
+    throw new Error(`Expected normalized slug, got ${renamed.slug}.`);
+  }
+  const bySlug = await store.read({ slug: renamed.slug });
+  if (!bySlug || bySlug.id !== captured.id) {
+    throw new Error("Read by new slug did not resolve to the renamed node.");
+  }
+
   // Optimistic concurrency: a stale base revision must return a conflict.
   const stale = await store.update({
     nodeId: captured.id,

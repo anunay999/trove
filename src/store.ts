@@ -386,17 +386,31 @@ export class InMemoryGraphStore implements GraphStore {
     }
 
     const now = new Date().toISOString();
-    const revisionId = randomUUID();
+    const contentChanged = input.content !== undefined && input.content !== existing.content;
+    const revisionId = contentChanged ? randomUUID() : existing.revisionId;
+    let slug = existing.slug;
+    if (input.slug) {
+      const base = slugify(input.slug);
+      const owner = this.slugIndex.get(base);
+      slug = !owner || owner === existing.id ? base : this.uniqueSlug(base);
+    }
     const updated: GraphNode = {
       ...existing,
       title: input.title ?? existing.title,
       summary: input.summary ?? existing.summary,
       content: input.content ?? existing.content,
+      slug,
       revisionId,
       updatedAt: now,
     };
     this.nodes.set(updated.id, updated);
-    this.revisions.set(revisionId, { id: revisionId, nodeId: updated.id, content: updated.content, createdAt: now });
+    if (slug !== existing.slug) {
+      this.slugIndex.delete(existing.slug);
+      this.slugIndex.set(slug, updated.id);
+    }
+    if (contentChanged) {
+      this.revisions.set(revisionId, { id: revisionId, nodeId: updated.id, content: updated.content, createdAt: now });
+    }
     this.recordEvent("update", updated.id, context, now);
     this.enqueueMaintenanceJobs(context, ["refresh_obsidian_projection", "lint_graph", "refresh_embeddings"]);
     return updated;

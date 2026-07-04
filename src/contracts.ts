@@ -202,6 +202,7 @@ export const updateInputSchema = z.object({
   title: z.string().min(1).optional(),
   summary: z.string().min(1).optional(),
   content: z.string().min(1).optional(),
+  slug: z.string().min(1).optional(),
 });
 
 export const projectInputSchema = z.object({

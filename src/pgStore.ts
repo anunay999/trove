@@ -646,34 +646,51 @@ export class PgGraphStore implements GraphStore {
         return { conflict: true, currentRevisionId };
       }
 
-      const revisionNumberResult = await client.query(
-        "select coalesce(max(revision_number), 0) + 1 as next_revision from node_revision where node_id = $1",
-        [input.nodeId],
-      );
-      const revisionId = randomUUID();
-      const content = input.content ?? current.rows[0].content ?? null;
-      await client.query(
-        `insert into node_revision (
-           id, node_id, revision_number, content, projection_markdown, frontmatter, content_sha256, created_by
-         )
-         values ($1, $2, $3, $4, null, '{}'::jsonb, $5, $6)`,
-        [revisionId, input.nodeId, revisionNumberResult.rows[0].next_revision, content, sha256(content ?? ""), actorUuid],
-      );
+      // Title/summary/slug are node-level metadata; only a real content change
+      // mints a revision (the (node_id, content_sha256) unique key forbids
+      // duplicates anyway).
+      const currentContent = current.rows[0].content ?? null;
+      let revisionId = currentRevisionId;
+      if (input.content !== undefined && input.content !== currentContent) {
+        const revisionNumberResult = await client.query(
+          "select coalesce(max(revision_number), 0) + 1 as next_revision from node_revision where node_id = $1",
+          [input.nodeId],
+        );
+        revisionId = randomUUID();
+        await client.query(
+          `insert into node_revision (
+             id, node_id, revision_number, content, projection_markdown, frontmatter, content_sha256, created_by
+           )
+           values ($1, $2, $3, $4, null, '{}'::jsonb, $5, $6)`,
+          [revisionId, input.nodeId, revisionNumberResult.rows[0].next_revision, input.content, sha256(input.content), actorUuid],
+        );
+      }
+
+      let nextSlug: string | null = null;
+      if (input.slug) {
+        const base = slugify(input.slug);
+        const owner = await client.query("select id from node where slug = $1", [base]);
+        nextSlug = owner.rowCount === 0 || owner.rows[0].id === input.nodeId
+          ? base
+          : await this.uniqueSlug(base, client);
+      }
+
       await client.query(
         `update node
          set title = coalesce($1, title),
              summary = coalesce($2, summary),
-             current_revision_id = $3,
+             slug = coalesce($3, slug),
+             current_revision_id = $4,
              updated_at = now()
-         where id = $4`,
-        [input.title ?? null, input.summary ?? null, revisionId, input.nodeId],
+         where id = $5`,
+        [input.title ?? null, input.summary ?? null, nextSlug, revisionId, input.nodeId],
       );
       await this.recordEvent(
         client,
         "update",
         "node",
         input.nodeId,
-        { revisionId, title: input.title, summary: input.summary },
+        { revisionId, title: input.title, summary: input.summary, slug: nextSlug ?? undefined },
         { revisionId: currentRevisionId },
         context,
         actorUuid,
