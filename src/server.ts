@@ -36,6 +36,7 @@ import {
 import {
   AuthError,
   authErrorBody,
+  listServiceTokenSummaries,
   operationContextFromAuth,
   requireAuthFromHeaders,
   type AuthContext,
@@ -523,7 +524,10 @@ app.get("/v1/keys", async (context) => {
   if (auth instanceof Response) return auth;
   const identity = requireIdentity(auth);
   if (identity instanceof Response) return identity;
-  return context.json({ keys: await userStore!.listApiKeys(identity.userId) });
+  // Admins also see the env-configured service tokens (masked) so agent
+  // credentials aren't invisible infrastructure.
+  const serviceTokens = identity.role === "admin" ? listServiceTokenSummaries() : [];
+  return context.json({ keys: await userStore!.listApiKeys(identity.userId), serviceTokens });
 });
 
 app.post("/v1/keys", async (context) => {

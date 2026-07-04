@@ -127,6 +127,15 @@ export async function requireAuthFromHeaders(
   throw new AuthError(401, "invalid_token", "Invalid Bearer token.");
 }
 
+/** Masked view of the env-configured service tokens, for the admin keys page. */
+export function listServiceTokenSummaries(): Array<{ actorId: string; scopes: TroveScope[]; tokenPreview: string }> {
+  return parseServiceTokens(process.env.TROVE_SERVICE_TOKENS).map((token) => ({
+    actorId: token.actorId,
+    scopes: token.scopes,
+    tokenPreview: `${token.token.slice(0, 9)}…`,
+  }));
+}
+
 export function operationContextFromAuth(context: AuthContext) {
   return {
     actorId: context.actorId,

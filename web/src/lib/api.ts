@@ -194,7 +194,9 @@ export type AppUser = {
 };
 
 export const fetchMe = (): Promise<Me> => getJson<Me>("/v1/me");
-export const fetchKeys = (): Promise<{ keys: ApiKeySummary[] }> => getJson<{ keys: ApiKeySummary[] }>("/v1/keys");
+export type ServiceTokenSummary = { actorId: string; scopes: string[]; tokenPreview: string };
+export const fetchKeys = (): Promise<{ keys: ApiKeySummary[]; serviceTokens?: ServiceTokenSummary[] }> =>
+  getJson<{ keys: ApiKeySummary[]; serviceTokens?: ServiceTokenSummary[] }>("/v1/keys");
 export const createKey = (name: string, scopes: string[]): Promise<{ key: ApiKeySummary; secret: string }> =>
   sendJson("/v1/keys", { body: { name, scopes } });
 export const revokeKey = (id: string): Promise<{ revoked: boolean }> =>

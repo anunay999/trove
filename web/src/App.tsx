@@ -33,6 +33,9 @@ export default function App() {
   // OAuth providers bounce back to #/sso-callback after the drawer has
   // unmounted; a mounted Clerk callback component must finish the handshake.
   const [ssoCallback] = useState(() => window.location.hash.includes("sso-callback"));
+  // Until Clerk finishes restoring the session, showing the landing would
+  // flash it at every signed-in reload; hold a quiet splash instead.
+  const [clerkLoaded, setClerkLoaded] = useState(!clerkEnabled);
   // With Clerk enabled, a stored API key no longer auto-opens the dashboard —
   // the landing is the front door; the key path is an explicit choice.
   const [tokenDashboard, setTokenDashboard] = useState(false);
@@ -57,7 +60,8 @@ export default function App() {
     void load();
   }, [load]);
 
-  const onSessionChange = useCallback((isSignedIn: boolean) => {
+  const onSessionChange = useCallback((isSignedIn: boolean, loaded: boolean) => {
+    setClerkLoaded(loaded);
     setSignedIn(isSignedIn);
     if (isSignedIn) {
       setDrawer((current) => ({ ...current, open: false }));
@@ -74,7 +78,8 @@ export default function App() {
   const hasApiToken = !!window.localStorage.getItem("trove_token");
   const tokenMode = !signedIn && hasApiToken && (tokenDashboard || !clerkEnabled);
   const dashboardReady = !error && (signedIn ? !isWaitlisted : tokenMode);
-  const showLanding = clerkEnabled && !signedIn && !tokenMode && signedOutView === "landing";
+  const clerkSettling = clerkEnabled && !clerkLoaded;
+  const showLanding = clerkEnabled && clerkLoaded && !signedIn && !tokenMode && signedOutView === "landing";
   const showConnect = !signedIn && !dashboardReady && signedOutView === "connect";
 
   const disconnectKey = useCallback(() => {
@@ -161,7 +166,11 @@ export default function App() {
         </div>
       </header>
 
-      {isWaitlisted ? (
+      {clerkSettling ? (
+        <div className="flex flex-1 items-center justify-center">
+          <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Loading…</p>
+        </div>
+      ) : isWaitlisted ? (
         <WaitlistGate email={identity?.email ?? null} dark={dark} />
       ) : showLanding ? (
         <Landing

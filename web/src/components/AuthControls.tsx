@@ -8,9 +8,9 @@ import { setSessionTokenProvider } from "@/lib/api";
  */
 export function AuthControls({ onOpenLogin, onSessionChange }: {
   onOpenLogin: () => void;
-  onSessionChange: (signedIn: boolean) => void;
+  onSessionChange: (signedIn: boolean, loaded: boolean) => void;
 }) {
-  const { isSignedIn, getToken } = useAuth();
+  const { isSignedIn, isLoaded, getToken } = useAuth();
 
   useEffect(() => {
     if (isSignedIn) {
@@ -18,8 +18,8 @@ export function AuthControls({ onOpenLogin, onSessionChange }: {
     } else {
       setSessionTokenProvider(null);
     }
-    onSessionChange(!!isSignedIn);
-  }, [isSignedIn, getToken, onSessionChange]);
+    onSessionChange(!!isSignedIn, isLoaded);
+  }, [isSignedIn, isLoaded, getToken, onSessionChange]);
 
   return (
     <>

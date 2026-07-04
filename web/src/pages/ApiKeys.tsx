@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { createKey, fetchKeys, revokeKey, type ApiKeySummary } from "@/lib/api";
+import { createKey, fetchKeys, revokeKey, type ApiKeySummary, type ServiceTokenSummary } from "@/lib/api";
 
 const SCOPE_OPTIONS = [
   { scope: "graph:read", label: "Read", hint: "search, recall, dashboard" },
@@ -9,6 +9,7 @@ const SCOPE_OPTIONS = [
 
 export function ApiKeys() {
   const [keys, setKeys] = useState<ApiKeySummary[] | null>(null);
+  const [serviceTokens, setServiceTokens] = useState<ServiceTokenSummary[]>([]);
   const [name, setName] = useState("");
   const [scopes, setScopes] = useState<string[]>(["graph:read"]);
   const [freshSecret, setFreshSecret] = useState<string | null>(null);
@@ -20,6 +21,7 @@ export function ApiKeys() {
     try {
       const result = await fetchKeys();
       setKeys(result.keys);
+      setServiceTokens(result.serviceTokens ?? []);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Failed to load keys.");
     }
@@ -168,6 +170,30 @@ export function ApiKeys() {
           </p>
         )}
       </div>
+
+      {serviceTokens.length > 0 && (
+        <div className="mt-10">
+          <h3 className="text-sm font-semibold">Service tokens</h3>
+          <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">
+            Environment-configured agent credentials (MCP, scripts). Managed via <code className="rounded bg-secondary px-1 py-0.5 font-mono text-[11px]">TROVE_SERVICE_TOKENS</code>, not from this page.
+          </p>
+          <ul className="mt-3 divide-y rounded-lg border bg-card">
+            {serviceTokens.map((token) => (
+              <li key={token.actorId} className="flex items-center gap-4 px-5 py-3">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">{token.actorId}</p>
+                  <p className="mt-0.5 font-mono text-[11px] text-muted-foreground">
+                    {token.tokenPreview}  ·  {token.scopes.join(", ")}
+                  </p>
+                </div>
+                <span className="shrink-0 rounded-full bg-secondary px-2.5 py-1 font-mono text-[11px] uppercase tracking-[0.05em] text-muted-foreground">
+                  env
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
