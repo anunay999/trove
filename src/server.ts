@@ -147,11 +147,18 @@ app.get("/v1/stats", async (context) => {
     sourcesPerDay.set(date, entry);
   }
 
+  // Test suites tag their writes with "-smoke" actors; the audit log keeps
+  // them forever, but the dashboard should reflect real memory activity.
+  const isSmokeEvent = (event: (typeof latest)[number]): boolean =>
+    (event.actorHandle ?? "").endsWith("-smoke") ||
+    (event.actorId ?? "").endsWith("-smoke") ||
+    (event.interfaceId ?? "").endsWith("-smoke");
+
   const allEvents: Awaited<ReturnType<typeof store.timeline>> = [];
   let cursor: string | undefined;
   for (let page = 0; page < 6; page += 1) {
     const feedPage = await store.events(cursor ? { afterCursor: cursor, limit: 500 } : { limit: 500 });
-    allEvents.push(...feedPage.events);
+    allEvents.push(...feedPage.events.filter((event) => !isSmokeEvent(event)));
     if (!feedPage.hasMore || !feedPage.nextCursor) break;
     cursor = feedPage.nextCursor;
   }
@@ -192,7 +199,14 @@ app.get("/v1/stats", async (context) => {
       lastAccessedAt: node.lastAccessedAt,
     }));
 
-  const recentEvents = latest.slice(0, 12);
+  // Job-queue churn is summarized on the health card; the activity feed shows
+  // memory writes. Draw from the full walked pool: a busy worker can flood the
+  // small timeline window with job events.
+  const JOB_ACTIONS = new Set(["enqueue_job", "run_job", "fail_job"]);
+  const recentEvents = feed.events
+    .filter((event) => !JOB_ACTIONS.has(event.action))
+    .slice(-12)
+    .reverse();
 
   return context.json({
     totals: {

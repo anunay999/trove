@@ -62,6 +62,7 @@ export type Stats = {
     id: string;
     action: string;
     entityTable: string;
+    entityId: string;
     actorHandle: string | null;
     interfaceId: string | null;
     createdAt: string;

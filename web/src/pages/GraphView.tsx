@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import DOMPurify from "dompurify";
-import { marked } from "marked";
 import ForceGraph2D from "react-force-graph-2d";
 import { Skeleton } from "@/components/ui/skeleton";
+import { plainText, renderDocument } from "@/lib/markdown";
 import { typeColor } from "@/lib/viz";
 import {
   fetchDocument,
@@ -30,30 +29,6 @@ type VizLink = {
   target: string | VizNode;
   predicate: string;
 };
-
-// Imported summaries carry raw markdown; render them as clean prose.
-function plainText(markdown: string): string {
-  return markdown
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/\*([^*]+)\*/g, "$1")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, target, alias) => alias ?? target)
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
-}
-
-// Render a vault document the way Obsidian would: frontmatter stripped,
-// wikilinks flattened to their labels, markdown to sanitized HTML.
-function renderDocument(markdown: string): string {
-  const withoutFrontmatter = markdown.startsWith("---\n")
-    ? markdown.slice(markdown.indexOf("\n---", 4) + 4)
-    : markdown;
-  const withLinks = withoutFrontmatter.replace(
-    /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
-    (_m, target, alias) => alias ?? target,
-  );
-  const html = marked.parse(withLinks, { async: false }) as string;
-  return DOMPurify.sanitize(html);
-}
 
 export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; dark: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null);
