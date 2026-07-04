@@ -26,15 +26,29 @@ const N = {
   fri: { x: 78, y: 72 },
 };
 
-// Ambient constellation: unlabeled memories that make it read as a graph.
+// Ambient constellation: three loose clusters (like force-layout communities)
+// so the backdrop reads as a real knowledge graph, not a wireframe ring.
 const BG = [
-  { x: 6, y: 44 }, { x: 24, y: 58 }, { x: 12, y: 88 }, { x: 46, y: 8 },
-  { x: 68, y: 18 }, { x: 90, y: 34 }, { x: 88, y: 88 }, { x: 62, y: 92 },
+  // cluster A — top right
+  { x: 68, y: 10, r: 1.5 }, { x: 80, y: 18, r: 2 }, { x: 72, y: 26, r: 1.5 },
+  { x: 88, y: 10, r: 1 }, { x: 90, y: 26, r: 1.5 },
+  // cluster B — mid left
+  { x: 8, y: 40, r: 1.5 }, { x: 4, y: 56, r: 1 }, { x: 16, y: 52, r: 2 },
+  { x: 12, y: 68, r: 1.5 }, { x: 24, y: 62, r: 1 },
+  // cluster C — bottom
+  { x: 54, y: 90, r: 1.5 }, { x: 66, y: 84, r: 2 }, { x: 46, y: 96, r: 1 },
+  { x: 78, y: 94, r: 1.5 }, { x: 88, y: 84, r: 1 },
 ];
 const BG_EDGES: Array<[{ x: number; y: number }, { x: number; y: number }]> = [
-  [BG[0], N.source], [BG[0], BG[1]], [BG[1], N.sarah], [BG[2], BG[1]],
-  [BG[3], N.source], [BG[3], BG[4]], [BG[4], N.redesign], [BG[5], BG[4]],
-  [BG[5], N.fri], [BG[6], N.fri], [BG[7], N.redesign], [BG[6], BG[7]],
+  // cluster A triangles
+  [BG[0], BG[1]], [BG[0], BG[2]], [BG[1], BG[2]], [BG[1], BG[3]], [BG[1], BG[4]], [BG[2], BG[4]],
+  // cluster B triangles
+  [BG[5], BG[6]], [BG[5], BG[7]], [BG[6], BG[7]], [BG[7], BG[8]], [BG[7], BG[9]], [BG[8], BG[9]],
+  // cluster C triangles
+  [BG[10], BG[11]], [BG[10], BG[12]], [BG[11], BG[13]], [BG[13], BG[14]], [BG[11], BG[14]],
+  // bridges into the story
+  [BG[7], N.source], [BG[9], N.sarah], [BG[2], N.redesign], [BG[11], N.fri],
+  [BG[11], N.redesign], [BG[8], N.wed], [BG[4], N.fri],
 ];
 
 function edgePath(a: { x: number; y: number }, b: { x: number; y: number }) {
@@ -144,7 +158,7 @@ export function MemoryStory() {
             <path
               key={`bg-${index}`}
               d={edgePath(a, b)}
-              className="stroke-muted-foreground/20"
+              className="stroke-muted-foreground/15"
               strokeWidth="1"
               vectorEffect="non-scaling-stroke"
               fill="none"
@@ -208,13 +222,13 @@ export function MemoryStory() {
         {BG.map((at, index) => (
           <span
             key={`bgn-${index}`}
-            className="absolute size-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-muted-foreground/30"
-            style={{ left: `${at.x}%`, top: `${at.y}%` }}
+            className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full bg-muted-foreground/30"
+            style={{ left: `${at.x}%`, top: `${at.y}%`, width: `${at.r * 4}px`, height: `${at.r * 4}px` }}
           />
         ))}
 
         <Node at={N.source} label="standup notes · mon" kind="source" visible pulse={false} />
-        <Node at={N.sarah} label="sarah · designer" kind="fact" visible pulse={recalling} />
+        <Node at={N.sarah} label="sarah · designer" kind="fact" visible pulse={recalling} labelSide="left" />
         <Node at={N.redesign} label="website-redesign" kind="fact" visible={phase >= 1} pulse={recalling} />
         <Node at={N.wed} label="deadline · wednesday" kind={superseded ? "expired" : "fact"} visible={phase >= 1} pulse={false} labelSide="below" />
         <Node at={N.fri} label="deadline · friday" kind="fact" visible={phase >= 2} pulse={recalling} labelSide="below" />
@@ -228,7 +242,7 @@ export function MemoryStory() {
               exit={{ opacity: 0 }}
               transition={{ duration: 0.4, delay: 0.9 }}
               className="absolute -translate-x-1/2 rounded-full border bg-background/80 px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.08em] text-muted-foreground backdrop-blur"
-              style={{ left: `${(N.redesign.x + N.wed.x) / 2 - 10}%`, top: `${(N.redesign.y + N.wed.y) / 2}%` }}
+              style={{ left: `${N.wed.x}%`, top: `${N.wed.y + 16}%` }}
             >
               superseded · kept in history
             </motion.span>
