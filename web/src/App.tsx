@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { AuthenticateWithRedirectCallback } from "@clerk/clerk-react";
 import { Overview } from "@/pages/Overview";
 import { GraphView } from "@/pages/GraphView";
 import { Landing } from "@/pages/Landing";
@@ -29,6 +30,12 @@ export default function App() {
   const [signedIn, setSignedIn] = useState(false);
   const [drawer, setDrawer] = useState<{ open: boolean; mode: "sign-in" | "sign-up"; email?: string }>({ open: false, mode: "sign-in" });
   const [signedOutView, setSignedOutView] = useState<"landing" | "connect">("landing");
+  // OAuth providers bounce back to #/sso-callback after the drawer has
+  // unmounted; a mounted Clerk callback component must finish the handshake.
+  const [ssoCallback] = useState(() => window.location.hash.includes("sso-callback"));
+  // With Clerk enabled, a stored API key no longer auto-opens the dashboard —
+  // the landing is the front door; the key path is an explicit choice.
+  const [tokenDashboard, setTokenDashboard] = useState(false);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -65,9 +72,19 @@ export default function App() {
   const isWaitlisted = signedIn && identity != null && identity.status !== "active";
   const isAdmin = identity?.role === "admin" && identity.status === "active";
   const hasApiToken = !!window.localStorage.getItem("trove_token");
-  const dashboardReady = !error && (signedIn ? !isWaitlisted : hasApiToken);
-  const showLanding = !signedIn && !hasApiToken && signedOutView === "landing";
+  const tokenMode = !signedIn && hasApiToken && (tokenDashboard || !clerkEnabled);
+  const dashboardReady = !error && (signedIn ? !isWaitlisted : tokenMode);
+  const showLanding = clerkEnabled && !signedIn && !tokenMode && signedOutView === "landing";
   const showConnect = !signedIn && !dashboardReady && signedOutView === "connect";
+
+  const disconnectKey = useCallback(() => {
+    window.localStorage.removeItem("trove_token");
+    setTokenDashboard(false);
+    setSignedOutView("landing");
+    setStats(null);
+    setSnapshot(null);
+    setError(null);
+  }, []);
 
   const tabs: Tab[] = signedIn && identity?.status === "active"
     ? (isAdmin ? ["overview", "graph", "keys", "admin"] : ["overview", "graph", "keys"])
@@ -110,6 +127,24 @@ export default function App() {
                 Refresh
               </button>
             )}
+            {showLanding && hasApiToken && (
+              <button
+                type="button"
+                onClick={() => setTokenDashboard(true)}
+                className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground transition-colors hover:text-foreground"
+              >
+                Dashboard
+              </button>
+            )}
+            {tokenMode && (
+              <button
+                type="button"
+                onClick={disconnectKey}
+                className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground transition-colors hover:text-foreground"
+              >
+                Disconnect
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setDark((current) => !current)}
@@ -148,6 +183,7 @@ export default function App() {
               const value = new FormData(event.currentTarget).get("token");
               if (typeof value === "string" && value.trim()) {
                 window.localStorage.setItem("trove_token", value.trim());
+                setTokenDashboard(true);
                 setSignedOutView("landing");
                 void load();
               }
@@ -209,6 +245,13 @@ export default function App() {
           onClose={() => setDrawer((current) => ({ ...current, open: false }))}
           dark={dark}
         />
+      )}
+
+      {clerkEnabled && ssoCallback && !signedIn && (
+        <div className="fixed inset-0 z-[60] flex flex-col items-center justify-center gap-3 bg-background">
+          <AuthenticateWithRedirectCallback signInFallbackRedirectUrl="/" signUpFallbackRedirectUrl="/" />
+          <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Completing sign-in…</p>
+        </div>
       )}
     </div>
   );

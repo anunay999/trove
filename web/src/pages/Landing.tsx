@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { AgentLogos } from "@/components/AgentLogos";
 import { GraphAnimation } from "@/components/GraphAnimation";
 
 // Layout adapted from shadcnblocks hero146 (masked grid backdrop, gradient
@@ -53,7 +54,7 @@ export function Landing({ dark, onJoin, onLogin, onConnectKey }: {
             value={email}
             onChange={(event) => setEmail(event.target.value)}
             placeholder="you@domain.com"
-            className="h-11 flex-1 rounded-md border bg-background/80 px-4 text-sm outline-none backdrop-blur placeholder:text-muted-foreground focus:border-ring"
+            className="h-11 flex-1 rounded-md border-2 border-foreground/25 bg-background px-4 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus:border-foreground/60"
           />
           <button
             type="submit"
@@ -73,6 +74,8 @@ export function Landing({ dark, onJoin, onLogin, onConnectKey }: {
             Connect with an API key
           </button>
         </p>
+
+        <AgentLogos />
 
         <div className="relative mt-14 w-full max-w-4xl">
           <div className="rounded-2xl border bg-card/60 p-3 backdrop-blur-sm">
