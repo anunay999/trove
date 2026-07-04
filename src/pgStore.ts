@@ -64,7 +64,12 @@ export class PgGraphStore implements GraphStore {
   private pool: pg.Pool;
 
   constructor(options: PgStoreOptions) {
-    this.pool = new Pool({ connectionString: options.connectionString });
+    this.pool = new Pool({ connectionString: options.connectionString, keepAlive: true });
+    // Idle clients dropped by the pooler (e.g. Supabase) emit 'error'; without
+    // a listener that unhandled event kills the whole process.
+    this.pool.on("error", (error) => {
+      console.error("[pg-pool] idle client error:", error.message);
+    });
   }
 
   async ingest(input: IngestInput, context?: GraphOperationContext): Promise<{ source: GraphSource; textUnits: TextUnit[] }> {

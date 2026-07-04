@@ -60,7 +60,10 @@ export class UserStore {
   private pool: pg.Pool;
 
   constructor(options: { connectionString: string }) {
-    this.pool = new Pool({ connectionString: options.connectionString, max: 4 });
+    this.pool = new Pool({ connectionString: options.connectionString, max: 4, keepAlive: true });
+    this.pool.on("error", (error) => {
+      console.error("[pg-pool] idle client error:", error.message);
+    });
   }
 
   async ensureUser(
