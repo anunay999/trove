@@ -72,7 +72,7 @@ Ordered by leverage; the schema is already ~70% of the way there.
 > Status (2026-07-04): items 1, 3, and 4 below are implemented — bitemporal edges with
 > `supersedesEdgeId`/`graph.invalidate_edge` (migration `003_bitemporal_activation.sql`),
 > `graph.recall` with `tokenBudget`, and activation columns bumped on read. Covered by
-> `npm run bitemporal:test` and `npm run recall:test` on both drivers. Reconciliation in
+> the `bitemporal` and `recall` suites (`npm test`) on both drivers. Reconciliation in
 > the write path (2) and claim embeddings (5) remain open.
 
 1. **Bitemporalize edges and finish claims.** `claim` already has `valid_from`/`valid_until`/`status`; add `expired_at` + `invalidated_by`, and add the four temporal columns to `edge`. Default all reads to current-belief. (Small migration, unlocks #2, #5, time-travel.)

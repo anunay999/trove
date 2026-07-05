@@ -15,7 +15,7 @@ if (!databaseUrl) {
   throw new Error("DATABASE_URL is required.");
 }
 
-const migrationsDir = resolve("docs/migrations");
+const migrationsDir = resolve("db/migrations");
 const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
 const client = new Client({ connectionString: databaseUrl });
 

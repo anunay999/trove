@@ -55,10 +55,10 @@ curl https://mytrove.in/.well-known/oauth-protected-resource/mcp
 curl -i -X POST https://mytrove.in/mcp -d '{}' | grep -i www-authenticate
 ```
 
-Local unit test of the metadata/derivation logic:
+Local unit test of the metadata/derivation logic (no database needed):
 
 ```bash
-npm run oauth:test
+npm test
 ```
 
 ## Troubleshooting

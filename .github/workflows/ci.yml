@@ -48,24 +48,11 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: OAuth metadata unit tests (no DB)
-        run: npm run oauth:test
-
       - name: Apply schema and migrations
         run: npm run db:schema && npm run db:migrate
 
-      - name: Store + agent-ops tests
-        run: |
-          npm run agentops:test
-          npm run update:test
-          npm run events:test
-          npm run worker:test
-          npm run views:test
-          npm run jobs:test
-          npm run bitemporal:test
-          npm run episodes:test
-          npm run sources:test
-          npm run isolation:test
+      - name: Test (node:test, against Postgres)
+        run: npm test
 
       - name: Build web dashboard
         run: npm run web:build

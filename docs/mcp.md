@@ -171,31 +171,23 @@ The writer uses the previous manifest to remove stale generated files without to
 
 ## Smoke Test
 
+The store, MCP-stdio, and Obsidian suites run with `npm test` (add `DATABASE_URL` to exercise Postgres):
+
 ```bash
-DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run mcp:test
+DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm test
 ```
 
-HTTP MCP smoke test:
+The HTTP-transport and token-auth suites need a running server and are opt-in via `TROVE_E2E=1` (which `test:e2e` sets):
 
 ```bash
-DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm start
-TROVE_MCP_URL=http://localhost:8787/mcp npm run mcp:http:test
-```
-
-Token-mode auth smoke test:
-
-```bash
-TROVE_SERVICE_TOKENS='read-token|reader|graph:read;write-token|agent|graph:read,graph:write,graph:export' \
+TROVE_SERVICE_TOKENS='read-token|reader|graph:read;write-token|agent|graph:read,graph:write,graph:export;admin-token|ops|graph:admin' \
   DATABASE_URL=postgres://trove:trove@localhost:5432/trove \
   npm start
 
-TROVE_READ_TOKEN=read-token TROVE_WRITE_TOKEN=write-token npm run auth:test
-TROVE_SERVICE_TOKEN=write-token npm run mcp:http:test
-DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run events:test
-DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run retrieval:test
-DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run views:test
-DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run jobs:test
-npm run export:obsidian:test
+# in another shell, against the running server:
+TROVE_READ_TOKEN=read-token TROVE_WRITE_TOKEN=write-token TROVE_ADMIN_TOKEN=admin-token \
+  TROVE_SERVICE_TOKEN=write-token TROVE_MCP_URL=http://localhost:8787/mcp \
+  npm run test:e2e
 ```
 
 Expected result:

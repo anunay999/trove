@@ -32,7 +32,7 @@ The deeper design docs:
 - [representation.md](representation.md) — data representation for long text, annotations, graph atoms, and projections
 - [storage-decision.md](storage-decision.md) — database, traversal, search, and storage choices
 - [memory-db-design.md](memory-db-design.md) — the deep-research synthesis the v2 design came from
-- [schema.sql](schema.sql) — starter relational graph schema
+- [../db/schema.sql](../db/schema.sql) — starter relational graph schema (migrations live in [../db/migrations](../db/migrations))
 - [traversal-queries.sql](traversal-queries.sql) — Postgres traversal, evidence, search, and Kuzu projection query recipes
 
 ## Local storage
@@ -133,20 +133,21 @@ Embedding refresh is provider-gated (`TROVE_EMBEDDING_PROVIDER`) and embeds up t
 
 ## Test suites
 
-All suites are smoke scripts under `scripts/`; pointed at a real database they write real rows — clean up with `npm run db:clean:smoke -- --apply`.
+Tests live under `tests/` and run on Node's built-in test runner (`node:test`). Each file is a `*.test.ts` suite; `tests/helpers.ts` holds the shared store/context fixtures.
 
 ```bash
-TROVE_SERVICE_TOKEN=agent-token TROVE_MCP_URL=http://localhost:8787/mcp npm run mcp:http:test
-DATABASE_URL=... npm run scribe:mcp:test
-TROVE_READ_TOKEN=read-token TROVE_WRITE_TOKEN=agent-token npm run auth:test
-DATABASE_URL=... npm run events:test
-DATABASE_URL=... npm run retrieval:test
-DATABASE_URL=... npm run recall:test
-DATABASE_URL=... npm run bitemporal:test
-DATABASE_URL=... npm run views:test
-DATABASE_URL=... npm run jobs:test
-DATABASE_URL=... npm run episodes:test
-DATABASE_URL=... npm run sources:test
+npm test            # run every suite once
+npm run test:watch  # re-run on change
+```
+
+By default the store-backed suites run against the in-memory store (fast, no database). Point them at Postgres by exporting `DATABASE_URL` — CI runs the whole suite this way. Two suites (`user-keys`, `isolation`) require Postgres and self-skip without it. Pointed at a real database they write real rows — clean up with `npm run db:clean:smoke -- --apply`.
+
+The end-to-end suites (`auth`, `mcp-http`) need a running server and are skipped unless you opt in:
+
+```bash
+# start the server first, then:
+TROVE_READ_TOKEN=read-token TROVE_WRITE_TOKEN=write-token TROVE_ADMIN_TOKEN=admin-token \
+  npm run test:e2e
 ```
 
 ## Source signals

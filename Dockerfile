@@ -27,6 +27,6 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=web /app/web/dist ./web/dist
 COPY package.json ./
-COPY docs ./docs
+COPY db ./db
 EXPOSE 8787
 CMD ["npm", "run", "start:container"]
