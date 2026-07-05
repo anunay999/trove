@@ -84,7 +84,7 @@ function McpSetup({ keySecret }: { keySecret: string | null }) {
       <p className="mt-2 text-[12px] text-muted-foreground">{snippet.hint}</p>
 
       <p className="mt-5 text-[13px] leading-relaxed text-muted-foreground">
-        Optional: install the companion skills so your agent uses the tools well — recall before re-deriving, cite evidence, supersede instead of delete.
+        Optional: companion skills that coach your agent to use the tools well.
       </p>
       <div className="mt-2 rounded-lg border bg-card">
         <div className="flex items-center justify-between border-b px-4 py-2">
