@@ -108,6 +108,17 @@ try {
   const aliceHood = await store.neighborhood({ nodeId: aliceNode.id, depth: 1 }, A);
   assert(aliceHood.edges.some((e) => e.id === aliceEdge.id), "Alice cannot see her own edge");
 
+  // --- Per-owner slug namespaces: both owners hold the same slug cleanly ----
+  const sharedTitle = `Shared project ${MARK}`;
+  const aliceShared = await store.capture({ title: sharedTitle, type: "project", summary: `Alice's ${MARK}`, evidence: [], links: [] }, A);
+  const bobShared = await store.capture({ title: sharedTitle, type: "project", summary: `Bob's ${MARK}`, evidence: [], links: [] }, B);
+  assert(aliceShared.slug === bobShared.slug, `both owners should get the same clean slug, got ${aliceShared.slug} vs ${bobShared.slug}`);
+  assert(aliceShared.id !== bobShared.id, "same-slug nodes must be distinct rows");
+  const aliceBySlug = await store.read({ slug: aliceShared.slug }, A);
+  const bobBySlug = await store.read({ slug: bobShared.slug }, B);
+  assert(aliceBySlug?.id === aliceShared.id, "Alice's slug read must return Alice's node");
+  assert(bobBySlug?.id === bobShared.id, "Bob's slug read must return Bob's node");
+
   // --- Superuser (maintenance / auth-disabled) sees everything --------------
   const superRead = await store.read({ nodeId: aliceNode.id }, { superuser: true });
   assert(superRead?.id === aliceNode.id, "superuser cannot read the node");

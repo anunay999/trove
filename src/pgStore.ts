@@ -522,8 +522,9 @@ export class PgGraphStore implements GraphStore {
     try {
       await client.query("begin");
       const actorUuid = await this.actorUuidForContext(client, context);
-      const fromNodeId = input.fromNodeId ?? await this.nodeIdForSlug(input.fromSlug, client);
-      const toNodeId = input.toNodeId ?? await this.nodeIdForSlug(input.toSlug, client);
+      const scope = ownerScope(context);
+      const fromNodeId = input.fromNodeId ?? await this.nodeIdForSlug(input.fromSlug, client, scope);
+      const toNodeId = input.toNodeId ?? await this.nodeIdForSlug(input.toSlug, client, scope);
       if (!fromNodeId || !toNodeId) {
         await client.query("rollback");
         return null;
@@ -643,10 +644,11 @@ export class PgGraphStore implements GraphStore {
     try {
       await client.query("begin");
       const actorUuid = await this.actorUuidForContext(client, context);
-      const ownerId = ownerScope(context).ownerId;
+      const scope = ownerScope(context);
+      const ownerId = scope.ownerId;
       const id = randomUUID();
       const revisionId = randomUUID();
-      const slug = await this.uniqueSlug(slugify(input.title), client);
+      const slug = await this.uniqueSlug(slugify(input.title), client, scope);
       const content = input.content ?? null;
 
       await client.query(
@@ -675,7 +677,7 @@ export class PgGraphStore implements GraphStore {
       }
 
       for (const link of input.links) {
-        const toNodeId = await this.nodeIdForSlug(link.toSlug, client);
+        const toNodeId = await this.nodeIdForSlug(link.toSlug, client, scope);
         if (!toNodeId) continue;
         await client.query(
           `insert into edge (id, from_node_id, to_node_id, predicate, valid_from, created_by, owner_id)
@@ -780,10 +782,13 @@ export class PgGraphStore implements GraphStore {
       let nextSlug: string | null = null;
       if (input.slug) {
         const base = slugify(input.slug);
-        const owner = await client.query("select id from node where slug = $1", [base]);
-        nextSlug = owner.rowCount === 0 || owner.rows[0].id === input.nodeId
+        const collision = await client.query(
+          "select id from node where slug = $1 and ($2 or owner_id = $3)",
+          [base, !uScope.scoped, uScope.ownerId],
+        );
+        nextSlug = collision.rowCount === 0 || collision.rows[0].id === input.nodeId
           ? base
-          : await this.uniqueSlug(base, client);
+          : await this.uniqueSlug(base, client, uScope);
       }
 
       await client.query(
@@ -1045,9 +1050,10 @@ export class PgGraphStore implements GraphStore {
     try {
       await client.query("begin");
       const actorUuid = await this.actorUuidForContext(client, context);
+      const scope = ownerScope(context);
       const id = randomUUID();
-      const slug = await this.uniqueViewSlug(slugify(input.slug ?? input.title), client);
-      const resolved = await this.resolveViewMembers(client, input);
+      const slug = await this.uniqueViewSlug(slugify(input.slug ?? input.title), client, scope);
+      const resolved = await this.resolveViewMembers(client, input, context);
 
       const result = await client.query(
         `insert into graph_view (
@@ -1634,22 +1640,31 @@ export class PgGraphStore implements GraphStore {
     );
   }
 
-  private async uniqueSlug(baseSlug: string, client: pg.PoolClient): Promise<string> {
+  // Slugs are unique per owner, so two owners can each hold `project-x`. A
+  // superuser (unscoped) write dedupes globally, which still satisfies the
+  // per-owner unique index.
+  private async uniqueSlug(baseSlug: string, client: pg.PoolClient, scope: OwnerScope): Promise<string> {
     let slug = baseSlug || "untitled";
     let counter = 2;
     while (true) {
-      const result = await client.query("select 1 from node where slug = $1", [slug]);
+      const result = await client.query(
+        "select 1 from node where slug = $1 and ($2 or owner_id = $3)",
+        [slug, !scope.scoped, scope.ownerId],
+      );
       if (result.rowCount === 0) return slug;
       slug = `${baseSlug}-${counter}`;
       counter += 1;
     }
   }
 
-  private async uniqueViewSlug(baseSlug: string, client: pg.PoolClient): Promise<string> {
+  private async uniqueViewSlug(baseSlug: string, client: pg.PoolClient, scope: OwnerScope): Promise<string> {
     let slug = baseSlug || "view";
     let counter = 2;
     while (true) {
-      const result = await client.query("select 1 from graph_view where slug = $1", [slug]);
+      const result = await client.query(
+        "select 1 from graph_view where slug = $1 and ($2 or owner_id = $3)",
+        [slug, !scope.scoped, scope.ownerId],
+      );
       if (result.rowCount === 0) return slug;
       slug = `${baseSlug}-${counter}`;
       counter += 1;
@@ -1659,11 +1674,17 @@ export class PgGraphStore implements GraphStore {
   private async resolveViewMembers(
     client: pg.PoolClient,
     input: CreateViewInput,
+    context?: GraphOperationContext,
   ): Promise<{ rootNodeId: string | null; nodeIds: string[]; edgeIds: string[] }> {
-    const rootNodeId = input.rootNodeId ?? await this.nodeIdForSlug(input.rootSlug, client);
+    const scope = ownerScope(context);
+    const ownerParams: [boolean, string | null] = [!scope.scoped, scope.ownerId];
+    const rootNodeId = input.rootNodeId ?? await this.nodeIdForSlug(input.rootSlug, client, scope);
     if (input.rootNodeId || input.rootSlug) {
       if (!rootNodeId) throw new Error("View root node could not be resolved.");
-      const root = await client.query("select 1 from node where id = $1 and deleted_at is null", [rootNodeId]);
+      const root = await client.query(
+        "select 1 from node where id = $1 and deleted_at is null and ($2 or owner_id = $3)",
+        [rootNodeId, ...ownerParams],
+      );
       if (root.rowCount === 0) throw new Error("View root node could not be resolved.");
     }
 
@@ -1671,9 +1692,9 @@ export class PgGraphStore implements GraphStore {
       const nodes = await client.query(
         `select id
          from node
-         where deleted_at is null and id = any($1::uuid[])
+         where deleted_at is null and id = any($1::uuid[]) and ($2 or owner_id = $3)
          order by array_position($1::uuid[], id)`,
-        [input.includedNodeIds],
+        [input.includedNodeIds, ...ownerParams],
       );
       const nodeIds = nodes.rows.map((row) => String(row.id));
       const nodeIdSet = new Set(nodeIds);
@@ -1700,7 +1721,7 @@ export class PgGraphStore implements GraphStore {
         nodeId: rootNodeId,
         depth: input.depth,
         predicates: input.predicates,
-      });
+      }, context);
       if (neighborhood.nodes.length === 0) {
         throw new Error("View root node could not be resolved.");
       }
@@ -1712,7 +1733,7 @@ export class PgGraphStore implements GraphStore {
     }
 
     if (input.query) {
-      const search = await this.search({ query: input.query, includeTextUnits: false, mode: "hybrid", limit: 50 });
+      const search = await this.search({ query: input.query, includeTextUnits: false, mode: "hybrid", limit: 50 }, context);
       const nodeIds = search.nodes.map((node) => node.id);
       const edges = nodeIds.length === 0 ? { rows: [] } : await client.query(
         `select id
@@ -1761,10 +1782,13 @@ export class PgGraphStore implements GraphStore {
     };
   }
 
-  private async nodeIdForSlug(slug: string | undefined, client?: pg.PoolClient): Promise<string | null> {
+  private async nodeIdForSlug(slug: string | undefined, client: pg.PoolClient | undefined, scope: OwnerScope): Promise<string | null> {
     if (!slug) return null;
     const queryable = client ?? this.pool;
-    const result = await queryable.query("select id from node where slug = $1 and deleted_at is null", [slug]);
+    const result = await queryable.query(
+      "select id from node where slug = $1 and deleted_at is null and ($2 or owner_id = $3)",
+      [slug, !scope.scoped, scope.ownerId],
+    );
     return result.rowCount === 0 ? null : String(result.rows[0].id);
   }
 
