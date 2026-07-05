@@ -205,3 +205,6 @@ export const revokeKey = (id: string): Promise<{ revoked: boolean }> =>
 export const fetchUsers = (): Promise<{ users: AppUser[] }> => getJson<{ users: AppUser[] }>("/v1/admin/users");
 export const approveUser = (clerkUserId: string): Promise<{ user: AppUser }> =>
   sendJson("/v1/admin/users/approve", { body: { clerkUserId } });
+
+export const setUserStatus = (clerkUserId: string, status: AppUser["status"]): Promise<{ user: AppUser }> =>
+  sendJson("/v1/admin/users/status", { body: { clerkUserId, status } });
