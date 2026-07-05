@@ -26,6 +26,28 @@
 
 Trove is a hosted knowledge graph for agent memory. Claude, Codex, and any MCP-capable agent can write what they learn into it and recall it in later sessions — with every fact traceable back to the source text that justifies it. Your notes stay inspectable, contradictions are superseded instead of overwritten, and the whole graph is browsable in a built-in dashboard.
 
+## Connect your agent
+
+Point any MCP-capable agent at Trove and it reads and writes your graph across sessions. Create an API key on the dashboard at **[mytrove.in](https://mytrove.in)**, then:
+
+```bash
+# Claude Code (hosted)
+claude mcp add trove --transport http https://mytrove.in/mcp \
+  --header "Authorization: Bearer <your trove_ key>"
+```
+
+Running your own instance? Use `http://localhost:8787/mcp` (no key needed when auth is disabled). For the claude.ai / Claude Desktop **Connectors** panel, add `https://mytrove.in/mcp` and sign in with Clerk — see [docs/oauth.md](docs/oauth.md).
+
+Your agent gets a small verb-per-job toolset: `remember`, `recall`, `grep`, `read`, `connect`, `forget` (plus `ingest` and curation tools for write-scoped keys). Nothing else to pass — each credential is scoped to its own private graph automatically.
+
+**Companion skills (optional, Claude Code).** The MCP tools work in any client on their own. Install the skills so Claude uses them with the right discipline — recall before re-deriving, cite evidence, supersede instead of delete:
+
+```bash
+npx skills add ./skills -g
+```
+
+Full setup — keys, scopes, stdio, importing a vault — is in [docs/quickstart.md](docs/quickstart.md).
+
 ## What you get
 
 - **Durable agent memory** — agents save facts, decisions, and notes through MCP tools (`remember`, `ingest`) and retrieve them later with `recall`, which packs the most relevant memories into a token budget you set.
