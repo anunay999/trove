@@ -33,7 +33,7 @@
     "db:migrate": "tsx scripts/applyMigrations.ts",
     "db:migrate:prod": "node dist/scripts/applyMigrations.js",
     "web:dev": "npm --prefix web run dev",
-    "web:build": "npm --prefix web run build",
+    "web:build": "(test -d web/node_modules || npm --prefix web ci) && npm --prefix web run build",
     "export:obsidian": "tsx scripts/exportObsidianVault.ts",
     "export:obsidian:test": "tsx scripts/testObsidianExport.ts",
     "import:vault": "tsx scripts/importScribeVault.ts",
