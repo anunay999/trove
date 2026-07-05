@@ -104,6 +104,25 @@ export class UserStore {
     return result.rows.map(mapUser);
   }
 
+  /**
+   * The app_user that env service tokens act as: the configured
+   * TROVE_SERVICE_OWNER_EMAIL if it exists, else the founding (oldest) admin.
+   * Undefined only on a brand-new instance where nobody has signed in yet.
+   */
+  async ownerForServiceToken(preferredEmail?: string): Promise<string | undefined> {
+    if (preferredEmail) {
+      const byEmail = await this.pool.query(
+        "select id from app_user where lower(email) = lower($1) order by created_at asc limit 1",
+        [preferredEmail],
+      );
+      if (byEmail.rowCount) return String(byEmail.rows[0].id);
+    }
+    const admin = await this.pool.query(
+      "select id from app_user where role = 'admin' order by created_at asc limit 1",
+    );
+    return admin.rowCount ? String(admin.rows[0].id) : undefined;
+  }
+
   async approveUser(clerkUserId: string, approvedById: string): Promise<AppUser | null> {
     return this.setUserStatus(clerkUserId, "active", approvedById);
   }
