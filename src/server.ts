@@ -47,7 +47,7 @@ import {
   type AuthResolvers,
   type TroveScope,
 } from "./auth.js";
-import { createApiKeyResolver, createClerkResolver, createOAuthResolver } from "./clerkAuth.js";
+import { createApiKeyResolver, createClerkResolver, createOAuthResolver, createServiceOwnerResolver } from "./clerkAuth.js";
 import {
   buildProtectedResourceMetadata,
   requestOrigin,
@@ -75,6 +75,7 @@ if (userStore) {
   if (clerkResolver) authResolvers.resolveClerkToken = clerkResolver;
   const oauthResolver = createOAuthResolver(userStore);
   if (oauthResolver) authResolvers.resolveOAuthToken = oauthResolver;
+  authResolvers.resolveServiceOwnerId = createServiceOwnerResolver(userStore);
 }
 
 app.use("/mcp", cors({
@@ -169,19 +170,20 @@ app.get("/v1/tools", async (context) => {
 app.get("/v1/graph", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
-  return context.json(await store.exportGraph());
+  return context.json(await store.exportGraph(operationContextFromAuth(auth)));
 });
 
 app.get("/v1/stats", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
 
+  const owner = operationContextFromAuth(auth);
   const [snapshot, jobList, lintReport, latest, sourceRows] = await Promise.all([
-    store.exportGraph(),
+    store.exportGraph(owner),
     store.jobs({ limit: 100 }),
-    store.lint(),
-    store.timeline(),
-    store.sources({ limit: 5000 }),
+    store.lint(owner),
+    store.timeline(owner),
+    store.sources({ limit: 5000 }, owner),
   ]);
 
   // Domain time beats transaction time: date each document by what it says about
@@ -218,7 +220,7 @@ app.get("/v1/stats", async (context) => {
   const allEvents: Awaited<ReturnType<typeof store.timeline>> = [];
   let cursor: string | undefined;
   for (let page = 0; page < 20; page += 1) {
-    const feedPage = await store.events(cursor ? { afterCursor: cursor, limit: 500 } : { limit: 500 });
+    const feedPage = await store.events(cursor ? { afterCursor: cursor, limit: 500 } : { limit: 500 }, owner);
     allEvents.push(...feedPage.events.filter((event) => !isSmokeEvent(event)));
     if (!feedPage.hasMore || !feedPage.nextCursor) break;
     cursor = feedPage.nextCursor;
@@ -271,7 +273,7 @@ app.get("/v1/stats", async (context) => {
       ...(recentCursor ? { afterCursor: recentCursor } : {}),
       limit: 100,
       order: "desc",
-    });
+    }, owner);
     recentEvents.push(...recentPage.events.filter((event) =>
       !isSmokeEvent(event) && !JOB_ACTIONS.has(event.action)));
     if (!recentPage.hasMore || !recentPage.nextCursor) break;
@@ -308,14 +310,14 @@ app.post("/v1/search", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), searchInputSchema);
-  return context.json(await store.search(input));
+  return context.json(await store.search(input, operationContextFromAuth(auth)));
 });
 
 app.post("/v1/read", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), readInputSchema);
-  const node = await store.read(input);
+  const node = await store.read(input, operationContextFromAuth(auth));
   if (!node) return context.json({ error: "Node not found" }, 404);
   return context.json({ node });
 });
@@ -324,14 +326,14 @@ app.post("/v1/neighborhood", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), neighborhoodInputSchema);
-  return context.json(await store.neighborhood(input));
+  return context.json(await store.neighborhood(input, operationContextFromAuth(auth)));
 });
 
 app.post("/v1/document", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), readDocumentInputSchema);
-  const document = await store.readDocument(input);
+  const document = await store.readDocument(input, operationContextFromAuth(auth));
   if (!document) return context.json({ error: "Document not found" }, 404);
   return context.json({ document });
 });
@@ -340,7 +342,7 @@ app.post("/v1/source", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), readSourceInputSchema);
-  const source = await store.readSource(input);
+  const source = await store.readSource(input, operationContextFromAuth(auth));
   if (!source) return context.json({ error: "Source not found" }, 404);
   return context.json({ source });
 });
@@ -349,7 +351,7 @@ app.post("/v1/recall", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), recallInputSchema);
-  return context.json(await store.recall(input));
+  return context.json(await store.recall(input, operationContextFromAuth(auth)));
 });
 
 app.post("/v1/invalidate-edge", async (context) => {
@@ -395,7 +397,7 @@ app.post("/v1/grep", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), grepInputSchema);
-  return context.json(await store.grep(input));
+  return context.json(await store.grep(input, operationContextFromAuth(auth)));
 });
 
 app.post("/v1/forget", async (context) => {
@@ -426,7 +428,7 @@ app.post("/v1/project", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), projectInputSchema);
-  const result = await store.project(input);
+  const result = await store.project(input, operationContextFromAuth(auth));
   if (!result) return context.json({ error: "Node not found" }, 404);
   return context.json(result);
 });
@@ -434,7 +436,7 @@ app.post("/v1/project", async (context) => {
 app.get("/v1/timeline", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
-  return context.json({ events: await store.timeline() });
+  return context.json({ events: await store.timeline(operationContextFromAuth(auth)) });
 });
 
 app.get("/v1/events", async (context) => {
@@ -444,13 +446,13 @@ app.get("/v1/events", async (context) => {
     afterCursor: context.req.query("afterCursor") || undefined,
     limit: context.req.query("limit") ? Number(context.req.query("limit")) : undefined,
   });
-  return context.json(await store.events(input));
+  return context.json(await store.events(input, operationContextFromAuth(auth)));
 });
 
 app.get("/v1/lint", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
-  return context.json(await store.lint());
+  return context.json(await store.lint(operationContextFromAuth(auth)));
 });
 
 app.get("/v1/jobs", async (context) => {
@@ -471,14 +473,14 @@ app.get("/v1/views", async (context) => {
     query: context.req.query("query") || undefined,
     limit: context.req.query("limit") ? Number(context.req.query("limit")) : undefined,
   });
-  return context.json({ views: await store.views(input) });
+  return context.json({ views: await store.views(input, operationContextFromAuth(auth)) });
 });
 
 app.post("/v1/views/read", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), readViewInputSchema);
-  const view = await store.readView(input);
+  const view = await store.readView(input, operationContextFromAuth(auth));
   if (!view) return context.json({ error: "View not found" }, 404);
   return context.json({ view });
 });
@@ -525,10 +527,11 @@ app.post("/v1/jobs/run", async (context) => {
 app.get("/v1/export/obsidian", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:export"]);
   if (auth instanceof Response) return auth;
+  const owner = operationContextFromAuth(auth);
   return context.json(buildObsidianVaultExport(
-    await store.exportMarkdown(),
-    await store.timeline(),
-    await store.exportGraph(),
+    await store.exportMarkdown(owner),
+    await store.timeline(owner),
+    await store.exportGraph(owner),
   ));
 });
 

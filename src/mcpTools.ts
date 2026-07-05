@@ -37,7 +37,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
     version: "0.2.0",
   });
 
-  registerTroveResources(server, store, authContext);
+  registerTroveResources(server, store, authContext, operationContext);
   registerTrovePrompts(server);
 
   // ---- core: the everyday agent vocabulary --------------------------------
@@ -64,7 +64,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       description: "Retrieve relevant memory as a token-budgeted context pack with citations.",
       inputSchema: recallInputSchema,
     },
-    async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.recall(input))),
+    async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.recall(input, operationContext))),
   );
 
   server.registerTool(
@@ -75,7 +75,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
         "Exact/regex text search over memories and raw sources. Use for identifiers, ports, error strings — anything where exact match beats semantic search.",
       inputSchema: grepInputSchema,
     },
-    async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.grep(input))),
+    async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.grep(input, operationContext))),
   );
 
   server.registerTool(
@@ -85,7 +85,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       description: "Read anything by id or slug: a memory node with evidence, or a raw source document.",
       inputSchema: readAnyInputSchema,
     },
-    async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await readAny(store, input))),
+    async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await readAny(store, input, operationContext))),
   );
 
   if (canWrite) server.registerTool(
@@ -156,7 +156,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
         description: "Return a bounded graph neighborhood, optionally as of a past time or including expired edges.",
         inputSchema: neighborhoodInputSchema,
       },
-      async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.neighborhood(input))),
+      async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.neighborhood(input, operationContext))),
     );
 
     server.registerTool(
@@ -166,7 +166,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
         description: "Render a node as markdown, a mind map, or an agent context pack.",
         inputSchema: projectInputSchema,
       },
-      async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.project(input))),
+      async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.project(input, operationContext))),
     );
 
     server.registerTool(
@@ -176,7 +176,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
         description: "List saved mind-map and projection views.",
         inputSchema: listViewsInputSchema,
       },
-      async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.views(input))),
+      async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.views(input, operationContext))),
     );
 
     server.registerTool(
@@ -186,7 +186,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
         description: "Read a saved mind-map view with included nodes and edges.",
         inputSchema: readViewInputSchema,
       },
-      async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.readView(input))),
+      async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.readView(input, operationContext))),
     );
 
     server.registerTool(
@@ -228,7 +228,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
         description: "Read cursor-paginated graph mutation events for interface sync.",
         inputSchema: eventFeedInputSchema,
       },
-      async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.events(input))),
+      async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.events(input, operationContext))),
     );
 
     server.registerTool(
@@ -237,7 +237,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
         title: "Lint Graph",
         description: "Find graph health issues such as orphan nodes, missing evidence, duplicate titles, and dangling edges.",
       },
-      async () => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.lint())),
+      async () => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.lint(operationContext))),
     );
 
     server.registerTool(
@@ -286,9 +286,9 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       },
       async () => withScopes(authContext, ["graph:export"], async () =>
         jsonToolResult(buildObsidianVaultExport(
-          await store.exportMarkdown(),
-          await store.timeline(),
-          await store.exportGraph(),
+          await store.exportMarkdown(operationContext),
+          await store.timeline(operationContext),
+          await store.exportGraph(operationContext),
         ))),
     );
   }
@@ -300,6 +300,7 @@ function registerTroveResources(
   server: McpServer,
   store: GraphStore,
   authContext: AuthContext | undefined,
+  operationContext: ReturnType<typeof operationContextFromAuth> | undefined,
 ): void {
   server.registerResource(
     "trove-health",
@@ -322,7 +323,7 @@ function registerTroveResources(
       mimeType: "application/json",
     },
     async (uri) => withScopes(authContext, ["graph:read"], async () =>
-      jsonResource(uri, await store.lint())),
+      jsonResource(uri, await store.lint(operationContext))),
   );
 
   server.registerResource(
@@ -334,7 +335,7 @@ function registerTroveResources(
       mimeType: "application/json",
     },
     async (uri) => withScopes(authContext, ["graph:read"], async () =>
-      jsonResource(uri, await store.events({ limit: 25 }) )),
+      jsonResource(uri, await store.events({ limit: 25 }, operationContext))),
   );
 
   server.registerResource(
@@ -358,7 +359,7 @@ function registerTroveResources(
       mimeType: "application/json",
     },
     async (uri) => withScopes(authContext, ["graph:read"], async () =>
-      jsonResource(uri, { views: await store.views({ limit: 50 }) })),
+      jsonResource(uri, { views: await store.views({ limit: 50 }, operationContext) })),
   );
 
   server.registerResource(
@@ -370,7 +371,7 @@ function registerTroveResources(
       mimeType: "application/json",
     },
     async (uri) => withScopes(authContext, ["graph:read"], async () =>
-      jsonResource(uri, await store.exportGraph())),
+      jsonResource(uri, await store.exportGraph(operationContext))),
   );
 }
 
