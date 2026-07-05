@@ -1,5 +1,8 @@
 # Trove
 
+[![CI](https://github.com/anunay999/trove/actions/workflows/ci.yml/badge.svg)](https://github.com/anunay999/trove/actions/workflows/ci.yml)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+
 **A memory that your AI agents keep, so you don't have to.**
 
 Trove is a hosted knowledge graph for agent memory. Claude, Codex, and any MCP-capable agent can write what they learn into it and recall it in later sessions — with every fact traceable back to the source text that justifies it. Your notes stay inspectable, contradictions are superseded instead of overwritten, and the whole graph is browsable in a built-in dashboard.
@@ -67,3 +70,9 @@ Trove ships a production Dockerfile (API + dashboard in one image) and a `railwa
 - [docs/agent-api.md](docs/agent-api.md) — HTTP API contract
 - [docs/cli.md](docs/cli.md) — the reference CLI
 - [docs/memory-db-design.md](docs/memory-db-design.md) — the research behind the design
+
+## Contributing & license
+
+Pull requests are welcome — CI runs typecheck, the store test suites, and the web build, and `main` requires a reviewed PR. Please don't include secrets or real connection strings in a diff. Security issues: see [SECURITY.md](SECURITY.md).
+
+Licensed under the [GNU AGPL-3.0](LICENSE). You're free to use, modify, and self-host Trove; if you run a modified version as a network service, you must make your source available under the same license.
