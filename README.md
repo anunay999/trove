@@ -40,10 +40,10 @@ Running your own instance? Use `http://localhost:8787/mcp` (no key needed when a
 
 Your agent gets a small verb-per-job toolset: `remember`, `recall`, `grep`, `read`, `connect`, `forget` (plus `ingest` and curation tools for write-scoped keys). Nothing else to pass — each credential is scoped to its own private graph automatically.
 
-**Companion skills (optional, Claude Code).** The MCP tools work in any client on their own. Install the skills so Claude uses them with the right discipline — recall before re-deriving, cite evidence, supersede instead of delete:
+**Companion skills (optional, Claude Code).** The MCP tools work in any client on their own. Install the skills straight from this repo so Claude uses them with the right discipline — recall before re-deriving, cite evidence, supersede instead of delete:
 
 ```bash
-npx skills add ./skills -g
+npx skills add anunay999/trove -g
 ```
 
 Full setup — keys, scopes, stdio, importing a vault — is in [docs/quickstart.md](docs/quickstart.md).
