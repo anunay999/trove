@@ -546,6 +546,11 @@ const approveUserInputSchema = z.object({
   clerkUserId: z.string().min(1),
 });
 
+const setUserStatusInputSchema = z.object({
+  clerkUserId: z.string().min(1),
+  status: z.enum(["active", "waitlisted", "suspended"]),
+});
+
 // Who am I? Passes with zero scopes so waitlisted users can see their status.
 app.get("/v1/me", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, []);
@@ -630,6 +635,21 @@ app.post("/v1/admin/users/approve", async (context) => {
   const approved = await userStore!.approveUser(input.clerkUserId, identity.userId);
   if (!approved) return context.json({ error: "not_found", message: "No such user." }, 404);
   return context.json({ user: approved });
+});
+
+// Grant / revoke access: move a user between waitlisted / active / suspended.
+app.post("/v1/admin/users/status", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, []);
+  if (auth instanceof Response) return auth;
+  const identity = requireAdmin(auth);
+  if (identity instanceof Response) return identity;
+  const input = await parseJsonOrThrow(context.req.json(), setUserStatusInputSchema);
+  if (input.clerkUserId === identity.clerkUserId) {
+    return context.json({ error: "cannot_change_self", message: "You can't change your own access." }, 400);
+  }
+  const updated = await userStore!.setUserStatus(input.clerkUserId, input.status, identity.userId);
+  if (!updated) return context.json({ error: "not_found", message: "No such user." }, 404);
+  return context.json({ user: updated });
 });
 
 async function authorizeRequest(headers: Headers, scopes: TroveScope[]): Promise<AuthContext | Response> {
