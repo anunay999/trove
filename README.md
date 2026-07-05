@@ -69,10 +69,11 @@ Use the hosted service at **[mytrove.in](https://mytrove.in)** — sign in, crea
 
 ```bash
 # the short version, locally
-git clone https://github.com/anunay999/trove.git && cd trove && npm install
-docker compose up -d postgres
-export DATABASE_URL=postgres://trove:trove@localhost:5433/trove
-npm run db:schema && npm run db:migrate && npm run web:build && npm start
+git clone https://github.com/anunay999/trove.git && cd trove
+npm install                 # server + web dashboard
+cp .env.example .env
+npm run setup               # Postgres + schema + migrations
+npm run web:build && npm start
 # → dashboard at http://localhost:8787
 ```
 

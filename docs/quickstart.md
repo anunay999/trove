@@ -2,25 +2,21 @@
 
 Get Trove running locally, generate a key, connect your agents, and import your notes. For the hosted service (mytrove.in) you can skip to [Connect your agents](#connect-your-agents) and use your dashboard API key.
 
-## Run it locally (5 minutes)
+## Run it locally
 
 Requirements: Node 22+, Docker.
 
 ```bash
 git clone https://github.com/anunay999/trove.git && cd trove
-npm install
-
-# 1. Start Postgres (pgvector, host port 5433) and create the schema
-docker compose up -d postgres
-export DATABASE_URL=postgres://trove:trove@localhost:5433/trove
-npm run db:schema && npm run db:migrate
-
-# 2. Start the API + dashboard
-npm run web:build
-npm start
+npm install                 # installs the server AND the web dashboard
+cp .env.example .env        # sane local defaults (Postgres on :5433)
+npm run setup               # starts Postgres, applies schema + migrations
+npm run web:build && npm start
 ```
 
 Open **http://localhost:8787** — the dashboard is served by the API. With no tokens configured, local dev runs with auth disabled and needs no key.
+
+That's it. `npm install` pulls in the web app's dependencies too (via a postinstall step), and `npm run setup` bundles the database bootstrap, so there's nothing else to wire up. If you skip the `.env` copy, set `DATABASE_URL` in your shell instead.
 
 ## Generate an API key
 
