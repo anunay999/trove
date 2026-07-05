@@ -15,6 +15,9 @@ Trove is a hosted knowledge graph for agent memory. Claude, Codex, and any MCP-c
 ## How it works
 
 Trove is an **evidence graph**: nothing is a free-floating fact. Everything an agent knows traces back to source text.
+<img width="550" height="409" alt="image" src="https://github.com/user-attachments/assets/d19b60e1-086a-48ff-9522-31e518ec0f06" />
+
+
 
 ```
    raw source            addressable spans        distilled beliefs
