@@ -21,7 +21,7 @@ export type AuthIdentity = {
 export type AuthContext = {
   actorId: string;
   scopes: TroveScope[];
-  mode: "disabled" | "token" | "api_key" | "clerk";
+  mode: "disabled" | "token" | "api_key" | "clerk" | "oauth";
   interfaceId: string;
   requestId: string;
   identity?: AuthIdentity;
@@ -29,12 +29,14 @@ export type AuthContext = {
 
 /**
  * Pluggable async credential resolvers. `resolveApiKey` handles DB-backed
- * `trove_*` keys; `resolveClerkToken` handles Clerk session JWTs. Either may
- * return null to signal "not mine / not valid".
+ * `trove_*` keys; `resolveClerkToken` handles Clerk session JWTs;
+ * `resolveOAuthToken` handles Clerk `oat_*` OAuth access tokens from browser
+ * MCP connectors. Any may return null to signal "not mine / not valid".
  */
 export type AuthResolvers = {
   resolveApiKey?: (secret: string) => Promise<{ actorId: string; scopes: TroveScope[]; identity?: AuthIdentity } | null>;
   resolveClerkToken?: (token: string) => Promise<{ actorId: string; scopes: TroveScope[]; identity: AuthIdentity } | null>;
+  resolveOAuthToken?: (token: string) => Promise<{ actorId: string; scopes: TroveScope[]; identity: AuthIdentity } | null>;
 };
 
 export class AuthError extends Error {
@@ -90,6 +92,7 @@ export async function requireAuthFromHeaders(
     throw new AuthError(401, "missing_token", "Missing Bearer token.");
   }
 
+  // Resolution order by cheapest-first / prefix. See docs/oauth.md and docs/mcp.md.
   // 1. Environment service tokens (agents, MCP, ops).
   const match = tokens.find((candidate) => constantTimeEqual(candidate.token, bearerToken));
   if (match) {
@@ -104,7 +107,17 @@ export async function requireAuthFromHeaders(
     return context;
   }
 
-  // 2. DB-backed per-user API keys.
+  // 2. Clerk OAuth access tokens from browser MCP connectors (claude.ai).
+  if (bearerToken.startsWith("oat_") && resolvers.resolveOAuthToken) {
+    const resolved = await resolvers.resolveOAuthToken(bearerToken);
+    if (resolved) {
+      const context: AuthContext = { ...resolved, mode: "oauth", interfaceId, requestId };
+      assertScopes(context, requiredScopes);
+      return context;
+    }
+  }
+
+  // 3. DB-backed per-user API keys.
   if (bearerToken.startsWith("trove_") && resolvers.resolveApiKey) {
     const resolved = await resolvers.resolveApiKey(bearerToken);
     if (resolved) {
@@ -114,7 +127,7 @@ export async function requireAuthFromHeaders(
     }
   }
 
-  // 3. Clerk session JWTs from the dashboard.
+  // 4. Clerk session JWTs from the dashboard.
   if (bearerToken.split(".").length === 3 && resolvers.resolveClerkToken) {
     const resolved = await resolvers.resolveClerkToken(bearerToken);
     if (resolved) {

@@ -7,7 +7,7 @@ try {
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { Hono } from "hono";
+import { Hono, type Context as HonoContext } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
 import {
@@ -47,7 +47,12 @@ import {
   type AuthResolvers,
   type TroveScope,
 } from "./auth.js";
-import { createApiKeyResolver, createClerkResolver } from "./clerkAuth.js";
+import { createApiKeyResolver, createClerkResolver, createOAuthResolver } from "./clerkAuth.js";
+import {
+  buildProtectedResourceMetadata,
+  requestOrigin,
+  resourceMetadataUrl,
+} from "./oauthMetadata.js";
 import { createGraphStore } from "./createStore.js";
 import { startJobWorker } from "./jobWorker.js";
 import { createTroveMcpServer } from "./mcpTools.js";
@@ -68,6 +73,8 @@ if (userStore) {
   authResolvers.resolveApiKey = createApiKeyResolver(userStore);
   const clerkResolver = createClerkResolver(userStore);
   if (clerkResolver) authResolvers.resolveClerkToken = clerkResolver;
+  const oauthResolver = createOAuthResolver(userStore);
+  if (oauthResolver) authResolvers.resolveOAuthToken = oauthResolver;
 }
 
 app.use("/mcp", cors({
@@ -94,6 +101,21 @@ app.get("/health", (context) => {
   });
 });
 
+// OAuth 2.0 Protected Resource Metadata (RFC 9728). Browser MCP connectors
+// (claude.ai) read this to discover the Clerk authorization server. Served at
+// both the bare path and the /mcp-suffixed path, and left public + CORS-open.
+const serveProtectedResourceMetadata = (context: HonoContext) => {
+  const origin = requestOrigin(context.req.url, context.req.raw.headers);
+  const metadata = buildProtectedResourceMetadata(origin);
+  context.header("Access-Control-Allow-Origin", "*");
+  if (!metadata) {
+    return context.json({ error: "oauth_not_configured", message: "No Clerk publishable key configured." }, 404);
+  }
+  return context.json(metadata);
+};
+app.get("/.well-known/oauth-protected-resource", serveProtectedResourceMetadata);
+app.get("/.well-known/oauth-protected-resource/mcp", serveProtectedResourceMetadata);
+
 app.get("/ready", async (context) => {
   try {
     await store.health();
@@ -116,7 +138,15 @@ app.all("/mcp", async (context) => {
     await mcpServer.connect(transport);
     return transport.handleRequest(context.req.raw);
   } catch (error) {
-    if (error instanceof AuthError) return context.json(authErrorBody(error), error.status);
+    if (error instanceof AuthError) {
+      // Point browser MCP clients at the resource metadata so they can start
+      // the OAuth flow (RFC 9728 §5.1). Only meaningful on a 401.
+      if (error.status === 401) {
+        const origin = requestOrigin(context.req.url, context.req.raw.headers);
+        context.header("WWW-Authenticate", `Bearer resource_metadata="${resourceMetadataUrl(origin)}"`);
+      }
+      return context.json(authErrorBody(error), error.status);
+    }
     throw error;
   }
 });

@@ -53,6 +53,8 @@ http://localhost:8787/mcp
 
 For production, put this endpoint behind TLS plus OAuth or scoped service tokens. The MCP endpoint and the JSON API share the same store and validation layer.
 
+Trove resolves a `Authorization: Bearer <token>` in four ways, by prefix: env **service tokens** (agents/ops), `oat_` **Clerk OAuth access tokens** (browser connectors — see [oauth.md](oauth.md)), `trove_` **per-user API keys** (dashboard-managed), and Clerk **session JWTs** (dashboard). CLI/stdio clients use service tokens or per-user keys; the claude.ai/Claude Desktop Connectors panel uses the OAuth flow.
+
 ### Service Tokens
 
 Local development runs without auth if `TROVE_SERVICE_TOKENS` is unset. Hosted deployments should set it.

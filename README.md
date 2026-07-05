@@ -36,91 +36,20 @@ Trove is an **evidence graph**: nothing is a free-floating fact. Everything an a
 
 **Tiered tools.** The MCP surface is filtered by your credential's scope. Read-only keys see only `recall`, `grep`, and `read`; write keys add `remember`, `connect`, `forget`, `ingest`, and the curation tools; admin keys also see the operator tools (`jobs`, `lint`, `export_obsidian`). Visibility is convenience — every call is still scope-checked server-side.
 
-## Quick start (local, 5 minutes)
+## Get started
 
-Requirements: Node 22+, Docker.
+Use the hosted service at **[mytrove.in](https://mytrove.in)** — sign in, create an API key on the dashboard, and point your agent at `https://mytrove.in/mcp`. Or run it yourself in about five minutes.
+
+→ **[docs/quickstart.md](docs/quickstart.md)** — local setup, API keys and scopes, connecting agents (Claude Code, stdio, and the claude.ai OAuth connector), importing an Obsidian vault, and enabling semantic search.
 
 ```bash
-git clone https://github.com/anunay999/trove.git && cd trove
-npm install
-
-# 1. Start Postgres (pgvector, host port 5433) and create the schema
+# the short version, locally
+git clone https://github.com/anunay999/trove.git && cd trove && npm install
 docker compose up -d postgres
 export DATABASE_URL=postgres://trove:trove@localhost:5433/trove
-npm run db:schema && npm run db:migrate
-
-# 2. Start the API + dashboard
-npm run web:build
-npm start
+npm run db:schema && npm run db:migrate && npm run web:build && npm start
+# → dashboard at http://localhost:8787
 ```
-
-Open **http://localhost:8787** — the dashboard is served by the API. With no tokens configured, local dev runs with auth disabled and needs no key.
-
-## Generate an API key
-
-Trove uses simple scoped bearer tokens. Generate one and put it in `.env` (copy `.env.example` first):
-
-```bash
-openssl rand -hex 16   # e.g. 9f2c...
-```
-
-```bash
-# .env — format: token|actor-name|scopes  (separate multiple tokens with ;)
-TROVE_SERVICE_TOKENS='trove_9f2c...|my-agent|graph:read,graph:write,graph:export'
-```
-
-| Scope | Tools it unlocks |
-|---|---|
-| `graph:read` | `recall`, `grep`, `read` + stats/dashboard |
-| `graph:write` | `remember`, `connect`, `forget`, `ingest`, `annotate`, views |
-| `graph:export` | `export_obsidian` and markdown exports |
-| `graph:admin` | everything, including `jobs`/`lint` and maintenance |
-
-Restart the server and every request now needs `Authorization: Bearer <token>`. The dashboard will prompt for the API key on first load and remember it.
-
-## Connect your agents
-
-**Claude Code / Claude Desktop (hosted or local HTTP):**
-
-```bash
-claude mcp add trove --transport http http://localhost:8787/mcp \
-  --header "Authorization: Bearer <your-token>"
-```
-
-**Local stdio (no server needed):**
-
-```bash
-claude mcp add trove -- npx tsx /path/to/trove/src/mcpServer.ts
-```
-
-Agents get a small verb-per-job toolset: `remember`, `recall`, `grep`, `read`, `connect`, and `forget` (plus curation tools like `ingest` for write-scoped keys). Optionally install the companion skills so Claude uses them well:
-
-```bash
-npx skills add ./skills -g
-```
-
-## Bring your notes
-
-Import an Obsidian vault (or any folder of markdown):
-
-```bash
-npm run import:vault -- ~/path/to/vault
-```
-
-Re-running is safe: unchanged files are hash-deduped no-ops, and dated log files only store new entries.
-
-## Semantic search (optional)
-
-Lexical search works out of the box. For semantic recall, add an embedding provider to `.env`:
-
-```bash
-TROVE_EMBEDDING_PROVIDER=openai
-TROVE_EMBEDDING_MODEL=text-embedding-3-small
-TROVE_EMBEDDING_DIMENSIONS=1536
-OPENAI_API_KEY=sk-...
-```
-
-New ingests are embedded automatically: a background worker in the server drains the job queue every 30 seconds. Nothing to run, nothing to schedule.
 
 ## Deploy
 
@@ -128,6 +57,8 @@ Trove ships a production Dockerfile (API + dashboard in one image) and a `railwa
 
 ## Learn more
 
+- [docs/quickstart.md](docs/quickstart.md) — setup, keys, connecting agents, importing notes
+- [docs/oauth.md](docs/oauth.md) — the claude.ai OAuth connector (Clerk-backed)
 - [docs/development.md](docs/development.md) — architecture, data model, test suites, and design rationale (start here if you're hacking on Trove)
 - [docs/mcp.md](docs/mcp.md) — full MCP tool and resource reference
 - [docs/agent-api.md](docs/agent-api.md) — HTTP API contract

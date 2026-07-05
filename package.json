@@ -17,6 +17,7 @@
     "mcp:http:test": "tsx scripts/testMcpHttp.ts",
     "auth:test": "tsx scripts/testAuth.ts",
     "agentops:test": "tsx scripts/testAgentOps.ts",
+    "oauth:test": "tsx scripts/testOAuth.ts",
     "events:test": "tsx scripts/testEvents.ts",
     "retrieval:test": "tsx scripts/testRetrieval.ts",
     "recall:test": "tsx scripts/testRecall.ts",
