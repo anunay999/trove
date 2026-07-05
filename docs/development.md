@@ -22,8 +22,8 @@ Everything else — markdown, mind maps, search indexes, Obsidian vaults, chat s
 
 Key mechanics:
 
-- **Bitemporal edges** — edges carry `valid_from/valid_until` (world time) and `created_at/expired_at` (system time). Supersession is edge invalidation (`graph.link({supersedesEdgeId})`, `graph.invalidate_edge`), never deletion; `graph.neighborhood` time-travels with `asOf`.
-- **Token-budgeted recall** — `graph.recall` runs hybrid search → one-hop expansion → ACT-R-style activation ranking → a greedy packer with citations. Reads bump `access_count`, so recalled memories strengthen.
+- **Bitemporal edges** — edges carry `valid_from/valid_until` (world time) and `created_at/expired_at` (system time). Supersession is edge invalidation (`connect({supersedesEdgeId})`, `forget`), never deletion; `neighborhood` time-travels with `asOf`.
+- **Token-budgeted recall** — `recall` runs hybrid search → one-hop expansion → ACT-R-style activation ranking → a greedy packer with citations. Reads bump `access_count`, so recalled memories strengthen.
 - **Provenance** — each write is appended to `graph_event` with actor, interface, and request attribution. HTTP callers can send `X-Trove-Interface` and `X-Request-Id`; hosted MCP defaults to `mcp`, local stdio MCP to `stdio-mcp`.
 
 The deeper design docs:
@@ -70,7 +70,6 @@ DATABASE_URL=postgres://trove:trove@localhost:5433/trove npm run mcp   # stdio
 # hosted Streamable HTTP endpoint: http://localhost:8787/mcp
 ```
 
-Scribe-compatible aliases exist for agents that think in the wiki workflow: `scribe.query`, `scribe.capture`, `scribe.ingest`, `scribe.update`, `scribe.lint`, `scribe.export_obsidian`.
 
 Read-only MCP resources: `trove://health`, `trove://lint`, `trove://timeline`, `trove://events`, `trove://jobs`, `trove://views`, `trove://graph`, `trove://projection/obsidian/manifest`.
 
@@ -112,7 +111,7 @@ DATABASE_URL=postgres://trove:trove@localhost:5433/trove npm run import:scribe -
 
 The importer is evidence-first and episodic-aware:
 
-- append-heavy files (`log.md`, anything with 3+ dated `## [YYYY-MM-DD]` entries) and `index.md` split into per-entry/per-section sources deduped by content hash, so re-imports store only new entries; `POST /v1/document` (and `graph.read_source` for single sources) reconstructs the full file
+- append-heavy files (`log.md`, anything with 3+ dated `## [YYYY-MM-DD]` entries) and `index.md` split into per-entry/per-section sources deduped by content hash, so re-imports store only new entries; `POST /v1/document` (and `read` for single sources) reconstructs the full file
 - `*.sync-conflict-*` files are skipped
 - each ordinary markdown file becomes a `source`, its text becomes addressable `text_unit` rows, the page-level concept becomes a semantic `node` annotated back to evidence, and resolvable Obsidian wikilinks become `mentions` edges
 
@@ -128,7 +127,7 @@ The export writes `Trove Index.md`, `Trove Log.md`, `Trove Views.md`, `Trove.can
 
 Graph mutations enqueue maintenance jobs (`refresh_embeddings`, `lint_graph`, `refresh_obsidian_projection`) into `graph_job`, deduped by a `maintenance:<kind>` key while pending.
 
-The API server runs a background worker (`src/jobWorker.ts`) that drains the queue every `TROVE_JOB_INTERVAL_MS` (default 30s). Each tick runs up to 20 jobs; when a `refresh_embeddings` batch reports more missing rows than it embedded, the worker re-enqueues a follow-up batch, so large imports catch up across ticks. Claiming uses `for update skip locked`, so multiple instances never double-run a job. Disable with `TROVE_AUTORUN_JOBS=0`; manual draining still works via `npm run jobs:run`, `POST /v1/jobs/run` (admin scope), or the `graph.run_job` MCP tool.
+The API server runs a background worker (`src/jobWorker.ts`) that drains the queue every `TROVE_JOB_INTERVAL_MS` (default 30s). Each tick runs up to 20 jobs; when a `refresh_embeddings` batch reports more missing rows than it embedded, the worker re-enqueues a follow-up batch, so large imports catch up across ticks. Claiming uses `for update skip locked`, so multiple instances never double-run a job. Disable with `TROVE_AUTORUN_JOBS=0`; manual draining still works via `npm run jobs:run`, `POST /v1/jobs/run` (admin scope), or the `run_job` MCP tool.
 
 Embedding refresh is provider-gated (`TROVE_EMBEDDING_PROVIDER`) and embeds up to `TROVE_EMBEDDING_JOB_LIMIT` (default 24) missing rows per run. Search stays functional without embeddings via the lexical path.
 

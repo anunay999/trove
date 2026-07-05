@@ -12,6 +12,7 @@ import type {
   GraphNode,
   GraphSource,
   GraphView,
+  GrepInput,
   IngestInput,
   InvalidateEdgeInput,
   LinkInput,
@@ -28,6 +29,8 @@ import type {
   UpdateInput,
 } from "./contracts.js";
 import {
+  compileGrepPattern,
+  grepExcerpt,
   isTextUnit,
   decodeEventCursor,
   encodeEventCursor,
@@ -45,6 +48,8 @@ import {
   type GraphSnapshot,
   type GraphStore,
   type GraphViewSnapshot,
+  type GrepMatch,
+  type GrepResult,
   type ProjectResult,
   type ReadResult,
   type RecallResult,
@@ -205,6 +210,86 @@ export class PgGraphStore implements GraphStore {
       contentText: String(whole.rows[0].content_text ?? ""),
       segmentCount: 1,
     };
+  }
+
+  async grep(input: GrepInput): Promise<GrepResult> {
+    const scope = input.scope ?? "all";
+    const limit = input.limit ?? 20;
+    const caseSensitive = input.caseSensitive ?? false;
+    const operator = caseSensitive ? "~" : "~*";
+    const regex = compileGrepPattern(input.pattern, caseSensitive);
+    const literalRegex = compileGrepPattern(input.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), caseSensitive);
+    const likeLiteral = `%${input.pattern.replace(/[%_\\]/g, "\\$&")}%`;
+    const matches: GrepMatch[] = [];
+    const excerptFor = (text: string): string | null => grepExcerpt(text, regex) ?? grepExcerpt(text, literalRegex);
+
+    if (scope === "nodes" || scope === "all") {
+      const nodeSql = (predicate: string) => `
+        select n.id, n.slug, n.title, n.summary, nr.content
+        from node n
+        left join node_revision nr on nr.id = n.current_revision_id
+        where n.deleted_at is null and (${predicate})
+        order by n.updated_at desc
+        limit $2`;
+      let rows: Array<Record<string, unknown>>;
+      try {
+        rows = (await this.pool.query(
+          nodeSql(`n.title ${operator} $1 or coalesce(n.summary, '') ${operator} $1 or coalesce(nr.content, '') ${operator} $1`),
+          [input.pattern, limit + 1],
+        )).rows;
+      } catch {
+        // JS accepted the pattern but Postgres POSIX regex rejected it — fall back to a literal scan.
+        rows = (await this.pool.query(
+          nodeSql("n.title ilike $1 or coalesce(n.summary, '') ilike $1 or coalesce(nr.content, '') ilike $1"),
+          [likeLiteral, limit + 1],
+        )).rows;
+      }
+      for (const row of rows) {
+        const fields: Array<["title" | "summary" | "content", string | null]> = [
+          ["title", row.title == null ? null : String(row.title)],
+          ["summary", row.summary == null ? null : String(row.summary)],
+          ["content", row.content == null ? null : String(row.content)],
+        ];
+        for (const [field, value] of fields) {
+          if (!value) continue;
+          const excerpt = excerptFor(value);
+          if (excerpt !== null) {
+            matches.push({ kind: "node", nodeId: String(row.id), slug: String(row.slug), title: String(row.title), field, excerpt });
+            break;
+          }
+        }
+      }
+    }
+
+    if (scope === "sources" || scope === "all") {
+      const unitSql = (predicate: string) => `
+        select tu.id, tu.source_id, tu.ordinal, tu.text, s.title
+        from text_unit tu
+        join source s on s.id = tu.source_id
+        where ${predicate}
+        order by tu.created_at desc, tu.ordinal
+        limit $2`;
+      let rows: Array<Record<string, unknown>>;
+      try {
+        rows = (await this.pool.query(unitSql(`tu.text ${operator} $1`), [input.pattern, limit + 1])).rows;
+      } catch {
+        rows = (await this.pool.query(unitSql("tu.text ilike $1"), [likeLiteral, limit + 1])).rows;
+      }
+      for (const row of rows) {
+        const text = String(row.text ?? "");
+        matches.push({
+          kind: "source",
+          sourceId: String(row.source_id),
+          textUnitId: String(row.id),
+          ordinal: Number(row.ordinal),
+          title: String(row.title),
+          field: "text",
+          excerpt: excerptFor(text) ?? text.slice(0, 240),
+        });
+      }
+    }
+
+    return { matches: matches.slice(0, limit), truncated: matches.length > limit };
   }
 
   async search(input: SearchInput): Promise<SearchResult> {

@@ -11,10 +11,10 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 const PHASE_MS = 3200;
 
 const PHASES = [
-  { cmd: 'graph.capture("Sarah joined as the designer")', caption: "Agents capture facts, with the source attached" },
-  { cmd: "graph.link(sarah → website-redesign)", caption: "Facts connect into a graph" },
-  { cmd: 'graph.update("deadline moved to Friday")', caption: "Beliefs update on the record. History stays." },
-  { cmd: 'graph.recall("where is the redesign at?")', caption: "Recall surfaces the facts that matter, sized to your budget" },
+  { cmd: 'remember("Sarah joined as the designer")', caption: "Agents capture facts, with the source attached" },
+  { cmd: "connect(sarah → website-redesign)", caption: "Facts connect into a graph" },
+  { cmd: 'remember("deadline moved to Friday")', caption: "Beliefs update on the record. History stays." },
+  { cmd: 'recall("where is the redesign at?")', caption: "Recall surfaces the facts that matter, sized to your budget" },
 ];
 
 // Story nodes, coordinates in a 0-100 field (percent of the scene box).

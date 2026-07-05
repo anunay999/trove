@@ -7,6 +7,7 @@ import type {
   DeleteViewInput,
   EnqueueJobInput,
   EventFeedInput,
+  GrepInput,
   GraphAnnotation,
   GraphEdge,
   GraphJobKind,
@@ -110,6 +111,41 @@ export type SearchResult = {
   textUnits: TextUnit[];
 };
 
+export type GrepMatch = {
+  kind: "node" | "source";
+  nodeId?: string;
+  slug?: string;
+  sourceId?: string;
+  textUnitId?: string;
+  ordinal?: number;
+  title: string;
+  field: "title" | "summary" | "content" | "text";
+  excerpt: string;
+};
+
+export type GrepResult = {
+  matches: GrepMatch[];
+  truncated: boolean;
+};
+
+/** Compile a grep pattern; invalid regex degrades to a literal substring match. */
+export function compileGrepPattern(pattern: string, caseSensitive: boolean): RegExp {
+  const flags = caseSensitive ? "" : "i";
+  try {
+    return new RegExp(pattern, flags);
+  } catch {
+    return new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flags);
+  }
+}
+
+export function grepExcerpt(text: string, regex: RegExp, radius = 120): string | null {
+  const match = regex.exec(text);
+  if (!match) return null;
+  const start = Math.max(0, match.index - radius);
+  const end = Math.min(text.length, match.index + match[0].length + radius);
+  return `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
+}
+
 export type GraphSnapshot = {
   nodes: GraphNode[];
   edges: GraphEdge[];
@@ -177,6 +213,7 @@ export type GraphStore = {
   readSource(input: { sourceId: string }): MaybePromise<GraphSourceDocument | null>;
   readDocument(input: { uri: string }): MaybePromise<GraphDocument | null>;
   search(input: SearchInput): MaybePromise<SearchResult>;
+  grep(input: GrepInput): MaybePromise<GrepResult>;
   read(input: ReadInput): MaybePromise<ReadResult | null>;
   neighborhood(input: NeighborhoodInput): MaybePromise<{ nodes: GraphNode[]; edges: GraphEdge[] }>;
   recall(input: RecallInput): MaybePromise<RecallResult>;

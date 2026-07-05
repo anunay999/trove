@@ -86,46 +86,42 @@ The service stores these on `graph_event.interface_id` and `graph_event.request_
 
 Supported scopes:
 
-- `graph:read` - search, read, neighborhood, timeline, project
+- `graph:read` - recall, grep, read, neighborhood, project
 - `graph:write` - all write tools
-- `graph:write:capture` - capture semantic nodes
-- `graph:write:update` - update nodes and annotations
-- `graph:write:link` - create relationships
+- `graph:write:capture` - remember (create path)
+- `graph:write:update` - remember (revise path), annotations, views
+- `graph:write:link` - connect and forget
 - `graph:write:ingest` - ingest sources
 - `graph:export` - export Obsidian projections
 - `graph:admin` - all operations
 
 ## Tools
 
-- `graph.search` - search semantic nodes and source text units
-- `graph.read` - read a node with evidence and annotations
-- `graph.neighborhood` - expand graph neighbors for mind maps or context
-- `graph.link` - create typed relationships between nodes
-- `graph.ingest` - ingest long-form source content
-- `graph.capture` - capture a semantic graph atom
-- `graph.annotate` - attach meaning to evidence
-- `graph.update` - update a node with revision checking
-- `graph.project` - render markdown, mind map, or agent context
-- `graph.timeline` - inspect graph mutation events
-- `graph.events` - read cursor-paginated graph mutation events for interface sync
-- `graph.lint` - inspect graph health issues
-- `graph.views` - list saved mind-map and projection views
-- `graph.read_view` - read a saved view with included nodes and edges
-- `graph.create_view` - save a durable mind-map view from a root, query, or explicit node set
-- `graph.delete_view` - delete a saved view by id or slug
-- `graph.jobs` - list durable maintenance jobs
-- `graph.enqueue_job` - enqueue projection, lint, or embedding maintenance work
-- `graph.run_job` - claim and run one pending maintenance job inline
-- `graph.export_obsidian` - export an Obsidian vault projection with files and a manifest
+Tool visibility is tiered by credential scope: core tools are shown to every credential, curator tools require a write scope, operator tools require `graph:admin`. Call-time scope checks apply regardless of visibility.
 
-Scribe-compatible aliases:
+Core (the everyday agent vocabulary):
 
-- `scribe.query` - query the hosted knowledge graph
-- `scribe.capture` - save a durable semantic note
-- `scribe.ingest` - ingest a raw source into the evidence layer
-- `scribe.update` - update a graph node with revision checking
-- `scribe.lint` - run the Trove health check with Scribe naming
-- `scribe.export_obsidian` - export the Obsidian projection
+- `remember` - save a memory; revises on exact title/slug match, else creates. Returns the action taken plus `similar` near-matches it did not merge into
+- `recall` - token-budgeted context pack: hybrid search, graph expansion, activation ranking, citations
+- `grep` - exact/regex text search over nodes and raw sources; invalid regex degrades to a literal match
+- `read` - read a node (with evidence) or raw source document by id or slug
+- `connect` - create a typed relationship; `supersedesEdgeId` replaces a belief on the record
+- `forget` - retire beliefs; query mode previews (dryRun) first, explicit edgeIds apply immediately
+
+Curator (ingestion and curation flows):
+
+- `ingest` - store long-form source content as evidence text units
+- `annotate` - attach meaning to evidence without rewriting it
+- `neighborhood` - expand graph neighbors, optionally `asOf` a past time
+- `project` - render markdown, mind map, or agent context
+- `views` / `read_view` / `create_view` / `delete_view` - saved mind-map views
+
+Operator (admin credentials only):
+
+- `events` - cursor-paginated graph mutation events for interface sync
+- `lint` - graph health issues
+- `jobs` / `enqueue_job` / `run_job` - durable maintenance queue
+- `export_obsidian` - Obsidian vault projection with files and a manifest
 
 ## Resources
 
@@ -133,7 +129,6 @@ Trove exposes read-only MCP resources for stable agent context:
 
 - `trove://health` - store health
 - `trove://lint` - current graph health report
-- `trove://timeline` - recent graph mutation events
 - `trove://events` - first page of the cursor event feed
 - `trove://jobs` - recent durable maintenance jobs
 - `trove://views` - saved mind-map and projection views
@@ -144,15 +139,12 @@ Agents should prefer resources for read-only context and tools for operations th
 
 ## Prompts
 
-Reusable Scribe workflow prompts:
-
-- `scribe-query` - query the hosted graph and cite durable context
-- `scribe-capture` - prepare an evidence-first capture
-- `scribe-lint` - review graph health without mutating data
+- `trove-recall` - answer a question from Trove memory with citations
+- `trove-remember` - save durable knowledge with evidence-first discipline
 
 ## Obsidian Projection
 
-`graph.export_obsidian` and `GET /v1/export/obsidian` return:
+`export_obsidian` and `GET /v1/export/obsidian` return:
 
 - `files`: a deterministic map of vault-relative paths to content
 - `manifest`: `formatVersion`, generation time, file count, content hash, and per-file hashes
@@ -179,7 +171,6 @@ The writer uses the previous manifest to remove stale generated files without to
 
 ```bash
 DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run mcp:test
-DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm run scribe:mcp:test
 ```
 
 HTTP MCP smoke test:
@@ -208,16 +199,16 @@ npm run export:obsidian:test
 Expected result:
 
 - MCP server starts on stdio.
-- Tool list includes all `graph.*` tools.
+- Tool list includes the core, curator, and operator tools for an admin credential.
 - Resource list includes `trove://lint` and other stable graph URIs.
-- Prompt list includes the `scribe-*` workflows.
-- `graph.search` returns results from the configured store.
-- `graph.events` returns a cursor-paginated feed with `nextCursor` and `hasMore`.
+- Prompt list includes the `trove-*` workflows.
+- `grep` returns results from the configured store.
+- `events` returns a cursor-paginated feed with `nextCursor` and `hasMore`.
 - Lexical search uses Postgres full text ranking over nodes, revisions, and text units; semantic/hybrid search uses pgvector only when real embeddings exist.
-- `graph.jobs` and `trove://jobs` expose queue state.
-- `graph.views` and `trove://views` expose saved mind maps.
-- A read-only token can search but cannot capture or export.
-- HTTP and MCP writes appear in `graph.timeline` with actor, interface, and request attribution.
+- `jobs` and `trove://jobs` expose queue state.
+- `views` and `trove://views` expose saved mind maps.
+- A read-only token sees only core tools and cannot remember or export.
+- HTTP and MCP writes appear in the event feed with actor, interface, and request attribution.
 - Obsidian projection includes index, log, canvas mind map, node files, and a hash manifest.
 
 ## Design Rule

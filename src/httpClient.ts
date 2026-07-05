@@ -36,7 +36,7 @@ export class TroveHttpClient {
   }
 
   search(input: SearchInput): Promise<SearchResult> {
-    return this.request("POST", "/v1/scribe/query", input);
+    return this.request("POST", "/v1/search", input);
   }
 
   capture(input: CaptureInput): Promise<{ node: unknown }> {
@@ -44,7 +44,7 @@ export class TroveHttpClient {
   }
 
   lint(): Promise<GraphLintReport> {
-    return this.request("GET", "/v1/scribe/lint");
+    return this.request("GET", "/v1/lint");
   }
 
   events(input: Partial<EventFeedInput> = {}): Promise<GraphEventFeed> {
@@ -93,7 +93,7 @@ export class TroveHttpClient {
   }
 
   exportObsidian(): Promise<ObsidianVaultExport> {
-    return this.request("GET", "/v1/scribe/export/obsidian");
+    return this.request("GET", "/v1/export/obsidian");
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {

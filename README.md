@@ -6,7 +6,7 @@ Trove is a hosted knowledge graph for agent memory. Claude, Codex, and any MCP-c
 
 ## What you get
 
-- **Durable agent memory** — agents save facts, decisions, and notes through MCP tools (`graph.capture`, `graph.ingest`) and recall them later with `graph.recall`, which packs the most relevant memories into a token budget you set.
+- **Durable agent memory** — agents save facts, decisions, and notes through MCP tools (`remember`, `ingest`) and retrieve them later with `recall`, which packs the most relevant memories into a token budget you set.
 - **Time-travel, not overwrites** — facts carry validity intervals. When something changes, the old edge is invalidated, never deleted, so you can ask what the graph believed at any point in time.
 - **Evidence, always** — every node links back to the exact source text it came from. Nothing in the graph is unsupported.
 - **A dashboard** — memory KPIs, write-cadence heatmap, lint health, and an interactive force-directed graph explorer with a full-document reader.
@@ -69,7 +69,7 @@ claude mcp add trove --transport http http://localhost:8787/mcp \
 claude mcp add trove -- npx tsx /path/to/trove/src/mcpServer.ts
 ```
 
-Agents get tools like `graph.recall`, `graph.capture`, `graph.ingest`, `graph.query`, and `graph.read`. Optionally install the companion skills so Claude uses them well:
+Agents get a small verb-per-job toolset: `remember`, `recall`, `grep`, `read`, `connect`, and `forget` (plus curation tools like `ingest` for write-scoped keys). Optionally install the companion skills so Claude uses them well:
 
 ```bash
 npx skills add ./skills -g

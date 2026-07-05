@@ -88,17 +88,26 @@ async function expectMcpSearch(token: string): Promise<void> {
   const client = await connectMcp(token);
   try {
     const tools = await client.request({ method: "tools/list", params: {} }, ListToolsResultSchema);
-    if (!tools.tools.some((tool) => tool.name === "graph.search")) {
-      throw new Error("graph.search was not listed.");
+    if (!tools.tools.some((tool) => tool.name === "grep")) {
+      throw new Error("grep was not listed.");
+    }
+    // Tier visibility: curator tools need a write scope, operator tools need admin.
+    const names = new Set(tools.tools.map((tool) => tool.name));
+    const isWrite = token !== (process.env.TROVE_READ_TOKEN ?? "read-token");
+    if (names.has("ingest") !== isWrite) {
+      throw new Error(`Curator tools ${isWrite ? "missing for write" : "visible to read-only"} token.`);
+    }
+    if (names.has("jobs")) {
+      throw new Error("Operator tools must be hidden from non-admin tokens.");
     }
 
     await client.request(
       {
         method: "tools/call",
         params: {
-          name: "graph.search",
+          name: "grep",
           arguments: {
-            query: "Trove",
+            pattern: "Trove",
             limit: 1,
           },
         },
@@ -117,7 +126,7 @@ async function expectMcpCaptureDenied(token: string): Promise<void> {
       {
         method: "tools/call",
         params: {
-          name: "graph.capture",
+          name: "remember",
           arguments: {
             title: "Auth smoke should not be captured",
             type: "claim",
@@ -177,7 +186,7 @@ async function expectMcpCaptureAttributed(token: string): Promise<void> {
       {
         method: "tools/call",
         params: {
-          name: "graph.capture",
+          name: "remember",
           arguments: {
             title: `Auth attribution MCP smoke ${Date.now()}`,
             type: "claim",

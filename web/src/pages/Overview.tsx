@@ -104,7 +104,7 @@ export function Overview({ stats, dark }: { stats: Stats | null; dark: boolean }
             <BarList rows={recalled} neutralColor={neutral} />
           ) : (
             <p className="text-sm leading-relaxed text-muted-foreground">
-              No recalls recorded yet. Once agents call graph.recall or graph.read, the most
+              No recalls recorded yet. Once agents call recall or read, the most
               retrieved memories surface here.
             </p>
           )}

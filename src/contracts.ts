@@ -146,6 +146,13 @@ export const invalidateEdgeInputSchema = z.object({
   validUntil: z.string().optional(),
 });
 
+export const grepInputSchema = z.object({
+  pattern: z.string().min(1),
+  scope: z.enum(["nodes", "sources", "all"]).default("all"),
+  caseSensitive: z.boolean().default(false),
+  limit: z.number().int().min(1).max(100).default(20),
+});
+
 export const recallInputSchema = z.object({
   query: z.string().min(1),
   tokenBudget: z.number().int().min(100).max(32000).default(2000),
@@ -181,6 +188,36 @@ export const captureInputSchema = z.object({
     toSlug: z.string().min(1),
     predicate: z.string().min(1).default("relates_to"),
   })).default([]),
+});
+
+export const rememberInputSchema = z.object({
+  title: z.string().min(1),
+  type: nodeTypeSchema.default("claim"),
+  summary: z.string().min(1),
+  content: z.string().optional(),
+  evidence: z.array(evidenceRefSchema).default([]),
+  links: z.array(z.object({
+    toSlug: z.string().min(1),
+    predicate: z.string().min(1).default("relates_to"),
+  })).default([]),
+  nodeId: z.string().uuid().optional(),
+  slug: z.string().min(1).optional(),
+});
+
+export const forgetInputSchema = z.object({
+  edgeIds: z.array(z.string().uuid()).optional(),
+  query: z.string().min(1).optional(),
+  dryRun: z.boolean().optional(),
+  validUntil: z.string().optional(),
+}).refine((value) => (value.edgeIds && value.edgeIds.length > 0) || value.query, {
+  message: "Provide edgeIds or a query.",
+});
+
+export const readAnyInputSchema = z.object({
+  id: z.string().uuid().optional(),
+  slug: z.string().min(1).optional(),
+}).refine((value) => value.id || value.slug, {
+  message: "Provide id or slug.",
 });
 
 export const annotateInputSchema = z.object({
@@ -326,3 +363,7 @@ export type EnqueueJobInput = z.infer<typeof enqueueJobInputSchema>;
 export type ListJobsInput = z.infer<typeof listJobsInputSchema>;
 export type RunJobInput = z.infer<typeof runJobInputSchema>;
 export type EventFeedInput = z.infer<typeof eventFeedInputSchema>;
+export type GrepInput = z.input<typeof grepInputSchema>;
+export type RememberInput = z.input<typeof rememberInputSchema>;
+export type ForgetInput = z.infer<typeof forgetInputSchema>;
+export type ReadAnyInput = z.infer<typeof readAnyInputSchema>;

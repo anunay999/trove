@@ -193,13 +193,13 @@ This makes mind maps durable artifacts agents can edit. Example views:
 
 Agent writes should be proposal-shaped, even when applied automatically:
 
-1. Agent calls `graph.capture`, `graph.update`, `graph.link`, or `graph.ingest`.
+1. Agent calls `remember`, `connect`, or `ingest`.
 2. Service validates schema, permissions, citations, and revision token.
 3. Service writes all node/edge/claim/revision changes in one transaction.
 4. Service appends events.
 5. Service enqueues durable maintenance jobs.
 6. Worker refreshes search vectors, markdown export, and affected mind-map views.
-7. Interfaces poll `graph.events` from their last cursor to update local UI/projections.
+7. Interfaces poll `events` from their last cursor to update local UI/projections.
 
 ```mermaid
 sequenceDiagram
@@ -208,7 +208,7 @@ sequenceDiagram
   participant DB as Postgres
   participant Worker
 
-  Agent->>API: graph.update(base_revision, changes)
+  Agent->>API: remember(slug, changes)
   API->>API: validate scopes, schema, citations
   API->>DB: transaction: nodes, edges, claims, revision, event
   API->>DB: enqueue graph_job rows
@@ -249,17 +249,17 @@ An Obsidian plugin is valuable, but it should call the service. If plugin state 
 
 ### Phase 1: Agent Read Path
 
-- `graph.search`
-- `graph.read`
-- `graph.neighborhood`
-- `graph.timeline`
+- `recall`
+- `grep`
+- `read`
+- `neighborhood`
 - MCP resource URIs
 
 ### Phase 2: Agent Write Path
 
-- `graph.capture`
-- `graph.update`
-- `graph.link`
+- `remember`
+- `connect`
+- `forget`
 - revision-token conflict checks
 - event log
 - actor, interface, and request attribution

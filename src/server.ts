@@ -17,6 +17,8 @@ import {
   deleteViewInputSchema,
   enqueueJobInputSchema,
   eventFeedInputSchema,
+  forgetInputSchema,
+  grepInputSchema,
   ingestInputSchema,
   invalidateEdgeInputSchema,
   linkInputSchema,
@@ -29,10 +31,12 @@ import {
   readDocumentInputSchema,
   readSourceInputSchema,
   recallInputSchema,
+  rememberInputSchema,
   runJobInputSchema,
   searchInputSchema,
   updateInputSchema,
 } from "./contracts.js";
+import { forget, remember } from "./agentOps.js";
 import {
   AuthError,
   authErrorBody,
@@ -48,7 +52,7 @@ import { createGraphStore } from "./createStore.js";
 import { startJobWorker } from "./jobWorker.js";
 import { createTroveMcpServer } from "./mcpTools.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
-import { troveTools } from "./toolDefinitions.js";
+import { troveTools, visibleTiers } from "./toolDefinitions.js";
 import { UserStore, type ApiKeySummary } from "./users.js";
 
 const app = new Hono();
@@ -120,11 +124,15 @@ app.all("/mcp", async (context) => {
 app.get("/v1/tools", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
+  const tiers = visibleTiers(auth.scopes);
   return context.json({
-    tools: troveTools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-    })),
+    tools: troveTools
+      .filter((tool) => tiers.has(tool.tier))
+      .map((tool) => ({
+        name: tool.name,
+        tier: tool.tier,
+        description: tool.description,
+      })),
   });
 });
 
@@ -346,6 +354,27 @@ app.post("/v1/capture", async (context) => {
   return context.json({ node: await store.capture(input, operationContextFromAuth(auth)) }, 201);
 });
 
+app.post("/v1/remember", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:capture"]);
+  if (auth instanceof Response) return auth;
+  const input = await parseJsonOrThrow(context.req.json(), rememberInputSchema);
+  return context.json(await remember(store, input, operationContextFromAuth(auth)), 201);
+});
+
+app.post("/v1/grep", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  if (auth instanceof Response) return auth;
+  const input = await parseJsonOrThrow(context.req.json(), grepInputSchema);
+  return context.json(await store.grep(input));
+});
+
+app.post("/v1/forget", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:link"]);
+  if (auth instanceof Response) return auth;
+  const input = await parseJsonOrThrow(context.req.json(), forgetInputSchema);
+  return context.json(await forget(store, input, operationContextFromAuth(auth)));
+});
+
 app.post("/v1/annotate", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:update"]);
   if (auth instanceof Response) return auth;
@@ -464,29 +493,6 @@ app.post("/v1/jobs/run", async (context) => {
 });
 
 app.get("/v1/export/obsidian", async (context) => {
-  const auth = await authorizeRequest(context.req.raw.headers, ["graph:export"]);
-  if (auth instanceof Response) return auth;
-  return context.json(buildObsidianVaultExport(
-    await store.exportMarkdown(),
-    await store.timeline(),
-    await store.exportGraph(),
-  ));
-});
-
-app.post("/v1/scribe/query", async (context) => {
-  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
-  if (auth instanceof Response) return auth;
-  const input = await parseJsonOrThrow(context.req.json(), searchInputSchema);
-  return context.json(await store.search(input));
-});
-
-app.get("/v1/scribe/lint", async (context) => {
-  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
-  if (auth instanceof Response) return auth;
-  return context.json(await store.lint());
-});
-
-app.get("/v1/scribe/export/obsidian", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:export"]);
   if (auth instanceof Response) return auth;
   return context.json(buildObsidianVaultExport(

@@ -15,7 +15,7 @@ function mcpSnippet(tool: McpTool, key: string): { text: string; hint: string } 
   if (tool === "Claude Code") {
     return {
       text: `claude mcp add trove --transport http ${url} --header "Authorization: Bearer ${key}"`,
-      hint: "Run in any terminal. Tools appear as graph.* in every Claude Code session.",
+      hint: "Run in any terminal. Tools like remember, recall, and grep appear in every Claude Code session.",
     };
   }
   if (tool === "Codex") {

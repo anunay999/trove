@@ -107,4 +107,4 @@ docker compose --profile app stop app
 - Use `GET /v1/export/obsidian` or `npm run export:obsidian` for Obsidian projections; do not sync generated markdown as canonical truth.
 - Agents should use MCP Streamable HTTP at `/mcp`.
 - Use `GET /v1/jobs`, `POST /v1/jobs`, `POST /v1/jobs/run`, or the MCP job tools for maintenance visibility and admin operations.
-- Interfaces should use `GET /v1/events?afterCursor=...` or `graph.events` for incremental sync checkpoints.
+- Interfaces should use `GET /v1/events?afterCursor=...` or `events` for incremental sync checkpoints.

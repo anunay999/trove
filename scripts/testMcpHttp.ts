@@ -28,7 +28,7 @@ try {
   const resources = await client.request({ method: "resources/list", params: {} }, ListResourcesResultSchema);
   const prompts = await client.request({ method: "prompts/list", params: {} }, ListPromptsResultSchema);
   const timeline = await client.request(
-    { method: "resources/read", params: { uri: "trove://timeline" } },
+    { method: "resources/read", params: { uri: "trove://health" } },
     ReadResourceResultSchema,
   );
   const jobsResource = await client.request(
@@ -47,10 +47,9 @@ try {
     {
       method: "tools/call",
       params: {
-        name: "graph.search",
+        name: "grep",
         arguments: {
-          query: "Trove",
-          includeTextUnits: true,
+          pattern: "Trove",
           limit: 2,
         },
       },
@@ -61,7 +60,7 @@ try {
     {
       method: "tools/call",
       params: {
-        name: "graph.jobs",
+        name: "jobs",
         arguments: { limit: 5 },
       },
     },
@@ -71,7 +70,7 @@ try {
     {
       method: "tools/call",
       params: {
-        name: "graph.views",
+        name: "views",
         arguments: { limit: 5 },
       },
     },
@@ -81,7 +80,7 @@ try {
     {
       method: "tools/call",
       params: {
-        name: "graph.events",
+        name: "events",
         arguments: { limit: 5 },
       },
     },

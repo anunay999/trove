@@ -53,17 +53,25 @@ try {
     ReadResourceResultSchema,
   );
   const queryPrompt = await client.request(
-    { method: "prompts/get", params: { name: "scribe-query", arguments: { question: "Trove" } } },
+    { method: "prompts/get", params: { name: "trove-recall", arguments: { question: "Trove" } } },
     GetPromptResultSchema,
   );
+
+  const toolNames = tools.tools.map((tool) => tool.name);
+  for (const required of ["remember", "recall", "grep", "read", "connect", "forget", "ingest", "jobs"]) {
+    if (!toolNames.includes(required)) throw new Error(`Tool ${required} missing from tools/list.`);
+  }
+  if (toolNames.some((name) => name.startsWith("scribe.") || name.startsWith("graph."))) {
+    throw new Error("Old scribe.*/graph.* tool names must not be listed.");
+  }
+
   const search = await client.request(
     {
       method: "tools/call",
       params: {
-        name: "graph.search",
+        name: "grep",
         arguments: {
-          query: "Trove",
-          includeTextUnits: true,
+          pattern: "Trove",
           limit: 2,
         },
       },
@@ -74,7 +82,7 @@ try {
     {
       method: "tools/call",
       params: {
-        name: "graph.jobs",
+        name: "jobs",
         arguments: { limit: 5 },
       },
     },
@@ -84,7 +92,7 @@ try {
     {
       method: "tools/call",
       params: {
-        name: "graph.views",
+        name: "views",
         arguments: { limit: 5 },
       },
     },
@@ -94,7 +102,7 @@ try {
     {
       method: "tools/call",
       params: {
-        name: "graph.events",
+        name: "events",
         arguments: { limit: 5 },
       },
     },

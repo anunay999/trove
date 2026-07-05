@@ -11,6 +11,7 @@ import type {
   GraphNode,
   GraphSource,
   GraphView,
+  GrepInput,
   IngestInput,
   InvalidateEdgeInput,
   LinkInput,
@@ -27,6 +28,8 @@ import type {
   UpdateInput,
 } from "./contracts.js";
 import {
+  compileGrepPattern,
+  grepExcerpt,
   isTextUnit,
   performRecall,
   renderAgentContext,
@@ -44,6 +47,8 @@ import {
   type GraphSnapshot,
   type GraphStore,
   type GraphViewSnapshot,
+  type GrepMatch,
+  type GrepResult,
   type ProjectResult,
   type ReadResult,
   type RecallResult,
@@ -167,6 +172,50 @@ export class InMemoryGraphStore implements GraphStore {
       : [];
 
     return { nodes, textUnits };
+  }
+
+  grep(input: GrepInput): GrepResult {
+    const scope = input.scope ?? "all";
+    const limit = input.limit ?? 20;
+    const regex = compileGrepPattern(input.pattern, input.caseSensitive ?? false);
+    const matches: GrepMatch[] = [];
+
+    if (scope === "nodes" || scope === "all") {
+      for (const node of this.nodes.values()) {
+        const fields: Array<["title" | "summary" | "content", string | null]> = [
+          ["title", node.title],
+          ["summary", node.summary],
+          ["content", node.content],
+        ];
+        for (const [field, value] of fields) {
+          if (!value) continue;
+          const excerpt = grepExcerpt(value, regex);
+          if (excerpt !== null) {
+            matches.push({ kind: "node", nodeId: node.id, slug: node.slug, title: node.title, field, excerpt });
+            break;
+          }
+        }
+      }
+    }
+
+    if (scope === "sources" || scope === "all") {
+      for (const unit of this.textUnits.values()) {
+        const excerpt = grepExcerpt(unit.text, regex);
+        if (excerpt === null) continue;
+        const source = this.sourceRows.get(unit.sourceId);
+        matches.push({
+          kind: "source",
+          sourceId: unit.sourceId,
+          textUnitId: unit.id,
+          ordinal: unit.ordinal,
+          title: source?.title ?? unit.sourceId,
+          field: "text",
+          excerpt,
+        });
+      }
+    }
+
+    return { matches: matches.slice(0, limit), truncated: matches.length > limit };
   }
 
   read(input: ReadInput): ReadResult | null {
