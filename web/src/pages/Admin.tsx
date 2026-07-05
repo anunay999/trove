@@ -1,5 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { fetchUsers, setUserStatus, type AppUser } from "@/lib/api";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+const STATUS_LABEL: Record<AppUser["status"], string> = {
+  active: "Active",
+  waitlisted: "Waitlisted",
+  suspended: "Suspended",
+};
 
 const STATUS_STYLE: Record<AppUser["status"], string> = {
   active: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
@@ -7,10 +20,16 @@ const STATUS_STYLE: Record<AppUser["status"], string> = {
   suspended: "bg-red-500/10 text-red-700 dark:text-red-400",
 };
 
-const STATUS_OPTIONS: Array<{ value: AppUser["status"]; label: string }> = [
-  { value: "active", label: "Active — full access" },
-  { value: "waitlisted", label: "Waitlisted — no access" },
-  { value: "suspended", label: "Suspended — blocked" },
+const STATUS_DOT: Record<AppUser["status"], string> = {
+  active: "bg-emerald-500",
+  waitlisted: "bg-amber-500",
+  suspended: "bg-red-500",
+};
+
+const STATUS_OPTIONS: Array<{ value: AppUser["status"]; hint: string }> = [
+  { value: "active", hint: "full access" },
+  { value: "waitlisted", hint: "no access" },
+  { value: "suspended", hint: "blocked" },
 ];
 
 export function Admin({ selfClerkUserId }: { selfClerkUserId?: string }) {
@@ -98,16 +117,31 @@ export function Admin({ selfClerkUserId }: { selfClerkUserId?: string }) {
                     {isSelf ? (
                       <span className="text-[12px] text-muted-foreground">You</span>
                     ) : (
-                      <select
+                      <Select
                         value={user.status}
                         disabled={busy === user.clerkUserId}
-                        onChange={(event) => void changeStatus(user.clerkUserId, event.target.value as AppUser["status"])}
-                        className="rounded-md border bg-background px-2.5 py-1.5 text-[12px] outline-none focus:border-foreground/60 disabled:opacity-50"
+                        onValueChange={(value) => void changeStatus(user.clerkUserId, value as AppUser["status"])}
                       >
-                        {STATUS_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>{option.label}</option>
-                        ))}
-                      </select>
+                        <SelectTrigger size="sm" className="w-[150px] text-[12px]">
+                          <SelectValue>
+                            <span className="flex items-center gap-2">
+                              <span className={`size-1.5 shrink-0 rounded-full ${STATUS_DOT[user.status]}`} />
+                              {STATUS_LABEL[user.status]}
+                            </span>
+                          </SelectValue>
+                        </SelectTrigger>
+                        <SelectContent align="end">
+                          {STATUS_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value} className="text-[12px]">
+                              <span className="flex items-center gap-2">
+                                <span className={`size-1.5 shrink-0 rounded-full ${STATUS_DOT[option.value]}`} />
+                                {STATUS_LABEL[option.value]}
+                                <span className="text-muted-foreground">· {option.hint}</span>
+                              </span>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     )}
                   </td>
                 </tr>
