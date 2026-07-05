@@ -1,7 +1,8 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, extname, join, relative } from "node:path";
-import { ingestEpisodic } from "../src/graphCore.js";
+import { ingestEpisodic, type GraphOperationContext } from "../src/graphCore.js";
 import { PgGraphStore } from "../src/pgStore.js";
+import { UserStore } from "../src/users.js";
 import { slugify } from "../src/slug.js";
 import type { CaptureInput, GraphSource, TextUnit } from "../src/contracts.js";
 
@@ -12,6 +13,17 @@ if (!databaseUrl) {
 
 const vaultRoot = process.argv[2] ?? "/Users/anunay/Documents/obsidian/claude";
 const store = new PgGraphStore({ connectionString: databaseUrl });
+
+// Import as an owner so the vault lands in that user's graph (not unowned).
+// Defaults to TROVE_SERVICE_OWNER_EMAIL, else the founding admin; falls back to
+// superuser (unowned) only on an instance with no users yet.
+const userStore = new UserStore({ connectionString: databaseUrl });
+const ownerId = await userStore.ownerForServiceToken(process.env.TROVE_SERVICE_OWNER_EMAIL?.trim() || undefined);
+await userStore.close();
+const importContext: GraphOperationContext = ownerId
+  ? { actorId: "vault-import", interfaceId: "vault-import", ownerId }
+  : { actorId: "vault-import", interfaceId: "vault-import", superuser: true };
+console.log(ownerId ? `Importing as owner ${ownerId}` : "Importing as superuser (no users yet; rows unowned)");
 const markdownFiles = await findMarkdownFiles(vaultRoot);
 let imported = 0;
 let skipped = 0;
@@ -33,7 +45,7 @@ try {
       relPath,
       contentText,
       metadata: { frontmatter: parsed.frontmatter },
-    });
+    }, importContext);
     const firstResult = episodic.results[0];
     if (!firstResult) continue;
     const { source, textUnits } = firstResult;
@@ -43,7 +55,7 @@ try {
       episodeStats.totalSegments += episodic.totalSegments;
     }
 
-    const existing = await store.read({ slug: nodeSlug });
+    const existing = await store.read({ slug: nodeSlug }, importContext);
     if (existing) {
       skipped += 1;
       continue;
@@ -56,7 +68,7 @@ try {
       content: `Imported from ${relPath}. The source document remains the evidence layer.`,
       source,
       textUnits,
-    });
+    }, importContext);
     imported += 1;
   }
 
@@ -73,7 +85,7 @@ try {
         toSlug: targetSlug,
         predicate: "mentions",
         weight: 1,
-      });
+      }, importContext);
       if (edge) linked += 1;
     }
   }
@@ -113,6 +125,7 @@ async function capturePageNode(
     source: GraphSource;
     textUnits: TextUnit[];
   },
+  context?: GraphOperationContext,
 ): Promise<void> {
   const firstEvidenceUnit = input.textUnits.find(isUsefulEvidenceUnit);
   const evidence = firstEvidenceUnit
@@ -126,7 +139,7 @@ async function capturePageNode(
     content: input.content,
     evidence,
     links: [],
-  });
+  }, context);
 }
 
 function parseFrontmatter(markdown: string): { frontmatter: Record<string, string>; body: string } {

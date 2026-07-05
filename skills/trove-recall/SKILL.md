@@ -1,6 +1,6 @@
 ---
 name: trove-recall
-description: Use when a question should be answered from the Trove memory graph rather than re-derived - prior projects, decisions, system knowledge, preferences, "what was I working on". Calls graph.recall for a token-budgeted context pack, synthesizes with citations, and captures non-trivial answers back so exploration compounds.
+description: Use when a question should be answered from the Trove memory graph rather than re-derived - prior projects, decisions, system knowledge, preferences, "what was I working on". Calls recall for a token-budgeted context pack (or grep for exact strings), synthesizes with citations, and remembers non-trivial answers back so exploration compounds.
 ---
 
 # trove-recall
@@ -9,7 +9,7 @@ description: Use when a question should be answered from the Trove memory graph 
 
 ## When to use
 
-- A factual question about anything previously ingested or captured.
+- A factual question about anything previously ingested or remembered.
 - A synthesis ("compare X and Y", "state of Z", "what am I working on").
 - A recommendation grounded in the user's own context.
 
@@ -20,21 +20,18 @@ When **not** to use:
 
 ## Process
 
-### Step 1 — recall
+### Step 1 — pick the retrieval tool
 
-```
-graph.recall { query: "<the question, as natural language>", tokenBudget: 2000 }
-```
-
-- Budget 1500–3000 for most questions; raise toward 4000 only for broad syntheses.
-- Hybrid retrieval is live (real embeddings): phrase the query as the actual question, not keywords.
-- The pack contains atoms (matched + graph-expanded), connecting edges, evidence excerpts, and citations.
+- Question contains an **exact string** (port, slug, env var, error message, identifier) → `grep { pattern }` first. Exact match beats semantic search there.
+- Otherwise → `recall { query: "<the question, as natural language>", tokenBudget: 2000 }`.
+  - Budget 1500–3000 for most questions; toward 4000 only for broad syntheses.
+  - Phrase the query as the actual question, not keywords.
+  - The pack contains atoms (matched + graph-expanded), connecting edges, evidence excerpts, and citations.
 
 ### Step 2 — drill down (only if needed)
 
-- `graph.read { nodeId }` for a specific atom's full summary, evidence, and annotations.
-- `graph.read_source { sourceId }` or the `/v1/document` reconstruction for a whole document.
-- `graph.neighborhood { nodeId, depth, asOf? }` when structure or history matters.
+- `read { id | slug }` for a specific atom's full summary and evidence, or a raw source document.
+- `neighborhood { nodeId, depth, asOf? }` when structure or history matters.
 
 ### Step 3 — synthesize
 
@@ -45,15 +42,15 @@ graph.recall { query: "<the question, as natural language>", tokenBudget: 2000 }
 
 ### Step 4 — file the answer back (when non-trivial)
 
-- Synthesis across several atoms → `graph.capture { type: "claim" | "decision" | "pattern", summary, evidence, links }` citing the atoms it drew from.
+- Synthesis across several atoms → `remember { type: "claim" | "decision" | "pattern", title, summary, evidence, links }` citing the atoms it drew from.
 - Plain fact lookup → nothing to file.
 
 ### Step 5 — confirm
 
-One-sentence recap; note anything captured back.
+One-sentence recap; note anything remembered back.
 
 ## Anti-patterns
 
-- **Don't** chain search→read→read→neighborhood when one `recall` call answers it.
+- **Don't** chain grep→read→read→neighborhood when one `recall` call answers it.
 - **Don't** dump the raw context pack on the user. Synthesize.
-- **Don't** capture trivial lookups back into the graph.
+- **Don't** remember trivial lookups back into the graph.

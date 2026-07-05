@@ -43,20 +43,20 @@ export async function remember(
 ): Promise<RememberResult> {
   let target: ReadResult | null = null;
   if (input.nodeId) {
-    target = await store.read({ nodeId: input.nodeId });
+    target = await store.read({ nodeId: input.nodeId }, context);
     if (!target) throw new Error(`remember: no node with id ${input.nodeId}.`);
   } else if (input.slug) {
-    target = await store.read({ slug: input.slug });
+    target = await store.read({ slug: input.slug }, context);
     if (!target) throw new Error(`remember: no node with slug ${input.slug}.`);
   }
 
   let similar: RememberResult["similar"] = [];
   if (!target) {
-    const found = await store.search({ query: input.title, includeTextUnits: false, mode: "lexical", limit: 5 });
+    const found = await store.search({ query: input.title, includeTextUnits: false, mode: "lexical", limit: 5 }, context);
     const wantedSlug = slugify(input.title);
     const wantedTitle = normalizeTitle(input.title);
     const exact = found.nodes.find((node) => node.slug === wantedSlug || normalizeTitle(node.title) === wantedTitle);
-    if (exact) target = await store.read({ nodeId: exact.id });
+    if (exact) target = await store.read({ nodeId: exact.id }, context);
     similar = found.nodes
       .filter((node) => node.id !== exact?.id)
       .slice(0, 3)
@@ -87,7 +87,7 @@ export async function remember(
   };
   let updated = await store.update({ ...updateFields, baseRevisionId: target.revisionId }, context);
   if (updated && "conflict" in updated) {
-    const fresh = await store.read({ nodeId: target.id });
+    const fresh = await store.read({ nodeId: target.id }, context);
     if (!fresh) throw new Error(`remember: node ${target.id} disappeared during update.`);
     updated = await store.update({ ...updateFields, baseRevisionId: fresh.revisionId }, context);
   }
@@ -142,9 +142,9 @@ export async function forget(
   for (const edgeId of input.edgeIds ?? []) candidates.set(edgeId, null);
 
   if (input.query) {
-    const found = await store.search({ query: input.query, includeTextUnits: false, mode: "lexical", limit: 5 });
+    const found = await store.search({ query: input.query, includeTextUnits: false, mode: "lexical", limit: 5 }, context);
     for (const node of found.nodes) {
-      const { nodes, edges } = await store.neighborhood({ nodeId: node.id, depth: 1, includeExpired: false });
+      const { nodes, edges } = await store.neighborhood({ nodeId: node.id, depth: 1, includeExpired: false }, context);
       for (const neighbor of nodes) nodeTitles.set(neighbor.id, neighbor.title);
       for (const edge of edges) {
         if (!edge.expiredAt) candidates.set(edge.id, edge);
@@ -179,15 +179,15 @@ export async function forget(
 }
 
 /** Read anything by id or slug: nodes first, then raw sources. */
-export async function readAny(store: GraphStore, input: ReadAnyInput): Promise<ReadAnyResult | null> {
+export async function readAny(store: GraphStore, input: ReadAnyInput, context?: GraphOperationContext): Promise<ReadAnyResult | null> {
   if (input.slug) {
-    const node = await store.read({ slug: input.slug });
+    const node = await store.read({ slug: input.slug }, context);
     return node ? { kind: "node", node } : null;
   }
   if (!input.id) return null;
-  const node = await store.read({ nodeId: input.id });
+  const node = await store.read({ nodeId: input.id }, context);
   if (node) return { kind: "node", node };
-  const source = await store.readSource({ sourceId: input.id });
+  const source = await store.readSource({ sourceId: input.id }, context);
   if (source) return { kind: "source", source };
   return null;
 }

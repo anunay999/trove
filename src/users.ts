@@ -104,13 +104,48 @@ export class UserStore {
     return result.rows.map(mapUser);
   }
 
+  /**
+   * The app_user that env service tokens act as: the configured
+   * TROVE_SERVICE_OWNER_EMAIL if it exists, else the founding (oldest) admin.
+   * Undefined only on a brand-new instance where nobody has signed in yet.
+   */
+  async ownerForServiceToken(preferredEmail?: string): Promise<string | undefined> {
+    if (preferredEmail) {
+      const byEmail = await this.pool.query(
+        "select id from app_user where lower(email) = lower($1) order by created_at asc limit 1",
+        [preferredEmail],
+      );
+      if (byEmail.rowCount) return String(byEmail.rows[0].id);
+    }
+    const admin = await this.pool.query(
+      "select id from app_user where role = 'admin' order by created_at asc limit 1",
+    );
+    return admin.rowCount ? String(admin.rows[0].id) : undefined;
+  }
+
   async approveUser(clerkUserId: string, approvedById: string): Promise<AppUser | null> {
+    return this.setUserStatus(clerkUserId, "active", approvedById);
+  }
+
+  /**
+   * Admin grant/revoke: move a user between waitlisted / active / suspended.
+   * Granting (active) stamps approved_at/by; revoking leaves the audit trail.
+   * Scopes follow status, so a revoked user loses graph access on their next
+   * request (within the 60s identity cache).
+   */
+  async setUserStatus(
+    clerkUserId: string,
+    status: AppUser["status"],
+    actingAdminId: string,
+  ): Promise<AppUser | null> {
     const result = await this.pool.query(
       `update app_user
-       set status = 'active', approved_at = now(), approved_by = $2
+       set status = $2,
+           approved_at = case when $2 = 'active' then coalesce(approved_at, now()) else approved_at end,
+           approved_by = case when $2 = 'active' then coalesce(approved_by, $3) else approved_by end
        where clerk_user_id = $1
        returning *`,
-      [clerkUserId, approvedById],
+      [clerkUserId, status, actingAdminId],
     );
     return result.rowCount === 0 ? null : mapUser(result.rows[0]);
   }
