@@ -65,6 +65,7 @@ jobs:
           npm run bitemporal:test
           npm run episodes:test
           npm run sources:test
+          npm run isolation:test
 
       - name: Build web dashboard
         run: npm run web:build
