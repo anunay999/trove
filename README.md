@@ -1,9 +1,28 @@
-# Trove
+<p align="center">
+  <img src="web/public/favicon.svg" width="72" alt="Trove" />
+</p>
 
-[![CI](https://github.com/anunay999/trove/actions/workflows/ci.yml/badge.svg)](https://github.com/anunay999/trove/actions/workflows/ci.yml)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+<h1 align="center">Trove</h1>
 
-**A memory that your AI agents keep, so you don't have to.**
+<p align="center"><strong>A memory that your AI agents keep, so you don't have to.</strong></p>
+
+<p align="center">
+  <a href="https://github.com/anunay999/trove/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/anunay999/trove/actions/workflows/ci.yml/badge.svg" /></a>
+  <a href="LICENSE"><img alt="License: AGPL v3" src="https://img.shields.io/badge/License-AGPL_v3-blue.svg" /></a>
+  <a href="https://github.com/anunay999/trove/issues"><img alt="Issues" src="https://img.shields.io/github/issues/anunay999/trove?color=0088ff" /></a>
+  <a href="https://github.com/anunay999/trove/pulls"><img alt="Pull requests" src="https://img.shields.io/github/issues-pr/anunay999/trove?color=0088ff" /></a>
+  <a href="https://github.com/anunay999/trove/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/anunay999/trove" /></a>
+  <a href="https://mytrove.in"><img alt="Live at mytrove.in" src="https://img.shields.io/badge/live-mytrove.in-863bff" /></a>
+</p>
+
+<p align="center">
+  <a href="https://mytrove.in">Website</a> ·
+  <a href="docs/quickstart.md">Quickstart</a> ·
+  <a href="docs/mcp.md">MCP tools</a> ·
+  <a href="docs/oauth.md">OAuth connector</a>
+</p>
+
+---
 
 Trove is a hosted knowledge graph for agent memory. Claude, Codex, and any MCP-capable agent can write what they learn into it and recall it in later sessions — with every fact traceable back to the source text that justifies it. Your notes stay inspectable, contradictions are superseded instead of overwritten, and the whole graph is browsable in a built-in dashboard.
 
