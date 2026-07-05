@@ -65,7 +65,7 @@ claude mcp add trove -- npx tsx /path/to/trove/src/mcpServer.ts
 Agents get a small verb-per-job toolset: `remember`, `recall`, `grep`, `read`, `connect`, and `forget` (plus curation tools like `ingest` for write-scoped keys). Optionally install the companion skills so Claude uses them well:
 
 ```bash
-npx skills add ./skills -g
+npx skills add anunay999/trove -g
 ```
 
 ## Bring your notes

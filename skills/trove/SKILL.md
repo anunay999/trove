@@ -1,32 +1,48 @@
 ---
 name: trove
-description: Use the Trove hosted memory graph (MCP server "trove") to recall prior work, decisions, preferences, and system knowledge before re-deriving them, and to capture durable new facts back. Trigger whenever a question touches past projects, "how does my setup work", preferences, decision history, or when a session produces a decision or fact worth remembering. Routes to the trove-recall, trove-capture, trove-ingest, trove-update, and trove-lint skills; the mcp__trove__* tools are the interface.
+description: Use the Trove hosted memory graph (MCP server "trove") to recall prior work, decisions, preferences, and system knowledge before re-deriving them, and to save durable new facts back. Trigger whenever a question touches past projects, "how does my setup work", preferences, decision history, or when a session produces a decision or fact worth remembering. Routes to the trove-recall, trove-remember, trove-ingest, and trove-lint skills; the mcp__trove__* tools (remember, recall, grep, read, connect, forget) are the interface.
 ---
 
 # trove
 
 > The hosted memory substrate. The Obsidian vault is a projection; this graph is the queryable truth for agents.
 
-Trove (repo `~/dev/trove`, service `:8787`, MCP server `trove`) holds the knowledge base as an evidence graph: typed nodes (projects, patterns, decisions, infrastructure, claims), typed edges with bitemporal lifecycle, full source documents, and an append-only audit log. Every write is attributed; every semantic statement can cite its evidence span.
+Trove (repo `~/dev/trove`, hosted at `https://mytrove.in`, MCP server `trove`) holds the knowledge base as an evidence graph: typed nodes, typed edges with bitemporal lifecycle, full source documents, and an append-only audit log. Every write is attributed; every semantic statement can cite its evidence span.
+
+## The tool surface (one verb each, no overlaps)
+
+| Tool | Use when |
+|---|---|
+| `recall` | Answering a question from memory. Token-budgeted context pack with citations. |
+| `grep` | The query contains an exact string — port, slug, flag, error message. Regex over nodes + raw sources. |
+| `read` | You have an id or slug and want the full node (with evidence) or a raw source document. |
+| `remember` | Saving a fact/decision/gotcha, new or changed. One write door: revises on exact title/slug match, else creates. Check the returned `similar` list — retarget with `slug` if the dedupe missed. |
+| `connect` | Relating two memories. Pass `supersedesEdgeId` to replace a belief on the record. |
+| `forget` | Retiring beliefs. Query mode previews (dryRun) first; explicit edgeIds apply immediately. |
+| `ingest` | Storing long-form raw material (transcript, page, file) as evidence. Then `remember` the distilled facts citing it. |
+| `annotate` | Attaching meaning to evidence without minting a belief. |
+| `neighborhood` / `project` / `views` | Subgraphs, renders, saved views (curator flows). |
+| `events` / `jobs` / `lint` / `export_obsidian` | Operator plumbing (admin credentials only). |
+
+**remember vs ingest:** `remember` writes a belief — a small distilled atom that recall ranks. `ingest` stores evidence — a whole document split into citable text units that never competes as a belief. Pipeline: ingest the transcript → remember the few facts worth believing → connect them.
 
 ## Routing
 
-| Situation | Skill | Core tools |
-|---|---|---|
-| Question about prior work, systems, preferences, decisions | `trove-recall` | `graph.recall`, `graph.read`, `graph.read_source` |
-| Session produced decisions/facts worth keeping | `trove-capture` | `graph.search`, `graph.capture`, `graph.link` |
-| A specific source (URL, file, paste) should be indexed | `trove-ingest` | `graph.ingest`, `graph.capture`, `graph.annotate` |
-| A known fact changed | `trove-update` | `graph.search`, `graph.update`, `graph.link` (supersede), `graph.invalidate_edge` |
-| Health check / housekeeping | `trove-lint` | `graph.lint`, `graph.link` |
+| Situation | Skill |
+|---|---|
+| Question about prior work, systems, preferences, decisions | `trove-recall` |
+| Session produced decisions/facts worth keeping, or a known fact changed | `trove-remember` |
+| A specific source (URL, file, paste) should be indexed | `trove-ingest` |
+| Health check / housekeeping | `trove-lint` |
 
 ## Invariants (all skills)
 
-- **Recall before re-deriving.** One `graph.recall` call with a `tokenBudget` beats grepping the vault: it returns activation-ranked atoms, edges, evidence excerpts, and citations, and never exceeds the budget.
-- **Beliefs change by supersession, never deletion.** `graph.link({supersedesEdgeId})` replaces a belief; `graph.invalidate_edge` retires one. History stays queryable (`graph.neighborhood` with `asOf` / `includeExpired`).
-- **No capture without provenance.** Cite `sourceId`/`textUnitId` evidence, or state agent-inference explicitly in the summary.
-- **Search before creating.** Duplicates are graph rot; link or update instead.
-- **Two surfaces, one memory.** Human-readable syntheses also go to the Scribe vault (`/scribe-*`); the importer reconciles vault → graph. Don't fork the two.
+- **Recall before re-deriving; grep before recall when the query is an exact string.**
+- **Beliefs change by supersession, never deletion.** `connect({supersedesEdgeId})` replaces; `forget` retires. History stays queryable (`neighborhood` with `asOf` / `includeExpired`).
+- **No memory without provenance.** Cite `sourceId`/`textUnitId` evidence, or state agent-inference explicitly in the summary.
+- **Trust remember's dedupe, verify its choice.** It only merges on exact title/slug; review `similar` in the response and re-call with `slug` when it should have merged.
+- **Two surfaces, one memory.** Human-readable syntheses also go to the Scribe vault (`/scribe-*` plugin commands edit the vault directly); the vault importer reconciles vault → graph. Don't fork the two.
 
 ## Operations
 
-If tools fail: `cd ~/dev/trove && docker compose up -d postgres && npm start`. Tokens in `~/dev/trove/.env` (`TROVE_SERVICE_TOKENS`); dashboard `http://localhost:8787/` (set `localStorage.trove_token`); health `curl localhost:8787/health`.
+Hosted MCP: `https://mytrove.in/mcp` with a `trove_*` API key or service token. Local dev: `cd ~/dev/trove && docker compose up -d postgres && npm start`; tokens in `.env` (`TROVE_SERVICE_TOKENS`); health `curl localhost:8787/health`. Vault import (`npm run import:vault`) targets `DATABASE_URL` — local by default; set it explicitly for production.
