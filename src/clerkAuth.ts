@@ -66,7 +66,24 @@ export function createApiKeyResolver(users: UserStore): NonNullable<AuthResolver
   return async (secret: string) => {
     const resolved = await users.resolveApiKey(secret);
     if (!resolved) return null;
-    return { actorId: resolved.actorId, scopes: resolved.scopes };
+    return { actorId: resolved.actorId, scopes: resolved.scopes, ownerId: resolved.userId };
+  };
+}
+
+/**
+ * Owner (app_user.id) that env service tokens act as. Cached briefly; before a
+ * user has ever signed in it resolves to undefined, in which case service-token
+ * writes fall back to unowned (superuser-null) rather than failing.
+ */
+export function createServiceOwnerResolver(users: UserStore): NonNullable<AuthResolvers["resolveServiceOwnerId"]> {
+  const preferredEmail = process.env.TROVE_SERVICE_OWNER_EMAIL?.trim() || undefined;
+  let cache: { ownerId: string | undefined; expires: number } | null = null;
+  const CACHE_TTL_MS = 60_000;
+  return async () => {
+    if (cache && cache.expires > Date.now()) return cache.ownerId;
+    const ownerId = await users.ownerForServiceToken(preferredEmail);
+    cache = { ownerId, expires: Date.now() + CACHE_TTL_MS };
+    return ownerId;
   };
 }
 
