@@ -12,6 +12,30 @@ Trove is a hosted knowledge graph for agent memory. Claude, Codex, and any MCP-c
 - **A dashboard** — memory KPIs, write-cadence heatmap, lint health, and an interactive force-directed graph explorer with a full-document reader.
 - **Your notes, imported** — point the importer at an Obsidian vault and it becomes the seed of the graph. Append-heavy files like `log.md` are split into per-entry episodes and deduped, so re-imports only store what's new.
 
+## How it works
+
+Trove is an **evidence graph**: nothing is a free-floating fact. Everything an agent knows traces back to source text.
+
+```
+   raw source            addressable spans        distilled beliefs
+  ┌───────────┐  ingest  ┌───────────────┐  remember  ┌──────────┐
+  │ transcript│ ───────► │  text units   │ ─────────► │  nodes   │
+  │ page/file │          │ (cited spans) │  (cites)   │ + edges  │
+  └───────────┘          └───────────────┘            └──────────┘
+                                                        ▲   recall / grep / read
+                                              agents read back here
+```
+
+**Writing.** An agent stores raw material with `ingest`, which splits it into addressable **text units**. It then distills the few facts worth keeping with `remember` — small semantic **nodes**, each citing the text unit that justifies it — and links them with `connect`. `remember` is the single write door: it revises an existing node on an exact title/slug match, otherwise creates one, so agents never juggle create-vs-update.
+
+**Reading.** Three verbs, each for a different question. `recall` builds a **token-budgeted context pack** — hybrid lexical+semantic search seeds a one-hop graph expansion, candidates are ranked by relevance plus ACT-R-style activation (recency and frequency), and a greedy packer fills the budget you set. `grep` is exact/regex search over nodes and raw sources, for when you know the string (a port, a slug, an error). `read` pulls one node or source by id or slug.
+
+**Changing its mind.** Beliefs are **bitemporal** and never overwritten. When a fact changes, `connect` with `supersedesEdgeId` (or `forget`) invalidates the old edge — it gets an expiry timestamp but stays in the graph — so you can time-travel with `asOf` and ask what Trove believed at any past moment.
+
+**Staying fresh.** A background worker inside the server drains a job queue every 30 seconds to embed new writes, refresh projections, and run lint. There's nothing to schedule.
+
+**Tiered tools.** The MCP surface is filtered by your credential's scope. Read-only keys see only `recall`, `grep`, and `read`; write keys add `remember`, `connect`, `forget`, `ingest`, and the curation tools; admin keys also see the operator tools (`jobs`, `lint`, `export_obsidian`). Visibility is convenience — every call is still scope-checked server-side.
+
 ## Quick start (local, 5 minutes)
 
 Requirements: Node 22+, Docker.
@@ -45,12 +69,12 @@ openssl rand -hex 16   # e.g. 9f2c...
 TROVE_SERVICE_TOKENS='trove_9f2c...|my-agent|graph:read,graph:write,graph:export'
 ```
 
-| Scope | Allows |
+| Scope | Tools it unlocks |
 |---|---|
-| `graph:read` | search, recall, read, stats, dashboard |
-| `graph:write` | capture, ingest, link, annotate |
-| `graph:export` | Obsidian/markdown exports |
-| `graph:admin` | everything, including running maintenance jobs |
+| `graph:read` | `recall`, `grep`, `read` + stats/dashboard |
+| `graph:write` | `remember`, `connect`, `forget`, `ingest`, `annotate`, views |
+| `graph:export` | `export_obsidian` and markdown exports |
+| `graph:admin` | everything, including `jobs`/`lint` and maintenance |
 
 Restart the server and every request now needs `Authorization: Bearer <token>`. The dashboard will prompt for the API key on first load and remember it.
 
@@ -80,7 +104,7 @@ npx skills add ./skills -g
 Import an Obsidian vault (or any folder of markdown):
 
 ```bash
-npm run import:scribe -- ~/path/to/vault
+npm run import:vault -- ~/path/to/vault
 ```
 
 Re-running is safe: unchanged files are hash-deduped no-ops, and dated log files only store new entries.
