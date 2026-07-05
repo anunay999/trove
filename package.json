@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "postinstall": "node -e \"if(require('fs').existsSync('web/package.json'))require('child_process').execSync('npm --prefix web install --no-audit --no-fund',{stdio:'inherit'})\"",
+    "setup": "docker compose up -d postgres && npm run db:schema && npm run db:migrate",
     "build": "tsc",
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
