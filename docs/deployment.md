@@ -74,7 +74,7 @@ Verify:
 
 ```bash
 curl http://localhost:8787/ready
-TROVE_SERVICE_TOKEN=local-dev-token npm run mcp:http:test
+TROVE_SERVICE_TOKEN=local-dev-token TROVE_MCP_URL=http://localhost:8787/mcp npm run test:e2e
 ```
 
 ## Worker

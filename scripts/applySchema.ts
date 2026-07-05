@@ -15,7 +15,7 @@ if (!databaseUrl) {
   throw new Error("DATABASE_URL is required.");
 }
 
-const schemaPath = resolve("docs/schema.sql");
+const schemaPath = resolve("db/schema.sql");
 const sql = await readFile(schemaPath, "utf8");
 const client = new Client({ connectionString: databaseUrl });
 
