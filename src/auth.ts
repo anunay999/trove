@@ -25,6 +25,10 @@ export type AuthContext = {
   interfaceId: string;
   requestId: string;
   identity?: AuthIdentity;
+  /** app_user.id whose graph this credential reads/writes. */
+  ownerId?: string | undefined;
+  /** Auth disabled (local/CI): bypass owner scoping, see the whole graph. */
+  superuser?: boolean | undefined;
 };
 
 /**
@@ -34,9 +38,11 @@ export type AuthContext = {
  * MCP connectors. Any may return null to signal "not mine / not valid".
  */
 export type AuthResolvers = {
-  resolveApiKey?: (secret: string) => Promise<{ actorId: string; scopes: TroveScope[]; identity?: AuthIdentity } | null>;
+  resolveApiKey?: (secret: string) => Promise<{ actorId: string; scopes: TroveScope[]; ownerId?: string; identity?: AuthIdentity } | null>;
   resolveClerkToken?: (token: string) => Promise<{ actorId: string; scopes: TroveScope[]; identity: AuthIdentity } | null>;
   resolveOAuthToken?: (token: string) => Promise<{ actorId: string; scopes: TroveScope[]; identity: AuthIdentity } | null>;
+  /** app_user.id that env service tokens act as (config: TROVE_SERVICE_OWNER_EMAIL → oldest admin). */
+  resolveServiceOwnerId?: () => Promise<string | undefined>;
 };
 
 export class AuthError extends Error {
@@ -77,12 +83,14 @@ export async function requireAuthFromHeaders(
   const requestId = requestIdFromHeaders(headers);
 
   if (tokens.length === 0) {
+    // Auth disabled (local dev / CI): single operator, sees the whole graph.
     return {
       actorId: "local-dev",
       scopes: allLocalScopes,
       mode: "disabled",
       interfaceId,
       requestId,
+      superuser: true,
     };
   }
 
@@ -96,12 +104,16 @@ export async function requireAuthFromHeaders(
   // 1. Environment service tokens (agents, MCP, ops).
   const match = tokens.find((candidate) => constantTimeEqual(candidate.token, bearerToken));
   if (match) {
+    // Service tokens act as a configured owner (TROVE_SERVICE_OWNER_EMAIL →
+    // oldest admin), so your agents read/write your graph, not everyone's.
+    const ownerId = resolvers.resolveServiceOwnerId ? await resolvers.resolveServiceOwnerId() : undefined;
     const context: AuthContext = {
       actorId: match.actorId,
       scopes: match.scopes,
       mode: "token",
       interfaceId,
       requestId,
+      ownerId,
     };
     assertScopes(context, requiredScopes);
     return context;
@@ -111,7 +123,7 @@ export async function requireAuthFromHeaders(
   if (bearerToken.startsWith("oat_") && resolvers.resolveOAuthToken) {
     const resolved = await resolvers.resolveOAuthToken(bearerToken);
     if (resolved) {
-      const context: AuthContext = { ...resolved, mode: "oauth", interfaceId, requestId };
+      const context: AuthContext = { ...resolved, mode: "oauth", interfaceId, requestId, ownerId: resolved.identity.userId };
       assertScopes(context, requiredScopes);
       return context;
     }
@@ -121,7 +133,8 @@ export async function requireAuthFromHeaders(
   if (bearerToken.startsWith("trove_") && resolvers.resolveApiKey) {
     const resolved = await resolvers.resolveApiKey(bearerToken);
     if (resolved) {
-      const context: AuthContext = { ...resolved, mode: "api_key", interfaceId, requestId };
+      const ownerId = resolved.ownerId ?? resolved.identity?.userId;
+      const context: AuthContext = { ...resolved, mode: "api_key", interfaceId, requestId, ownerId };
       assertScopes(context, requiredScopes);
       return context;
     }
@@ -136,7 +149,7 @@ export async function requireAuthFromHeaders(
     if (resolvers.resolveClerkToken) {
       const resolved = await resolvers.resolveClerkToken(bearerToken);
       if (resolved) {
-        const context: AuthContext = { ...resolved, mode: "clerk", interfaceId, requestId };
+        const context: AuthContext = { ...resolved, mode: "clerk", interfaceId, requestId, ownerId: resolved.identity.userId };
         assertScopes(context, requiredScopes);
         return context;
       }
@@ -144,7 +157,7 @@ export async function requireAuthFromHeaders(
     if (resolvers.resolveOAuthToken) {
       const resolved = await resolvers.resolveOAuthToken(bearerToken);
       if (resolved) {
-        const context: AuthContext = { ...resolved, mode: "oauth", interfaceId, requestId };
+        const context: AuthContext = { ...resolved, mode: "oauth", interfaceId, requestId, ownerId: resolved.identity.userId };
         assertScopes(context, requiredScopes);
         return context;
       }
@@ -172,6 +185,8 @@ export function operationContextFromAuth(context: AuthContext) {
     actorId: context.actorId,
     interfaceId: context.interfaceId,
     requestId: context.requestId,
+    ownerId: context.ownerId,
+    superuser: context.superuser,
   };
 }
 

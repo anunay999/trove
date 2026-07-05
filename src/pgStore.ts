@@ -32,6 +32,8 @@ import {
   compileGrepPattern,
   grepExcerpt,
   isTextUnit,
+  ownerScope,
+  type OwnerScope,
   decodeEventCursor,
   encodeEventCursor,
   performRecall,
@@ -82,12 +84,13 @@ export class PgGraphStore implements GraphStore {
     try {
       await client.query("begin");
       const actorUuid = await this.actorUuidForContext(client, context);
+      const ownerId = ownerScope(context).ownerId;
       const sourceId = randomUUID();
       const contentSha256 = sha256(input.contentText);
       const sourceResult = await client.query(
-        `insert into source (id, kind, uri, title, content_sha256, content_text, metadata, created_by)
-         values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
-         on conflict (kind, content_sha256)
+        `insert into source (id, kind, uri, title, content_sha256, content_text, metadata, created_by, owner_id)
+         values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
+         on conflict (kind, content_sha256, coalesce(owner_id, '00000000-0000-0000-0000-000000000000'::uuid))
          do update set title = excluded.title, metadata = excluded.metadata
          returning id, kind, title, uri, content_sha256, created_at`,
         [
@@ -99,6 +102,7 @@ export class PgGraphStore implements GraphStore {
           input.contentText,
           JSON.stringify(input.metadata),
           actorUuid,
+          ownerId,
         ],
       );
       const source = mapSource(sourceResult.rows[0]);
@@ -107,9 +111,9 @@ export class PgGraphStore implements GraphStore {
       for (const unit of units) {
         await client.query(
           `insert into text_unit (
-             id, source_id, ordinal, section_path, char_start, char_end, text, token_count, content_sha256, metadata
+             id, source_id, ordinal, section_path, char_start, char_end, text, token_count, content_sha256, metadata, owner_id
            )
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, '{}'::jsonb)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, '{}'::jsonb, $10)
            on conflict (source_id, ordinal) do nothing`,
           [
             unit.id,
@@ -121,6 +125,7 @@ export class PgGraphStore implements GraphStore {
             unit.text,
             estimateTokenCount(unit.text),
             unit.contentSha256,
+            ownerId,
           ],
         );
       }
@@ -152,23 +157,26 @@ export class PgGraphStore implements GraphStore {
     }
   }
 
-  async sources(input: { limit?: number } = {}): Promise<Array<GraphSource & { metadata: Record<string, unknown> }>> {
+  async sources(input: { limit?: number } = {}, context?: GraphOperationContext): Promise<Array<GraphSource & { metadata: Record<string, unknown> }>> {
+    const scope = ownerScope(context);
     const result = await this.pool.query(
       `select id, kind, title, uri, content_sha256, metadata, created_at
        from source
+       where ($2 or owner_id = $3)
        order by created_at desc
        limit $1`,
-      [input.limit ?? 1000],
+      [input.limit ?? 1000, !scope.scoped, scope.ownerId],
     );
     return result.rows.map((row) => ({ ...mapSource(row), metadata: asRecord(row.metadata) }));
   }
 
-  async readSource(input: { sourceId: string }): Promise<(GraphSource & { metadata: Record<string, unknown>; contentText: string }) | null> {
+  async readSource(input: { sourceId: string }, context?: GraphOperationContext): Promise<(GraphSource & { metadata: Record<string, unknown>; contentText: string }) | null> {
+    const scope = ownerScope(context);
     const result = await this.pool.query(
       `select id, kind, title, uri, content_sha256, metadata, content_text, created_at
        from source
-       where id = $1`,
-      [input.sourceId],
+       where id = $1 and ($2 or owner_id = $3)`,
+      [input.sourceId, !scope.scoped, scope.ownerId],
     );
     if (result.rowCount === 0) return null;
     const row = result.rows[0];
@@ -179,13 +187,14 @@ export class PgGraphStore implements GraphStore {
     };
   }
 
-  async readDocument(input: { uri: string }): Promise<{ uri: string; title: string; contentText: string; segmentCount: number } | null> {
+  async readDocument(input: { uri: string }, context?: GraphOperationContext): Promise<{ uri: string; title: string; contentText: string; segmentCount: number } | null> {
+    const scope = ownerScope(context);
     const episodes = await this.pool.query(
       `select title, content_text
        from source
-       where metadata->>'episodeOf' = $1
+       where metadata->>'episodeOf' = $1 and ($2 or owner_id = $3)
        order by (metadata->>'episodeOrdinal')::int asc nulls last, created_at asc`,
-      [input.uri],
+      [input.uri, !scope.scoped, scope.ownerId],
     );
     if (episodes.rowCount && episodes.rowCount > 0) {
       return {
@@ -198,10 +207,10 @@ export class PgGraphStore implements GraphStore {
     const whole = await this.pool.query(
       `select title, content_text
        from source
-       where uri = $1
+       where uri = $1 and ($2 or owner_id = $3)
        order by created_at desc
        limit 1`,
-      [input.uri],
+      [input.uri, !scope.scoped, scope.ownerId],
     );
     if (whole.rowCount === 0) return null;
     return {
@@ -212,8 +221,10 @@ export class PgGraphStore implements GraphStore {
     };
   }
 
-  async grep(input: GrepInput): Promise<GrepResult> {
+  async grep(input: GrepInput, context?: GraphOperationContext): Promise<GrepResult> {
     const scope = input.scope ?? "all";
+    const owner = ownerScope(context);
+    const ownerParams = [!owner.scoped, owner.ownerId];
     const limit = input.limit ?? 20;
     const caseSensitive = input.caseSensitive ?? false;
     const operator = caseSensitive ? "~" : "~*";
@@ -228,20 +239,20 @@ export class PgGraphStore implements GraphStore {
         select n.id, n.slug, n.title, n.summary, nr.content
         from node n
         left join node_revision nr on nr.id = n.current_revision_id
-        where n.deleted_at is null and (${predicate})
+        where n.deleted_at is null and ($3 or n.owner_id = $4) and (${predicate})
         order by n.updated_at desc
         limit $2`;
       let rows: Array<Record<string, unknown>>;
       try {
         rows = (await this.pool.query(
           nodeSql(`n.title ${operator} $1 or coalesce(n.summary, '') ${operator} $1 or coalesce(nr.content, '') ${operator} $1`),
-          [input.pattern, limit + 1],
+          [input.pattern, limit + 1, ...ownerParams],
         )).rows;
       } catch {
         // JS accepted the pattern but Postgres POSIX regex rejected it — fall back to a literal scan.
         rows = (await this.pool.query(
           nodeSql("n.title ilike $1 or coalesce(n.summary, '') ilike $1 or coalesce(nr.content, '') ilike $1"),
-          [likeLiteral, limit + 1],
+          [likeLiteral, limit + 1, ...ownerParams],
         )).rows;
       }
       for (const row of rows) {
@@ -266,14 +277,14 @@ export class PgGraphStore implements GraphStore {
         select tu.id, tu.source_id, tu.ordinal, tu.text, s.title
         from text_unit tu
         join source s on s.id = tu.source_id
-        where ${predicate}
+        where ($3 or tu.owner_id = $4) and (${predicate})
         order by tu.created_at desc, tu.ordinal
         limit $2`;
       let rows: Array<Record<string, unknown>>;
       try {
-        rows = (await this.pool.query(unitSql(`tu.text ${operator} $1`), [input.pattern, limit + 1])).rows;
+        rows = (await this.pool.query(unitSql(`tu.text ${operator} $1`), [input.pattern, limit + 1, ...ownerParams])).rows;
       } catch {
-        rows = (await this.pool.query(unitSql("tu.text ilike $1"), [likeLiteral, limit + 1])).rows;
+        rows = (await this.pool.query(unitSql("tu.text ilike $1"), [likeLiteral, limit + 1, ...ownerParams])).rows;
       }
       for (const row of rows) {
         const text = String(row.text ?? "");
@@ -292,8 +303,9 @@ export class PgGraphStore implements GraphStore {
     return { matches: matches.slice(0, limit), truncated: matches.length > limit };
   }
 
-  async search(input: SearchInput): Promise<SearchResult> {
-    const lexical = await this.lexicalSearch(input);
+  async search(input: SearchInput, context?: GraphOperationContext): Promise<SearchResult> {
+    const scope = ownerScope(context);
+    const lexical = await this.lexicalSearch(input, scope);
     if (input.mode === "lexical") return lexical;
 
     const provider = createEmbeddingProviderFromEnv();
@@ -301,7 +313,7 @@ export class PgGraphStore implements GraphStore {
       return input.mode === "semantic" ? { nodes: [], textUnits: [] } : lexical;
     }
 
-    const semantic = await this.semanticSearch(input, provider);
+    const semantic = await this.semanticSearch(input, provider, scope);
     if (input.mode === "semantic") return semantic;
 
     return {
@@ -310,7 +322,7 @@ export class PgGraphStore implements GraphStore {
     };
   }
 
-  private async lexicalSearch(input: SearchInput): Promise<SearchResult> {
+  private async lexicalSearch(input: SearchInput, scope: OwnerScope): Promise<SearchResult> {
     const typeFilter = input.types && input.types.length > 0 ? input.types : null;
     const nodeResult = await this.pool.query(
       `with q as (select websearch_to_tsquery('english', $1) as query)
@@ -327,6 +339,7 @@ export class PgGraphStore implements GraphStore {
        left join node_revision nr on nr.id = n.current_revision_id
        cross join q
        where n.deleted_at is null
+         and ($5 or n.owner_id = $6)
          and ($2::node_type[] is null or n.type = any($2::node_type[]))
          and (
            to_tsvector('english', coalesce(n.title, '') || ' ' || coalesce(n.summary, '')) @@ q.query
@@ -338,7 +351,7 @@ export class PgGraphStore implements GraphStore {
          )
        order by rank desc, n.updated_at desc
        limit $3`,
-      [input.query, typeFilter, input.limit, `%${input.query}%`],
+      [input.query, typeFilter, input.limit, `%${input.query}%`, !scope.scoped, scope.ownerId],
     );
 
     const textUnitResult = input.includeTextUnits
@@ -351,11 +364,13 @@ export class PgGraphStore implements GraphStore {
                 ) as rank
          from text_unit
          cross join q
-         where to_tsvector('english', text) @@ q.query
+         where ($4 or owner_id = $5) and (
+           to_tsvector('english', text) @@ q.query
             or text ilike $3
+         )
          order by rank desc, created_at desc, ordinal
          limit $2`,
-        [input.query, input.limit, `%${input.query}%`],
+        [input.query, input.limit, `%${input.query}%`, !scope.scoped, scope.ownerId],
       )
       : { rows: [] };
 
@@ -365,7 +380,7 @@ export class PgGraphStore implements GraphStore {
     };
   }
 
-  private async semanticSearch(input: SearchInput, provider: EmbeddingProvider): Promise<SearchResult> {
+  private async semanticSearch(input: SearchInput, provider: EmbeddingProvider, scope: OwnerScope): Promise<SearchResult> {
     const [queryEmbedding] = await provider.embed([input.query]);
     if (!queryEmbedding) return { nodes: [], textUnits: [] };
     const queryVector = vectorLiteral(queryEmbedding);
@@ -377,10 +392,11 @@ export class PgGraphStore implements GraphStore {
        join node_revision nr on nr.id = e.owner_id and e.owner_table = 'node_revision'
        join node n on n.id = nr.node_id and n.deleted_at is null
        where e.model = $2
+         and ($5 or n.owner_id = $6)
          and ($3::node_type[] is null or n.type = any($3::node_type[]))
        order by e.embedding <=> $1::vector
        limit $4`,
-      [queryVector, provider.model, typeFilter, input.limit],
+      [queryVector, provider.model, typeFilter, input.limit, !scope.scoped, scope.ownerId],
     );
 
     const textUnitResult = input.includeTextUnits
@@ -388,10 +404,10 @@ export class PgGraphStore implements GraphStore {
         `select tu.id, tu.source_id, tu.ordinal, tu.section_path, tu.char_start, tu.char_end, tu.text, tu.content_sha256
          from embedding e
          join text_unit tu on tu.id = e.owner_id and e.owner_table = 'text_unit'
-         where e.model = $2
+         where e.model = $2 and ($3 or tu.owner_id = $4)
          order by e.embedding <=> $1::vector
-         limit $3`,
-        [queryVector, provider.model, input.limit],
+         limit $5`,
+        [queryVector, provider.model, !scope.scoped, scope.ownerId, input.limit],
       )
       : { rows: [] };
 
@@ -401,16 +417,16 @@ export class PgGraphStore implements GraphStore {
     };
   }
 
-  async read(input: ReadInput): Promise<ReadResult | null> {
-    const params = input.nodeId ? [input.nodeId] : [input.slug];
+  async read(input: ReadInput, context?: GraphOperationContext): Promise<ReadResult | null> {
+    const scope = ownerScope(context);
     const predicate = input.nodeId ? "n.id = $1" : "n.slug = $1";
     const nodeResult = await this.pool.query(
       `select n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id, n.updated_at, n.access_count, n.last_accessed_at
        from node n
        left join node_revision nr on nr.id = n.current_revision_id
-       where n.deleted_at is null and ${predicate}
+       where n.deleted_at is null and ${predicate} and ($2 or n.owner_id = $3)
        limit 1`,
-      params,
+      [input.nodeId ?? input.slug, !scope.scoped, scope.ownerId],
     );
     if (nodeResult.rowCount === 0) return null;
 
@@ -445,12 +461,13 @@ export class PgGraphStore implements GraphStore {
     return { ...node, evidence, annotations };
   }
 
-  async neighborhood(input: NeighborhoodInput): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }> {
+  async neighborhood(input: NeighborhoodInput, context?: GraphOperationContext): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }> {
+    const scope = ownerScope(context);
     const nodeResult = await this.pool.query(
       `with recursive walk as (
          select n.id as node_id, 0 as depth, array[n.id] as path
          from node n
-         where n.id = $1
+         where n.id = $1 and ($6 or n.owner_id = $7)
          union all
          select next_node.id as node_id, walk.depth + 1 as depth, walk.path || next_node.id as path
          from walk
@@ -459,6 +476,7 @@ export class PgGraphStore implements GraphStore {
           and (e.from_node_id = walk.node_id or e.to_node_id = walk.node_id)
          join node next_node
            on next_node.deleted_at is null
+          and ($6 or next_node.owner_id = $7)
           and next_node.id = case
             when e.from_node_id = walk.node_id then e.to_node_id
             else e.from_node_id
@@ -476,7 +494,7 @@ export class PgGraphStore implements GraphStore {
        from walk
        join node n on n.id = walk.node_id
        left join node_revision nr on nr.id = n.current_revision_id`,
-      [input.nodeId, input.depth ?? 1, input.predicates ?? null, input.asOf ?? null, input.includeExpired ?? false],
+      [input.nodeId, input.depth ?? 1, input.predicates ?? null, input.asOf ?? null, input.includeExpired ?? false, !scope.scoped, scope.ownerId],
     );
     const nodes = nodeResult.rows.map(mapNode);
     const nodeIds = nodes.map((node) => node.id);
@@ -504,20 +522,21 @@ export class PgGraphStore implements GraphStore {
     try {
       await client.query("begin");
       const actorUuid = await this.actorUuidForContext(client, context);
-      const fromNodeId = input.fromNodeId ?? await this.nodeIdForSlug(input.fromSlug, client);
-      const toNodeId = input.toNodeId ?? await this.nodeIdForSlug(input.toSlug, client);
+      const scope = ownerScope(context);
+      const fromNodeId = input.fromNodeId ?? await this.nodeIdForSlug(input.fromSlug, client, scope);
+      const toNodeId = input.toNodeId ?? await this.nodeIdForSlug(input.toSlug, client, scope);
       if (!fromNodeId || !toNodeId) {
         await client.query("rollback");
         return null;
       }
 
       const result = await client.query(
-        `insert into edge (id, from_node_id, to_node_id, predicate, weight, valid_from, created_by)
-         values ($1, $2, $3, $4, $5, coalesce($6::timestamptz, now()), $7)
+        `insert into edge (id, from_node_id, to_node_id, predicate, weight, valid_from, created_by, owner_id)
+         values ($1, $2, $3, $4, $5, coalesce($6::timestamptz, now()), $7, $8)
          on conflict (from_node_id, to_node_id, predicate) where deleted_at is null and expired_at is null
          do update set weight = excluded.weight
          returning id, from_node_id, to_node_id, predicate, weight, created_at, valid_from, valid_until, expired_at, invalidated_by`,
-        [randomUUID(), fromNodeId, toNodeId, input.predicate, input.weight, input.validFrom ?? null, actorUuid],
+        [randomUUID(), fromNodeId, toNodeId, input.predicate, input.weight, input.validFrom ?? null, actorUuid, ownerScope(context).ownerId],
       );
       const edge = mapEdge(result.rows[0]);
       await this.recordEvent(
@@ -569,12 +588,13 @@ export class PgGraphStore implements GraphStore {
     try {
       await client.query("begin");
       const actorUuid = await this.actorUuidForContext(client, context);
+      const eScope = ownerScope(context);
       const existing = await client.query(
         `select id, from_node_id, to_node_id, predicate, weight, created_at, valid_from, valid_until, expired_at, invalidated_by
          from edge
-         where id = $1 and deleted_at is null
+         where id = $1 and deleted_at is null and ($2 or owner_id = $3)
          for update`,
-        [input.edgeId],
+        [input.edgeId, !eScope.scoped, eScope.ownerId],
       );
       if (existing.rowCount === 0) {
         await client.query("rollback");
@@ -615,8 +635,8 @@ export class PgGraphStore implements GraphStore {
     }
   }
 
-  async recall(input: RecallInput): Promise<RecallResult> {
-    return performRecall(this, input);
+  async recall(input: RecallInput, context?: GraphOperationContext): Promise<RecallResult> {
+    return performRecall(this, input, context);
   }
 
   async capture(input: CaptureInput, context?: GraphOperationContext): Promise<GraphNode> {
@@ -624,15 +644,17 @@ export class PgGraphStore implements GraphStore {
     try {
       await client.query("begin");
       const actorUuid = await this.actorUuidForContext(client, context);
+      const scope = ownerScope(context);
+      const ownerId = scope.ownerId;
       const id = randomUUID();
       const revisionId = randomUUID();
-      const slug = await this.uniqueSlug(slugify(input.title), client);
+      const slug = await this.uniqueSlug(slugify(input.title), client, scope);
       const content = input.content ?? null;
 
       await client.query(
-        `insert into node (id, type, slug, title, summary, metadata)
-         values ($1, $2, $3, $4, $5, '{}'::jsonb)`,
-        [id, input.type, slug, input.title, input.summary],
+        `insert into node (id, type, slug, title, summary, metadata, owner_id)
+         values ($1, $2, $3, $4, $5, '{}'::jsonb, $6)`,
+        [id, input.type, slug, input.title, input.summary, ownerId],
       );
       await client.query(
         `insert into node_revision (
@@ -655,14 +677,14 @@ export class PgGraphStore implements GraphStore {
       }
 
       for (const link of input.links) {
-        const toNodeId = await this.nodeIdForSlug(link.toSlug, client);
+        const toNodeId = await this.nodeIdForSlug(link.toSlug, client, scope);
         if (!toNodeId) continue;
         await client.query(
-          `insert into edge (id, from_node_id, to_node_id, predicate, valid_from, created_by)
-           values ($1, $2, $3, $4, now(), $5)
+          `insert into edge (id, from_node_id, to_node_id, predicate, valid_from, created_by, owner_id)
+           values ($1, $2, $3, $4, now(), $5, $6)
            on conflict (from_node_id, to_node_id, predicate) where deleted_at is null and expired_at is null
            do nothing`,
-          [randomUUID(), id, toNodeId, link.predicate, actorUuid],
+          [randomUUID(), id, toNodeId, link.predicate, actorUuid, ownerId],
         );
       }
 
@@ -718,13 +740,14 @@ export class PgGraphStore implements GraphStore {
     try {
       await client.query("begin");
       const actorUuid = await this.actorUuidForContext(client, context);
+      const uScope = ownerScope(context);
       const current = await client.query(
         `select n.id, n.current_revision_id, nr.content
          from node n
          left join node_revision nr on nr.id = n.current_revision_id
-         where n.id = $1 and n.deleted_at is null
+         where n.id = $1 and n.deleted_at is null and ($2 or n.owner_id = $3)
          for update of n`,
-        [input.nodeId],
+        [input.nodeId, !uScope.scoped, uScope.ownerId],
       );
       if (current.rowCount === 0) {
         await client.query("rollback");
@@ -759,10 +782,13 @@ export class PgGraphStore implements GraphStore {
       let nextSlug: string | null = null;
       if (input.slug) {
         const base = slugify(input.slug);
-        const owner = await client.query("select id from node where slug = $1", [base]);
-        nextSlug = owner.rowCount === 0 || owner.rows[0].id === input.nodeId
+        const collision = await client.query(
+          "select id from node where slug = $1 and ($2 or owner_id = $3)",
+          [base, !uScope.scoped, uScope.ownerId],
+        );
+        nextSlug = collision.rowCount === 0 || collision.rows[0].id === input.nodeId
           ? base
-          : await this.uniqueSlug(base, client);
+          : await this.uniqueSlug(base, client, uScope);
       }
 
       await client.query(
@@ -802,11 +828,11 @@ export class PgGraphStore implements GraphStore {
     }
   }
 
-  async project(input: ProjectInput): Promise<ProjectResult | null> {
-    const read = await this.read({ nodeId: input.nodeId });
+  async project(input: ProjectInput, context?: GraphOperationContext): Promise<ProjectResult | null> {
+    const read = await this.read({ nodeId: input.nodeId }, context);
     if (!read) return null;
     const node = stripReadResult(read);
-    const neighborhood = await this.neighborhood({ nodeId: node.id, depth: input.depth });
+    const neighborhood = await this.neighborhood({ nodeId: node.id, depth: input.depth }, context);
     const evidence = read.evidence.filter(isTextUnit);
 
     if (input.format === "mind_map") {
@@ -827,32 +853,36 @@ export class PgGraphStore implements GraphStore {
     };
   }
 
-  async timeline(): Promise<GraphEvent[]> {
+  async timeline(context?: GraphOperationContext): Promise<GraphEvent[]> {
+    const scope = ownerScope(context);
     const result = await this.pool.query(
       `select ge.id, ge.action, ge.entity_table, ge.entity_id, ge.actor_id, a.handle as actor_handle,
               ge.interface_id, ge.request_id, ge.created_at
        from graph_event ge
        left join actor a on a.id = ge.actor_id
+       where ($1 or ge.owner_id = $2)
        order by ge.created_at desc
        limit 100`,
+      [!scope.scoped, scope.ownerId],
     );
     return result.rows.map(mapEvent);
   }
 
-  async events(input: EventFeedInput = { limit: 100 }): Promise<GraphEventFeed> {
+  async events(input: EventFeedInput = { limit: 100 }, context?: GraphOperationContext): Promise<GraphEventFeed> {
     const after = input.afterCursor ? decodeEventCursor(input.afterCursor) : null;
     const descending = input.order === "desc";
+    const scope = ownerScope(context);
     const result = await this.pool.query(
       `select ge.id, ge.action, ge.entity_table, ge.entity_id, ge.actor_id, a.handle as actor_handle,
               ge.interface_id, ge.request_id, ge.created_at
        from graph_event ge
        left join actor a on a.id = ge.actor_id
-       where ($1::timestamptz is null or ${descending
+       where ($4 or ge.owner_id = $5) and ($1::timestamptz is null or ${descending
          ? "(ge.created_at, ge.id) < ($1::timestamptz, $2::uuid)"
          : "(ge.created_at, ge.id) > ($1::timestamptz, $2::uuid)"})
        order by ge.created_at ${descending ? "desc" : "asc"}, ge.id ${descending ? "desc" : "asc"}
        limit $3`,
-      [after?.createdAt ?? null, after?.id ?? null, input.limit + 1],
+      [after?.createdAt ?? null, after?.id ?? null, input.limit + 1, !scope.scoped, scope.ownerId],
     );
     const rows = result.rows.slice(0, input.limit);
     const events = rows.map(mapEvent);
@@ -864,47 +894,53 @@ export class PgGraphStore implements GraphStore {
     };
   }
 
-  async lint(): Promise<GraphLintReport> {
+  async lint(context?: GraphOperationContext): Promise<GraphLintReport> {
+    const scope = ownerScope(context);
+    const p: [boolean, string | null] = [!scope.scoped, scope.ownerId];
     const [nodeCount, edgeCount, orphanNodes, missingEvidence, duplicateTitles, danglingEdges] = await Promise.all([
-      this.pool.query("select count(*)::int as count from node where deleted_at is null"),
-      this.pool.query("select count(*)::int as count from edge where deleted_at is null and expired_at is null"),
+      this.pool.query("select count(*)::int as count from node where deleted_at is null and ($1 or owner_id = $2)", p),
+      this.pool.query("select count(*)::int as count from edge where deleted_at is null and expired_at is null and ($1 or owner_id = $2)", p),
       this.pool.query(
         `select n.id, n.title
          from node n
          left join edge e on e.deleted_at is null and e.expired_at is null and (e.from_node_id = n.id or e.to_node_id = n.id)
-         where n.deleted_at is null
+         where n.deleted_at is null and ($1 or n.owner_id = $2)
          group by n.id, n.title
          having count(e.id) = 0
          order by n.updated_at desc
          limit 50`,
+        p,
       ),
       this.pool.query(
         `select n.id, n.title
          from node n
          left join annotation a on a.node_id = n.id
-         where n.deleted_at is null
+         where n.deleted_at is null and ($1 or n.owner_id = $2)
          group by n.id, n.title
          having count(a.id) = 0
          order by n.updated_at desc
          limit 50`,
+        p,
       ),
       this.pool.query(
         `select lower(title) as title_key, count(*)::int as count
          from node
-         where deleted_at is null
+         where deleted_at is null and ($1 or owner_id = $2)
          group by lower(title)
          having count(*) > 1
          order by count(*) desc, lower(title)
          limit 50`,
+        p,
       ),
       this.pool.query(
         `select e.id
          from edge e
          left join node from_node on from_node.id = e.from_node_id and from_node.deleted_at is null
          left join node to_node on to_node.id = e.to_node_id and to_node.deleted_at is null
-         where e.deleted_at is null and e.expired_at is null
+         where e.deleted_at is null and e.expired_at is null and ($1 or e.owner_id = $2)
            and (from_node.id is null or to_node.id is null)
          limit 50`,
+        p,
       ),
     ]);
 
@@ -965,11 +1001,15 @@ export class PgGraphStore implements GraphStore {
     };
   }
 
-  async exportMarkdown(): Promise<Record<string, string>> {
-    const result = await this.pool.query("select id, slug from node where deleted_at is null order by slug");
+  async exportMarkdown(context?: GraphOperationContext): Promise<Record<string, string>> {
+    const scope = ownerScope(context);
+    const result = await this.pool.query(
+      "select id, slug from node where deleted_at is null and ($1 or owner_id = $2) order by slug",
+      [!scope.scoped, scope.ownerId],
+    );
     const files: Record<string, string> = {};
     for (const row of result.rows) {
-      const projected = await this.project({ nodeId: row.id, format: "markdown", depth: 1 });
+      const projected = await this.project({ nodeId: row.id, format: "markdown", depth: 1 }, context);
       if (projected?.format === "markdown") {
         files[`${row.slug}.md`] = projected.content;
       }
@@ -977,27 +1017,31 @@ export class PgGraphStore implements GraphStore {
     return files;
   }
 
-  async exportGraph(): Promise<GraphSnapshot> {
+  async exportGraph(context?: GraphOperationContext): Promise<GraphSnapshot> {
+    const scope = ownerScope(context);
+    const p: [boolean, string | null] = [!scope.scoped, scope.ownerId];
     const nodeResult = await this.pool.query(
       `select n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id, n.updated_at, n.access_count, n.last_accessed_at
        from node n
        left join node_revision nr on nr.id = n.current_revision_id
-       where n.deleted_at is null
+       where n.deleted_at is null and ($1 or n.owner_id = $2)
        order by n.slug`,
+      p,
     );
     const edgeResult = await this.pool.query(
       `select e.id, e.from_node_id, e.to_node_id, e.predicate, e.weight, e.created_at, e.valid_from, e.valid_until, e.expired_at, e.invalidated_by
        from edge e
        join node from_node on from_node.id = e.from_node_id and from_node.deleted_at is null
        join node to_node on to_node.id = e.to_node_id and to_node.deleted_at is null
-       where e.deleted_at is null and e.expired_at is null
+       where e.deleted_at is null and e.expired_at is null and ($1 or e.owner_id = $2)
        order by e.predicate, e.id`,
+      p,
     );
 
     return {
       nodes: nodeResult.rows.map(mapNode),
       edges: edgeResult.rows.map(mapEdge),
-      views: await this.views({ limit: 100 }),
+      views: await this.views({ limit: 100 }, context),
     };
   }
 
@@ -1006,15 +1050,16 @@ export class PgGraphStore implements GraphStore {
     try {
       await client.query("begin");
       const actorUuid = await this.actorUuidForContext(client, context);
+      const scope = ownerScope(context);
       const id = randomUUID();
-      const slug = await this.uniqueViewSlug(slugify(input.slug ?? input.title), client);
-      const resolved = await this.resolveViewMembers(client, input);
+      const slug = await this.uniqueViewSlug(slugify(input.slug ?? input.title), client, scope);
+      const resolved = await this.resolveViewMembers(client, input, context);
 
       const result = await client.query(
         `insert into graph_view (
-           id, slug, title, root_node_id, query, layout, included_node_ids, included_edge_ids, summary, created_by
+           id, slug, title, root_node_id, query, layout, included_node_ids, included_edge_ids, summary, created_by, owner_id
          )
-         values ($1, $2, $3, $4, $5, $6::jsonb, $7::uuid[], $8::uuid[], $9, $10)
+         values ($1, $2, $3, $4, $5, $6::jsonb, $7::uuid[], $8::uuid[], $9, $10, $11)
          returning id, slug, title, root_node_id, query, layout, included_node_ids, included_edge_ids,
                    summary, created_at, updated_at`,
         [
@@ -1028,6 +1073,7 @@ export class PgGraphStore implements GraphStore {
           resolved.edgeIds,
           input.summary ?? null,
           actorUuid,
+          ownerScope(context).ownerId,
         ],
       );
       const view = mapView(result.rows[0]);
@@ -1052,27 +1098,30 @@ export class PgGraphStore implements GraphStore {
     }
   }
 
-  async views(input: ListViewsInput = { limit: 25 }): Promise<GraphView[]> {
+  async views(input: ListViewsInput = { limit: 25 }, context?: GraphOperationContext): Promise<GraphView[]> {
+    const scope = ownerScope(context);
     const result = await this.pool.query(
       `select id, slug, title, root_node_id, query, layout, included_node_ids, included_edge_ids,
               summary, created_at, updated_at
        from graph_view
-       where ($1::text is null or title ilike $1 or coalesce(summary, '') ilike $1 or coalesce(query, '') ilike $1)
+       where ($3 or owner_id = $4)
+         and ($1::text is null or title ilike $1 or coalesce(summary, '') ilike $1 or coalesce(query, '') ilike $1)
        order by updated_at desc
        limit $2`,
-      [input.query ? `%${input.query}%` : null, input.limit ?? 25],
+      [input.query ? `%${input.query}%` : null, input.limit ?? 25, !scope.scoped, scope.ownerId],
     );
     return result.rows.map(mapView);
   }
 
-  async readView(input: ReadViewInput): Promise<GraphViewSnapshot | null> {
-    const params = input.viewId ? [input.viewId] : [input.slug];
+  async readView(input: ReadViewInput, context?: GraphOperationContext): Promise<GraphViewSnapshot | null> {
+    const scope = ownerScope(context);
+    const params = [input.viewId ?? input.slug, !scope.scoped, scope.ownerId];
     const predicate = input.viewId ? "id = $1" : "slug = $1";
     const result = await this.pool.query(
       `select id, slug, title, root_node_id, query, layout, included_node_ids, included_edge_ids,
               summary, created_at, updated_at
        from graph_view
-       where ${predicate}
+       where ${predicate} and ($2 or owner_id = $3)
        limit 1`,
       params,
     );
@@ -1085,11 +1134,12 @@ export class PgGraphStore implements GraphStore {
     try {
       await client.query("begin");
       const actorUuid = await this.actorUuidForContext(client, context);
-      const params = input.viewId ? [input.viewId] : [input.slug];
+      const dScope = ownerScope(context);
+      const params = [input.viewId ?? input.slug, !dScope.scoped, dScope.ownerId];
       const predicate = input.viewId ? "id = $1" : "slug = $1";
       const result = await client.query(
         `delete from graph_view
-         where ${predicate}
+         where ${predicate} and ($2 or owner_id = $3)
          returning id, slug, title, root_node_id, query, layout, included_node_ids, included_edge_ids,
                    summary, created_at, updated_at`,
         params,
@@ -1515,9 +1565,9 @@ export class PgGraphStore implements GraphStore {
     const resolvedActorUuid = actorUuid === undefined ? await this.actorUuidForContext(client, context) : actorUuid;
     const result = await client.query(
       `insert into annotation (
-         id, motivation, source_id, text_unit_id, node_id, body, selector, created_by
+         id, motivation, source_id, text_unit_id, node_id, body, selector, created_by, owner_id
        )
-       values ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
+       values ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9)
        returning id, motivation, source_id, text_unit_id, node_id, body, selector, created_at`,
       [
         randomUUID(),
@@ -1528,6 +1578,7 @@ export class PgGraphStore implements GraphStore {
         JSON.stringify(input.body),
         JSON.stringify(input.selector),
         resolvedActorUuid,
+        ownerScope(context).ownerId,
       ],
     );
     const annotation = mapAnnotation(result.rows[0]);
@@ -1572,8 +1623,8 @@ export class PgGraphStore implements GraphStore {
     actorUuid: string | null,
   ): Promise<void> {
     await client.query(
-      `insert into graph_event (id, actor_id, interface_id, action, entity_table, entity_id, before, after, request_id)
-       values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9)`,
+      `insert into graph_event (id, actor_id, interface_id, action, entity_table, entity_id, before, after, request_id, owner_id)
+       values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10)`,
       [
         randomUUID(),
         actorUuid,
@@ -1584,26 +1635,36 @@ export class PgGraphStore implements GraphStore {
         before === null ? null : JSON.stringify(before),
         after === null ? null : JSON.stringify(after),
         context?.requestId ?? null,
+        ownerScope(context).ownerId,
       ],
     );
   }
 
-  private async uniqueSlug(baseSlug: string, client: pg.PoolClient): Promise<string> {
+  // Slugs are unique per owner, so two owners can each hold `project-x`. A
+  // superuser (unscoped) write dedupes globally, which still satisfies the
+  // per-owner unique index.
+  private async uniqueSlug(baseSlug: string, client: pg.PoolClient, scope: OwnerScope): Promise<string> {
     let slug = baseSlug || "untitled";
     let counter = 2;
     while (true) {
-      const result = await client.query("select 1 from node where slug = $1", [slug]);
+      const result = await client.query(
+        "select 1 from node where slug = $1 and ($2 or owner_id = $3)",
+        [slug, !scope.scoped, scope.ownerId],
+      );
       if (result.rowCount === 0) return slug;
       slug = `${baseSlug}-${counter}`;
       counter += 1;
     }
   }
 
-  private async uniqueViewSlug(baseSlug: string, client: pg.PoolClient): Promise<string> {
+  private async uniqueViewSlug(baseSlug: string, client: pg.PoolClient, scope: OwnerScope): Promise<string> {
     let slug = baseSlug || "view";
     let counter = 2;
     while (true) {
-      const result = await client.query("select 1 from graph_view where slug = $1", [slug]);
+      const result = await client.query(
+        "select 1 from graph_view where slug = $1 and ($2 or owner_id = $3)",
+        [slug, !scope.scoped, scope.ownerId],
+      );
       if (result.rowCount === 0) return slug;
       slug = `${baseSlug}-${counter}`;
       counter += 1;
@@ -1613,11 +1674,17 @@ export class PgGraphStore implements GraphStore {
   private async resolveViewMembers(
     client: pg.PoolClient,
     input: CreateViewInput,
+    context?: GraphOperationContext,
   ): Promise<{ rootNodeId: string | null; nodeIds: string[]; edgeIds: string[] }> {
-    const rootNodeId = input.rootNodeId ?? await this.nodeIdForSlug(input.rootSlug, client);
+    const scope = ownerScope(context);
+    const ownerParams: [boolean, string | null] = [!scope.scoped, scope.ownerId];
+    const rootNodeId = input.rootNodeId ?? await this.nodeIdForSlug(input.rootSlug, client, scope);
     if (input.rootNodeId || input.rootSlug) {
       if (!rootNodeId) throw new Error("View root node could not be resolved.");
-      const root = await client.query("select 1 from node where id = $1 and deleted_at is null", [rootNodeId]);
+      const root = await client.query(
+        "select 1 from node where id = $1 and deleted_at is null and ($2 or owner_id = $3)",
+        [rootNodeId, ...ownerParams],
+      );
       if (root.rowCount === 0) throw new Error("View root node could not be resolved.");
     }
 
@@ -1625,9 +1692,9 @@ export class PgGraphStore implements GraphStore {
       const nodes = await client.query(
         `select id
          from node
-         where deleted_at is null and id = any($1::uuid[])
+         where deleted_at is null and id = any($1::uuid[]) and ($2 or owner_id = $3)
          order by array_position($1::uuid[], id)`,
-        [input.includedNodeIds],
+        [input.includedNodeIds, ...ownerParams],
       );
       const nodeIds = nodes.rows.map((row) => String(row.id));
       const nodeIdSet = new Set(nodeIds);
@@ -1654,7 +1721,7 @@ export class PgGraphStore implements GraphStore {
         nodeId: rootNodeId,
         depth: input.depth,
         predicates: input.predicates,
-      });
+      }, context);
       if (neighborhood.nodes.length === 0) {
         throw new Error("View root node could not be resolved.");
       }
@@ -1666,7 +1733,7 @@ export class PgGraphStore implements GraphStore {
     }
 
     if (input.query) {
-      const search = await this.search({ query: input.query, includeTextUnits: false, mode: "hybrid", limit: 50 });
+      const search = await this.search({ query: input.query, includeTextUnits: false, mode: "hybrid", limit: 50 }, context);
       const nodeIds = search.nodes.map((node) => node.id);
       const edges = nodeIds.length === 0 ? { rows: [] } : await client.query(
         `select id
@@ -1715,10 +1782,13 @@ export class PgGraphStore implements GraphStore {
     };
   }
 
-  private async nodeIdForSlug(slug: string | undefined, client?: pg.PoolClient): Promise<string | null> {
+  private async nodeIdForSlug(slug: string | undefined, client: pg.PoolClient | undefined, scope: OwnerScope): Promise<string | null> {
     if (!slug) return null;
     const queryable = client ?? this.pool;
-    const result = await queryable.query("select id from node where slug = $1 and deleted_at is null", [slug]);
+    const result = await queryable.query(
+      "select id from node where slug = $1 and deleted_at is null and ($2 or owner_id = $3)",
+      [slug, !scope.scoped, scope.ownerId],
+    );
     return result.rowCount === 0 ? null : String(result.rows[0].id);
   }
 

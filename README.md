@@ -1,11 +1,52 @@
-# Trove
+<p align="center">
+  <img src="web/public/favicon.svg" width="72" alt="Trove" />
+</p>
 
-[![CI](https://github.com/anunay999/trove/actions/workflows/ci.yml/badge.svg)](https://github.com/anunay999/trove/actions/workflows/ci.yml)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+<h1 align="center">Trove</h1>
 
-**A memory that your AI agents keep, so you don't have to.**
+<p align="center"><strong>A memory that your AI agents keep, so you don't have to.</strong></p>
+
+<p align="center">
+  <a href="https://github.com/anunay999/trove/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/anunay999/trove/actions/workflows/ci.yml/badge.svg" /></a>
+  <a href="LICENSE"><img alt="License: AGPL v3" src="https://img.shields.io/badge/License-AGPL_v3-blue.svg" /></a>
+  <a href="https://github.com/anunay999/trove/issues"><img alt="Issues" src="https://img.shields.io/github/issues/anunay999/trove?color=0088ff" /></a>
+  <a href="https://github.com/anunay999/trove/pulls"><img alt="Pull requests" src="https://img.shields.io/github/issues-pr/anunay999/trove?color=0088ff" /></a>
+  <a href="https://github.com/anunay999/trove/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/anunay999/trove" /></a>
+  <a href="https://mytrove.in"><img alt="Live at mytrove.in" src="https://img.shields.io/badge/live-mytrove.in-863bff" /></a>
+</p>
+
+<p align="center">
+  <a href="https://mytrove.in">Website</a> ·
+  <a href="docs/quickstart.md">Quickstart</a> ·
+  <a href="docs/mcp.md">MCP tools</a> ·
+  <a href="docs/oauth.md">OAuth connector</a>
+</p>
+
+---
 
 Trove is a hosted knowledge graph for agent memory. Claude, Codex, and any MCP-capable agent can write what they learn into it and recall it in later sessions — with every fact traceable back to the source text that justifies it. Your notes stay inspectable, contradictions are superseded instead of overwritten, and the whole graph is browsable in a built-in dashboard.
+
+## Connect your agent
+
+Point any MCP-capable agent at Trove and it reads and writes your graph across sessions. Create an API key on the dashboard at **[mytrove.in](https://mytrove.in)**, then:
+
+```bash
+# Claude Code (hosted)
+claude mcp add trove --transport http https://mytrove.in/mcp \
+  --header "Authorization: Bearer <your trove_ key>"
+```
+
+Running your own instance? Use `http://localhost:8787/mcp` (no key needed when auth is disabled). For the claude.ai / Claude Desktop **Connectors** panel, add `https://mytrove.in/mcp` and sign in with Clerk — see [docs/oauth.md](docs/oauth.md).
+
+Your agent gets a small verb-per-job toolset: `remember`, `recall`, `grep`, `read`, `connect`, `forget` (plus `ingest` and curation tools for write-scoped keys). Nothing else to pass — each credential is scoped to its own private graph automatically.
+
+**Companion skills (optional, Claude Code).** The MCP tools work in any client on their own. Install the skills straight from this repo so Claude uses them with the right discipline — recall before re-deriving, cite evidence, supersede instead of delete:
+
+```bash
+npx skills add anunay999/trove -g
+```
+
+Full setup — keys, scopes, stdio, importing a vault — is in [docs/quickstart.md](docs/quickstart.md).
 
 ## What you get
 
@@ -50,10 +91,11 @@ Use the hosted service at **[mytrove.in](https://mytrove.in)** — sign in, crea
 
 ```bash
 # the short version, locally
-git clone https://github.com/anunay999/trove.git && cd trove && npm install
-docker compose up -d postgres
-export DATABASE_URL=postgres://trove:trove@localhost:5433/trove
-npm run db:schema && npm run db:migrate && npm run web:build && npm start
+git clone https://github.com/anunay999/trove.git && cd trove
+npm install                 # server + web dashboard
+cp .env.example .env
+npm run setup               # Postgres + schema + migrations
+npm run web:build && npm start
 # → dashboard at http://localhost:8787
 ```
 

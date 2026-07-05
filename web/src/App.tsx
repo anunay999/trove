@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { AuthenticateWithRedirectCallback } from "@clerk/clerk-react";
+import { siGithub } from "simple-icons";
 import { Overview } from "@/pages/Overview";
 import { GraphView } from "@/pages/GraphView";
 import { Landing } from "@/pages/Landing";
@@ -156,6 +157,17 @@ export default function App() {
                 Disconnect
               </button>
             )}
+            <a
+              href="https://github.com/anunay999/trove"
+              target="_blank"
+              rel="noreferrer noopener"
+              aria-label="Trove on GitHub"
+              className="flex size-7 items-center justify-center rounded-md border text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <svg viewBox="0 0 24 24" className="size-[15px] fill-current" aria-hidden>
+                <path d={siGithub.path} />
+              </svg>
+            </a>
             <button
               type="button"
               onClick={() => setDark((current) => !current)}
@@ -248,7 +260,7 @@ export default function App() {
         </main>
       ) : (
         <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">
-          <Admin />
+          <Admin selfClerkUserId={identity?.clerkUserId} />
         </main>
       )}
 

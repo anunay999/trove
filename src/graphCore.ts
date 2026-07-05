@@ -71,7 +71,29 @@ export type GraphOperationContext = {
   actorId?: string;
   interfaceId?: string;
   requestId?: string;
+  /** app_user.id this operation reads/writes as. Absent → see-all (superuser). */
+  ownerId?: string | undefined;
+  /** Bypass owner scoping entirely (auth-disabled local/CI, maintenance jobs). */
+  superuser?: boolean | undefined;
 };
+
+/**
+ * Resolve the owner scope for a store operation.
+ * - `scoped: false` — no owner filter (superuser, or no context supplied, e.g.
+ *   maintenance jobs and internal callers). Writes stamp owner_id = NULL.
+ * - `scoped: true` — reads filter by `ownerId`; a scoped-but-null owner matches
+ *   nothing, so an authed request that failed to resolve an owner fails closed.
+ */
+export type OwnerScope = { scoped: boolean; ownerId: string | null };
+
+export function ownerScope(context?: GraphOperationContext): OwnerScope {
+  // Scoping requires an explicit owner. No context, superuser, or a context
+  // without an ownerId (internal/maintenance callers) all see the whole graph.
+  // Every authenticated user credential carries an ownerId, so real requests
+  // are always scoped; only trusted operator/internal paths reach see-all.
+  if (!context || context.superuser || !context.ownerId) return { scoped: false, ownerId: null };
+  return { scoped: true, ownerId: context.ownerId };
+}
 
 export type GraphSourceOverview = GraphSource & {
   metadata: Record<string, unknown>;
@@ -209,29 +231,29 @@ export type ProjectResult =
 
 export type GraphStore = {
   ingest(input: IngestInput, context?: GraphOperationContext): MaybePromise<{ source: GraphSource; textUnits: TextUnit[] }>;
-  sources(input?: { limit?: number }): MaybePromise<GraphSourceOverview[]>;
-  readSource(input: { sourceId: string }): MaybePromise<GraphSourceDocument | null>;
-  readDocument(input: { uri: string }): MaybePromise<GraphDocument | null>;
-  search(input: SearchInput): MaybePromise<SearchResult>;
-  grep(input: GrepInput): MaybePromise<GrepResult>;
-  read(input: ReadInput): MaybePromise<ReadResult | null>;
-  neighborhood(input: NeighborhoodInput): MaybePromise<{ nodes: GraphNode[]; edges: GraphEdge[] }>;
-  recall(input: RecallInput): MaybePromise<RecallResult>;
+  sources(input?: { limit?: number }, context?: GraphOperationContext): MaybePromise<GraphSourceOverview[]>;
+  readSource(input: { sourceId: string }, context?: GraphOperationContext): MaybePromise<GraphSourceDocument | null>;
+  readDocument(input: { uri: string }, context?: GraphOperationContext): MaybePromise<GraphDocument | null>;
+  search(input: SearchInput, context?: GraphOperationContext): MaybePromise<SearchResult>;
+  grep(input: GrepInput, context?: GraphOperationContext): MaybePromise<GrepResult>;
+  read(input: ReadInput, context?: GraphOperationContext): MaybePromise<ReadResult | null>;
+  neighborhood(input: NeighborhoodInput, context?: GraphOperationContext): MaybePromise<{ nodes: GraphNode[]; edges: GraphEdge[] }>;
+  recall(input: RecallInput, context?: GraphOperationContext): MaybePromise<RecallResult>;
   link(input: LinkInput, context?: GraphOperationContext): MaybePromise<GraphEdge | null>;
   invalidateEdge(input: InvalidateEdgeInput, context?: GraphOperationContext): MaybePromise<GraphEdge | null>;
   capture(input: CaptureInput, context?: GraphOperationContext): MaybePromise<GraphNode>;
   annotate(input: AnnotateInput, context?: GraphOperationContext): MaybePromise<GraphAnnotation>;
   update(input: UpdateInput, context?: GraphOperationContext): MaybePromise<GraphNode | { conflict: true; currentRevisionId: string } | null>;
-  project(input: ProjectInput): MaybePromise<ProjectResult | null>;
-  timeline(): MaybePromise<GraphEvent[]>;
-  events(input?: EventFeedInput): MaybePromise<GraphEventFeed>;
-  lint(): MaybePromise<GraphLintReport>;
+  project(input: ProjectInput, context?: GraphOperationContext): MaybePromise<ProjectResult | null>;
+  timeline(context?: GraphOperationContext): MaybePromise<GraphEvent[]>;
+  events(input?: EventFeedInput, context?: GraphOperationContext): MaybePromise<GraphEventFeed>;
+  lint(context?: GraphOperationContext): MaybePromise<GraphLintReport>;
   createView(input: CreateViewInput, context?: GraphOperationContext): MaybePromise<GraphViewSnapshot>;
-  views(input?: ListViewsInput): MaybePromise<GraphView[]>;
-  readView(input: ReadViewInput): MaybePromise<GraphViewSnapshot | null>;
+  views(input?: ListViewsInput, context?: GraphOperationContext): MaybePromise<GraphView[]>;
+  readView(input: ReadViewInput, context?: GraphOperationContext): MaybePromise<GraphViewSnapshot | null>;
   deleteView(input: DeleteViewInput, context?: GraphOperationContext): MaybePromise<{ deleted: boolean; view: GraphView | null }>;
-  exportMarkdown(): MaybePromise<Record<string, string>>;
-  exportGraph(): MaybePromise<GraphSnapshot>;
+  exportMarkdown(context?: GraphOperationContext): MaybePromise<Record<string, string>>;
+  exportGraph(context?: GraphOperationContext): MaybePromise<GraphSnapshot>;
   enqueueJob(input: EnqueueJobInput, context?: GraphOperationContext): MaybePromise<GraphJob>;
   jobs(input?: ListJobsInput): MaybePromise<GraphJob[]>;
   runJob(input?: RunJobInput, context?: GraphOperationContext): MaybePromise<GraphJob | null>;
@@ -311,7 +333,7 @@ export async function ingestEpisodic(
     return { episodic: false, newSegments: 1, totalSegments: 1, results: [result] };
   }
 
-  const existing = await store.sources({ limit: 10000 });
+  const existing = await store.sources({ limit: 10000 }, context);
   const knownHashes = new Set(existing.map((row) => `${row.kind}:${row.contentSha256}`));
 
   let newSegments = 0;
@@ -365,7 +387,7 @@ function renderRecallEvidence(unit: TextUnit): string {
   return `> ${unit.text.slice(0, 600)} [source:${unit.sourceId}]\n`;
 }
 
-export async function performRecall(store: GraphStore, rawInput: RecallInput): Promise<RecallResult> {
+export async function performRecall(store: GraphStore, rawInput: RecallInput, context?: GraphOperationContext): Promise<RecallResult> {
   const input = recallInputSchema.parse(rawInput);
   const search = await store.search({
     query: input.query,
@@ -373,7 +395,7 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput): P
     includeTextUnits: input.includeEvidence,
     mode: "hybrid",
     limit: 10,
-  });
+  }, context);
 
   const nowMs = Date.now();
   type Candidate = { node: GraphNode; matchRank: number | null; hops: number; degree: number };
@@ -390,7 +412,7 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput): P
         depth: input.depth,
         includeExpired: false,
         ...(input.asOf ? { asOf: input.asOf } : {}),
-      });
+      }, context);
       for (const edge of expansion.edges) edgePool.set(edge.id, edge);
       for (const node of expansion.nodes) {
         if (!candidates.has(node.id)) {
@@ -446,7 +468,7 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput): P
     packedNodeIds.add(candidate.node.id);
     atoms.push({ node: candidate.node, score: candidate.score, hops: candidate.hops, tokens: cost });
 
-    const detail = await store.read({ nodeId: candidate.node.id });
+    const detail = await store.read({ nodeId: candidate.node.id }, context);
     if (detail) {
       for (const annotation of detail.annotations) {
         addCitation({

@@ -30,9 +30,12 @@ function mcpSnippet(tool: McpTool, key: string): { text: string; hint: string } 
   };
 }
 
+const SKILLS_INSTALL = "npx skills add anunay999/trove -g";
+
 function McpSetup({ keySecret }: { keySecret: string | null }) {
   const [tool, setTool] = useState<McpTool>("Claude Code");
   const [copiedSnippet, setCopiedSnippet] = useState(false);
+  const [copiedSkills, setCopiedSkills] = useState(false);
   const key = keySecret ?? "<your-api-key>";
   const snippet = mcpSnippet(tool, key);
 
@@ -79,6 +82,32 @@ function McpSetup({ keySecret }: { keySecret: string | null }) {
         <pre className="overflow-x-auto px-4 py-3 font-mono text-[12px] leading-relaxed">{snippet.text}</pre>
       </div>
       <p className="mt-2 text-[12px] text-muted-foreground">{snippet.hint}</p>
+
+      {tool === "Claude Code" && (
+        <>
+          <p className="mt-5 text-[13px] leading-relaxed text-muted-foreground">
+            Optional: install the companion skills so Claude uses the tools well — recall before re-deriving, cite evidence, supersede instead of delete.
+          </p>
+          <div className="mt-2 rounded-lg border bg-card">
+            <div className="flex items-center justify-between border-b px-4 py-2">
+              <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground">skills</span>
+              <button
+                type="button"
+                onClick={() => {
+                  void navigator.clipboard.writeText(SKILLS_INSTALL).then(() => {
+                    setCopiedSkills(true);
+                    window.setTimeout(() => setCopiedSkills(false), 1600);
+                  });
+                }}
+                className="rounded-md border px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+              >
+                {copiedSkills ? "Copied" : "Copy"}
+              </button>
+            </div>
+            <pre className="overflow-x-auto px-4 py-3 font-mono text-[12px] leading-relaxed">{SKILLS_INSTALL}</pre>
+          </div>
+        </>
+      )}
     </div>
   );
 }
