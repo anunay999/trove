@@ -11,22 +11,22 @@ Trove is the OAuth **resource server**. It doesn't run login screens or mint tok
      │  ◄──── { authorization_servers: ["https://clerk.mytrove.in"] }
      │
      ├──discover, register (DCR), authorize + PKCE, token──► Clerk
-     │  ◄──── oat_… access token
+     │  ◄──── access token (JWT or opaque oat_…)
      │
-     └──POST /mcp  Authorization: Bearer oat_…────────────► Trove
+     └──POST /mcp  Authorization: Bearer <token>──────────► Trove
                                      (verifies token with Clerk → user → scopes)
 ```
 
 - **Trove serves:** `/.well-known/oauth-protected-resource` (and the `/mcp`-suffixed variant), and a `401` with `WWW-Authenticate: Bearer resource_metadata="…"` on unauthenticated `/mcp` calls.
 - **Clerk serves:** authorization-server metadata, `/authorize`, `/token`, `/userinfo`, JWKS, and dynamic client registration.
-- **Trove validates** the `oat_` access token via `@clerk/backend` `authenticateRequest({ acceptsToken: "oauth_token" })`; the token's subject is the Clerk user id, mapped to an `app_user` exactly like a dashboard session. Graph scopes come from the user's Trove role — a waitlisted user can authenticate but holds no scopes until approved.
+- **Trove validates** the access token via `@clerk/backend` `authenticateRequest({ acceptsToken: "oauth_token" })` — this handles both opaque `oat_` tokens and JWT access tokens (the "Generate access tokens as JWTs" instance setting). The token's subject is the Clerk user id, mapped to an `app_user` exactly like a dashboard session. Graph scopes come from the user's Trove role — a waitlisted user can authenticate but holds no scopes until approved.
 
 ## One-time Clerk setup
 
 In the Clerk dashboard for the production instance (clerk.mytrove.in):
 
-1. **OAuth applications** → enable Clerk as an OAuth provider.
-2. Turn on **Dynamic Client Registration (DCR)** so claude.ai can register itself automatically. (Without DCR you must pre-create an OAuth app and paste its Client ID/Secret into the connector's "Advanced settings".)
+1. **OAuth applications → Settings → Dynamic client registration: ON** so claude.ai registers itself automatically. (Without DCR you must pre-create an OAuth app and paste its Client ID/Secret into the connector's "Advanced settings", and add `https://claude.ai/api/mcp/auth_callback` as a Redirect URI.)
+2. **Generate access tokens as JWTs** may be ON or OFF — Trove accepts both formats.
 3. Ensure the `email` and `profile` scopes are available — that's all Trove requests for identity.
 
 Server env (Railway) must include, in addition to the existing `CLERK_SECRET_KEY`:

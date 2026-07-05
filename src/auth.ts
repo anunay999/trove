@@ -127,13 +127,27 @@ export async function requireAuthFromHeaders(
     }
   }
 
-  // 4. Clerk session JWTs from the dashboard.
-  if (bearerToken.split(".").length === 3 && resolvers.resolveClerkToken) {
-    const resolved = await resolvers.resolveClerkToken(bearerToken);
-    if (resolved) {
-      const context: AuthContext = { ...resolved, mode: "clerk", interfaceId, requestId };
-      assertScopes(context, requiredScopes);
-      return context;
+  // 4. Clerk JWTs. Two kinds share the eyJ… shape: dashboard *session* tokens,
+  //    and OAuth *access* tokens when the Clerk instance is set to issue JWTs
+  //    (vs opaque oat_). Try the session verifier first (the dashboard is the
+  //    dominant caller), then fall back to OAuth-token verification so browser
+  //    connectors work regardless of the instance's token-format setting.
+  if (bearerToken.split(".").length === 3) {
+    if (resolvers.resolveClerkToken) {
+      const resolved = await resolvers.resolveClerkToken(bearerToken);
+      if (resolved) {
+        const context: AuthContext = { ...resolved, mode: "clerk", interfaceId, requestId };
+        assertScopes(context, requiredScopes);
+        return context;
+      }
+    }
+    if (resolvers.resolveOAuthToken) {
+      const resolved = await resolvers.resolveOAuthToken(bearerToken);
+      if (resolved) {
+        const context: AuthContext = { ...resolved, mode: "oauth", interfaceId, requestId };
+        assertScopes(context, requiredScopes);
+        return context;
+      }
     }
   }
 
