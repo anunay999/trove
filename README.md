@@ -18,6 +18,7 @@
 <p align="center">
   <a href="https://mytrove.in">Website</a> ·
   <a href="docs/quickstart.md">Quickstart</a> ·
+  <a href="docs/agent-usage.md">Agent usage</a> ·
   <a href="docs/mcp.md">MCP tools</a> ·
   <a href="docs/oauth.md">OAuth connector</a>
 </p>
@@ -39,6 +40,8 @@ claude mcp add trove --transport http https://mytrove.in/mcp \
 Running your own instance? Use `http://localhost:8787/mcp` (no key needed when auth is disabled). For the claude.ai / Claude Desktop **Connectors** panel, add `https://mytrove.in/mcp` and sign in with Clerk — see [docs/oauth.md](docs/oauth.md).
 
 Your agent gets a small verb-per-job toolset: `remember`, `recall`, `grep`, `read`, `connect`, `forget` (plus `ingest` and curation tools for write-scoped keys). Nothing else to pass — each credential is scoped to its own private graph automatically.
+
+**How agents should use it** — not as an end-of-day diary, but as working memory: load before re-deriving, capture mid-session, many small linked atoms. See **[docs/agent-usage.md](docs/agent-usage.md)**. The same doctrine is also on the MCP server (`instructions`, resource `trove://doctrine`, tool descriptions).
 
 **Companion skills (optional, Claude Code).** The MCP tools work in any client on their own. Install the skills straight from this repo so Claude uses them with the right discipline — recall before re-deriving, cite evidence, supersede instead of delete:
 
