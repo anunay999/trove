@@ -2,6 +2,8 @@
 
 Trove exposes the same evidence graph through MCP so agents can read, write, link, and project knowledge without touching storage directly.
 
+**How agents should use the tools** (session loop, grep/read/recall routing, continuous capture): see **[agent-usage.md](agent-usage.md)**.
+
 Use stdio when an agent runs on the same machine and can spawn Trove as a child process. Use Streamable HTTP when Trove is hosted and multiple agents or interfaces need one shared service endpoint.
 
 Relevant MCP references:
