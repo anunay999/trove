@@ -97,22 +97,39 @@ Supported scopes:
 - `graph:export` - export Obsidian projections
 - `graph:admin` - all operations
 
+## Agent operating doctrine (any LLM)
+
+MCP clients do **not** need Claude skills. Doctrine is baked into the server:
+
+1. **Server `instructions`** — returned on MCP initialize; hosts that surface them inject the full loop (grep/read/recall + ingest→remember→connect + mid-session capture).
+2. **Resource `trove://doctrine`** — same text; agents can `resources/read` it at session start if instructions are ignored.
+3. **Tool descriptions** — each tool states when to use it (shared source: `src/toolDefinitions.ts`, used by both MCP and `GET /v1/tools`).
+4. **Prompts** — `trove-recall`, `trove-remember`, `trove-session` for structured workflows.
+
+**Session loop:** load before re-deriving → work → capture crystallised beliefs mid-session (several small linked atoms) → supersede corrections → close with 3–8 atoms, never one mega-node.
+
+**Read routing:** exact string → `grep` → optional `read` · known slug → `read` · open question → `recall` (~8000 tokens) → `read` if pack is thin.
+
+**Write routing:** long material → `ingest` then `remember` 3–7 atoms with evidence then `connect` · single fact → `remember` + links · check `similar` on remember.
+
+Optional Claude skills (`npx skills add anunay999/trove -g`) add progressive-disclosure workflow docs; they are not required for MCP hosts.
+
 ## Tools
 
 Tool visibility is tiered by credential scope: core tools are shown to every credential, curator tools require a write scope, operator tools require `graph:admin`. Call-time scope checks apply regardless of visibility.
 
 Core (the everyday agent vocabulary):
 
-- `remember` - save a memory; revises on exact title/slug match, else creates. Returns the action taken plus `similar` near-matches it did not merge into
-- `recall` - token-budgeted context pack: hybrid search, graph expansion, activation ranking, citations
-- `grep` - exact/regex text search over nodes and raw sources; invalid regex degrades to a literal match
-- `read` - read a node (with evidence) or raw source document by id or slug
-- `connect` - create a typed relationship; `supersedesEdgeId` replaces a belief on the record
+- `remember` - distilled belief (not raw dump); revises on exact title/slug; check `similar`; mid-session small atoms + links
+- `recall` - open questions only; token-budgeted pack (default 8000); follow with `read` if thin
+- `grep` - prefer over recall for ports/IPs/errors/flags; then `read` for full doc
+- `read` - full node body or raw source by id/slug (Scribe-depth)
+- `connect` - typed edges; `supersedesEdgeId` replaces a belief on the record
 - `forget` - retire beliefs; query mode previews (dryRun) first, explicit edgeIds apply immediately
 
 Curator (ingestion and curation flows):
 
-- `ingest` - store long-form source content as evidence text units
+- `ingest` - raw evidence text units only — then remember distilled facts citing them
 - `annotate` - attach meaning to evidence without rewriting it
 - `neighborhood` - expand graph neighbors, optionally `asOf` a past time
 - `project` - render markdown, mind map, or agent context
@@ -129,6 +146,7 @@ Operator (admin credentials only):
 
 Trove exposes read-only MCP resources for stable agent context:
 
+- `trove://doctrine` - **agent operating model** (read at session start if needed)
 - `trove://health` - store health
 - `trove://lint` - current graph health report
 - `trove://events` - first page of the cursor event feed
@@ -141,8 +159,9 @@ Agents should prefer resources for read-only context and tools for operations th
 
 ## Prompts
 
-- `trove-recall` - answer a question from Trove memory with citations
-- `trove-remember` - save durable knowledge with evidence-first discipline
+- `trove-recall` - answer a question with grep/read/recall routing + citations
+- `trove-remember` - save with ingest→remember→connect discipline
+- `trove-session` - full boot→work→capture→close loop for a task
 
 ## Obsidian Projection
 
