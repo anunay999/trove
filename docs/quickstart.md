@@ -62,7 +62,7 @@ claude mcp add trove -- npx tsx /path/to/trove/src/mcpServer.ts
 
 **claude.ai / Claude Desktop Connectors panel (OAuth):** add a custom connector with the URL `https://mytrove.in/mcp` and sign in with Clerk — see [docs/oauth.md](oauth.md).
 
-Agents get a small verb-per-job toolset: `remember`, `recall`, `grep`, `read`, `connect`, and `forget` (plus curation tools like `ingest` for write-scoped keys). Optionally install the companion skills so Claude uses them well:
+Agents get a small verb-per-job toolset: `remember`, `recall`, `grep`, `read`, `connect`, and `forget` (plus curation tools like `ingest` for write-scoped keys). For how agents should *use* those tools (session loop, not end-of-day diary), see **[agent-usage.md](agent-usage.md)**. Optionally install the companion skills so Claude uses them well:
 
 ```bash
 npx skills add anunay999/trove -g
