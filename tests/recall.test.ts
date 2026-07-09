@@ -86,39 +86,39 @@ describe("recall", () => {
     assert.ok(third.lastAccessedAt, "reads must stamp lastAccessedAt");
   });
 
-  it("packs full primary-runbook content and only teasers giant catalog pages", async () => {
-    const marker = `ROCKET_MARKER_${stamp}`;
-    const runbookBody = [
-      "# Rocket runbook",
+  it("packs full primary-note content and only teasers giant catalog pages", async () => {
+    const marker = `REFUND_POLICY_${stamp}`;
+    const policyBody = [
+      "# Billing pricing rules",
       "",
-      "Azure VM recovery procedure.",
+      "Customer-facing refund policy.",
       "",
-      `Tailscale IP is 100.68.130.24 and the unique marker is ${marker}.`,
+      `Annual plans: full refund within 14 days. Marker: ${marker}.`,
       "",
-      "## Root cause",
+      "## After 14 days",
       "",
-      "Slow memory creep ends in a kernel reclaim livelock.",
+      "No refunds on annual plans after the window closes.",
       "",
-      "Guards: MemoryHigh=1536M on the clone unit.",
+      "Customer success owns churn emails.",
       "",
-      "Use az vm deallocate then az vm start — never soft restart.",
+      "Never promise a refund without checking the 14-day clock.",
     ].join("\n");
 
     await store.capture({
-      title: `Rocket runbook ${stamp}`,
-      type: "infrastructure",
-      summary: "Azure VM hosting the clone agent over Tailscale.",
-      content: runbookBody,
+      title: `Billing pricing rules ${stamp}`,
+      type: "pattern",
+      summary: "Refund and pricing rules for annual and monthly plans.",
+      content: policyBody,
       evidence: [],
       links: [],
     }, context);
 
-    // Giant "index" that also matches the query words but must not starve the pack.
+    // Giant "index" that also matches loose words but must not starve the pack.
     await store.capture({
       title: `Catalog index ${stamp}`,
       type: "entity",
-      summary: "Catalog of every page including rocket recovery and memory creep notes.",
-      content: ("# Index\n\n" + "rocket recovery memory creep ".repeat(2000)).slice(0, 20_000),
+      summary: "Catalog of every page including billing refund and pricing notes.",
+      content: ("# Index\n\n" + "billing refund pricing notes ".repeat(2000)).slice(0, 20_000),
       evidence: [],
       links: [],
     }, context);
@@ -132,20 +132,17 @@ describe("recall", () => {
     });
 
     assert.ok(
-      packed.atoms.some((atom) => atom.node.title.includes("Rocket runbook")),
-      `expected rocket runbook among packed atoms, got: ${packed.atoms.map((a) => a.node.title).join(", ")}`,
+      packed.atoms.some((atom) => atom.node.title.includes("Billing pricing rules")),
+      `expected pricing note among packed atoms, got: ${packed.atoms.map((a) => a.node.title).join(", ")}`,
     );
-    assert.ok(packed.context.includes(marker), "primary runbook body must appear in the pack");
-    assert.ok(packed.context.includes("100.68.130.24"), "runbook IP fact must appear");
-    assert.ok(packed.context.includes("reclaim livelock"), "runbook root-cause fact must appear");
-    assert.ok(packed.context.includes("MemoryHigh=1536M"), "runbook guard fact must appear");
-    // Giant page may appear but must be truncated, not dump the whole 20k.
+    assert.ok(packed.context.includes(marker), "primary note body must appear in the pack");
+    assert.ok(packed.context.includes("14 days"), "policy window fact must appear");
+    assert.ok(packed.context.includes("Customer success owns churn emails"), "owner fact must appear");
     const giantIdx = packed.context.indexOf(`Catalog index ${stamp}`);
     if (giantIdx >= 0) {
       const after = packed.context.slice(giantIdx, giantIdx + 8_000);
       assert.ok(after.length < 6_000 || after.includes("…"), "giant catalog page must be teaser-capped");
-      // Full 20k dump would include far more repeated filler than a teaser.
-      const fillerHits = (after.match(/rocket recovery memory creep/g) ?? []).length;
+      const fillerHits = (after.match(/billing refund pricing notes/g) ?? []).length;
       assert.ok(fillerHits < 80, `giant page teaser should be short, saw ${fillerHits} filler phrases`);
     }
   });

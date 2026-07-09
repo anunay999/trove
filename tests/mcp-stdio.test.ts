@@ -47,11 +47,11 @@ describe("mcp stdio server", () => {
     );
     // MCP tool descriptions must carry routing doctrine (not the short stubs).
     const byName = Object.fromEntries(tools.tools.map((tool) => [tool.name, tool.description ?? ""]));
-    assert.match(byName.recall ?? "", /exact strings|Open-ended/i, "recall description should steer tool choice");
+    assert.match(byName.recall ?? "", /Open questions|exact/i, "recall description should steer tool choice");
     assert.match(byName.grep ?? "", /Prefer this over recall|exact string/i, "grep description should prefer exact lookup");
-    assert.match(byName.read ?? "", /full|slug/i, "read description should mention full page by slug");
-    assert.match(byName.remember ?? "", /BELIEF|similar|linked/i, "remember description should discourage mega-dumps");
-    assert.match(byName.ingest ?? "", /remember|evidence/i, "ingest description should point at remember pipeline");
+    assert.match(byName.read ?? "", /full|name|slug/i, "read description should mention full note by name");
+    assert.match(byName.remember ?? "", /similar|linked|small/i, "remember description should discourage mega-dumps");
+    assert.match(byName.ingest ?? "", /remember|evidence|Pipeline/i, "ingest description should point at remember pipeline");
   });
 
   it("exposes resources and prompts", async () => {

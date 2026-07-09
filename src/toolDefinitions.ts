@@ -34,38 +34,43 @@ export type ToolTier = "core" | "curator" | "operator";
 /**
  * Operating doctrine for any LLM using Trove MCP (no client-specific skills required).
  * Exposed as server instructions + trove://doctrine resource.
+ * Examples stay generic so any product team can map them to their world.
  */
 export const TROVE_AGENT_DOCTRINE = `Trove is a working memory graph, not an end-of-day diary.
 
 MENTAL MODEL
-- Sources (ingest): raw long-form evidence, split into citable text units. Do not compete as beliefs.
-- Atoms (remember): small distilled facts/decisions/patterns/runbooks that recall ranks.
-- Edges (connect/forget): typed relationships; supersede or retire, never delete history.
-- Packs (recall): budgeted digests for open questions — not always a full page.
-- Full pages (read): complete node body or raw source when you need Scribe-depth.
+- Sources (ingest): raw long-form evidence — a meeting transcript, a design doc, an email paste. Split into citable spans. Not ranked as beliefs.
+- Atoms (remember): small distilled notes — "we bill monthly, not annually", "staging DB is shared", a how-to. These are what recall finds.
+- Edges (connect/forget): links between notes (this decision is for that project). Supersede or retire; never delete history.
+- Packs (recall): a short brief for one open question — not always the whole note.
+- Full pages (read): the complete note when you already know its name.
 
-READ (before re-deriving project/system knowledge)
-1) Exact string (port, IP, slug, error, flag, SHA) → grep, then read the hit if you need the full doc.
-2) Known slug/title → read (full body).
-3) Open / multi-hop question → recall (tokenBudget ~8000; raise for broad synthesis). If the top atom is right but the pack is thin → read that slug.
-Phrase recall as a natural-language question, not keywords.
+READ (before reinventing something already known)
+1) Exact string — a product code, ticket id, error text, config key, email, URL path → grep, then read if you need the full note.
+   Example: grep "INV-1042" or "ECONNRESET" or "FEATURE_DARK_MODE".
+2) You know the note's name — "billing-pricing-rules", "onboarding-checklist" → read it.
+3) Open question — "how do we handle refunds?" or "what's the plan for mobile?" → recall (tokenBudget ~8000).
+   If the top hit is right but the brief is thin → read that note.
+Ask recall in plain language: "How do we handle refunds for annual plans?" — not "refund annual plan keywords".
 
-WRITE (when beliefs crystallize — mid-session, not only wrap-up)
-- Long material (transcript, PR, page, paste) → ingest first, then remember 3–7 distilled atoms citing textUnitIds, then connect each to a project/domain hub.
-- Single fact/decision/gotcha → remember with type + summary + links; cite evidence or state "agent inference from session YYYY-MM-DD".
-- Prefer several small linked atoms over one mega "session summary" node.
-- remember revises on exact title/slug match; ALWAYS check the returned "similar" list and re-call with slug if the dedupe missed.
+WRITE (when something becomes true — during the session, not only at the end)
+- Long material (transcript, doc, paste) → ingest first, then remember 3–7 short atoms that cite those spans, then connect each to a project or topic hub.
+  Example: ingest the pricing call notes → remember "annual plans are not refundable after 14 days" → connect to billing.
+- One fact or decision → remember with a clear title + summary + links.
+  Example: "Deploy freezes start Friday noon" or "Customer success owns churn emails".
+- Prefer several small linked notes over one giant "notes from today" blob.
+- remember updates an existing note when the title/slug matches exactly. ALWAYS check the returned "similar" list; if it almost matched the right note, call again with that slug.
 
 CORRECTIONS
-- Wrong atom content → remember with the same slug (new revision).
-- Wrong relationship → connect with supersedesEdgeId.
-- Retire with no replacement → forget (query mode dry-runs first). Never delete.
+- Wrong note text → remember with the same slug (new revision).
+- Wrong link between notes → connect with supersedesEdgeId.
+- No longer true → forget (query mode previews first). Never delete.
 
 SESSION LOOP
-boot: load context → work → capture as truths form → link hubs → correct via supersession → close with 3–8 high-value atoms.
+Start: load what you already know → do the work → save truths as they land → link them → fix outdated beliefs → finish with a handful of solid notes, not one mega dump.
 
 INVARIANTS
-Load before re-deriving. Route tools by query shape. Ingest evidence, remember beliefs. Write when true, not only when done. Supersede never delete. Provenance or explicit inference. Cite slugs in answers so the next agent can read them.`;
+Load before re-deriving. Pick tools by query shape. Ingest raw text, remember distilled beliefs. Write when it's true, not only when the day ends. Supersede, don't delete. Cite a source or say it's your inference. Put note names in answers so the next agent can open them.`;
 
 export const troveTools = [
   // ---- core ----------------------------------------------------------------
@@ -73,42 +78,42 @@ export const troveTools = [
     name: "remember",
     tier: "core",
     description:
-      "Save a distilled BELIEF (fact/decision/gotcha/pattern), not a raw dump. One write door: exact title/slug match revises, else creates. Prefer several small linked atoms mid-session when truths crystallize — not one end-of-day mega-node. Always check returned `similar` and re-call with slug if dedupe missed. Pass evidence textUnitIds from ingest, or state agent-inference in summary. Use links to attach project/domain hubs.",
+      "Save a short distilled note (a fact, decision, or how-to) — not a raw dump. Same title/slug revises; otherwise creates. Prefer several small linked notes while you work (e.g. 'refunds within 14 days', 'CS owns churn email') over one 'notes from today' blob. Always check returned `similar` and re-call with slug if the right note almost matched. Cite textUnitIds from ingest, or say it's agent inference in the summary. Link each note to a project or topic hub.",
     inputSchema: rememberInputSchema,
   },
   {
     name: "recall",
     tier: "core",
     description:
-      "Open-ended memory questions only — hybrid search + graph expansion into a token-budgeted context pack with citations. NOT for exact strings (use grep) or when you already know the page slug (use read). Default tokenBudget is 8000; raise for broad syntheses. The pack is a digest, not always a full page — if the top atom is the right runbook but the answer is thin, follow with read on that slug.",
+      "Open questions only — e.g. 'how do we handle refunds?' — returns a short ranked brief with citations. Not for exact ids or error strings (use grep) or when you already know the note name (use read). Default tokenBudget 8000. The brief is a digest; if the right note is on top but incomplete, follow with read on that slug.",
     inputSchema: recallInputSchema,
   },
   {
     name: "grep",
     tier: "core",
     description:
-      "Prefer this over recall when the query has an exact string: port, IP, slug, env var, error code, flag, commit SHA. Regex over node titles/summaries/content AND raw sources; invalid regex falls back to literal. Returns excerpts + ids — then read the hit if you need the full document.",
+      "Prefer this over recall for an exact string: ticket id, product code, error text, config key, email, URL path (e.g. INV-1042, ECONNRESET, FEATURE_DARK_MODE). Searches note text and raw sources; invalid regex falls back to literal. Returns excerpts + ids — then read if you need the full note.",
     inputSchema: grepInputSchema,
   },
   {
     name: "read",
     tier: "core",
     description:
-      "Full document by id or slug: complete node body (Scribe-depth runbooks) with evidence/annotations, or a raw source when the id is a source. Use when you know the slug/title, or after recall/grep found the right atom and you need the whole page — not a budgeted pack.",
+      "Open one note or raw source by id or name (slug) — full body, not a short brief. Use when you know the name (e.g. billing-pricing-rules) or after grep/recall found the right note and you need everything.",
     inputSchema: readAnyInputSchema,
   },
   {
     name: "connect",
     tier: "core",
     description:
-      "Create a typed relationship between two memories (part_of, decision_for, implements, relates_to, …). Every new atom should link to a hub. Pass supersedesEdgeId to replace an old belief on the record (old edge is expired, never deleted).",
+      "Link two notes (this decision is for that project, this how-to is part of onboarding). Every new note should hang off a hub. Pass supersedesEdgeId to replace an old link without deleting history.",
     inputSchema: linkInputSchema,
   },
   {
     name: "forget",
     tier: "core",
     description:
-      "Retire beliefs on the record. Explicit edgeIds apply immediately; a query previews the affected relationships first (dryRun defaults true for queries). Nothing is deleted — history stays queryable via neighborhood asOf/includeExpired.",
+      "Mark a belief as no longer true. Pass edge ids to retire now, or a query to preview first (dryRun defaults true). Nothing is hard-deleted — history stays queryable.",
     inputSchema: forgetInputSchema,
   },
   // ---- curator ---------------------------------------------------------------
@@ -116,14 +121,14 @@ export const troveTools = [
     name: "ingest",
     tier: "curator",
     description:
-      "Store long-form RAW EVIDENCE (transcript, page, file, paste) split into addressable text units. Does NOT create a recall-ranked belief — after ingest, remember 3–7 distilled facts citing textUnitIds and connect them. Pipeline: ingest → remember → connect.",
+      "Store long raw material (meeting notes, a doc, a paste) as evidence spans. Does not create a findable belief by itself — next: remember 3–7 short facts citing those spans, then connect them to a topic. Pipeline: ingest → remember → connect.",
     inputSchema: ingestInputSchema,
   },
   {
     name: "annotate",
     tier: "curator",
     description:
-      "Attach meaning to a source or text unit (supports/contradicts/summarizes/…) without minting a belief. Use when you need provenance marks without a new remember atom.",
+      "Tag a source span (supports / contradicts / important quote / …) without creating a new note. Use for provenance marks only.",
     inputSchema: annotateInputSchema,
   },
   {

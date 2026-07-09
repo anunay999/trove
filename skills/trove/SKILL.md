@@ -13,9 +13,9 @@ Trove (repo `~/dev/trove`, hosted at `https://mytrove.in`, MCP server `trove`) h
 
 | Tool | Use when |
 |---|---|
-| `grep` | **First** for exact strings — port, IP, slug, flag, error code. Regex over nodes + raw sources. |
-| `read` | Full page by slug/id (Scribe-depth body + evidence), or raw source. After grep/recall when the pack is thin. |
-| `recall` | **Open-ended** questions only. Token-budgeted pack (default 8000); not a full-page dump. Not for lone identifiers. |
+| `grep` | **First** for exact strings — ticket id, error text, config key. Regex over notes + sources. |
+| `read` | Full note by name/id, or raw source. After grep/recall when the brief is thin. |
+| `recall` | **Open questions** only ("how do we handle refunds?"). Budgeted brief (default 8000), not a full dump. |
 | `remember` | Saving a fact/decision/gotcha, new or changed. One write door: revises on exact title/slug match, else creates. Check the returned `similar` list — retarget with `slug` if the dedupe missed. |
 | `connect` | Relating two memories. Pass `supersedesEdgeId` to replace a belief on the record. |
 | `forget` | Retiring beliefs. Query mode previews (dryRun) first; explicit edgeIds apply immediately. |
