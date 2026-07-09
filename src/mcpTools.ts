@@ -23,7 +23,7 @@ import {
 import { assertScopes, operationContextFromAuth, type AuthContext, type TroveScope } from "./auth.js";
 import { forget, readAny, remember } from "./agentOps.js";
 import type { GraphStore } from "./graphCore.js";
-import { visibleTiers } from "./toolDefinitions.js";
+import { toolDescription, TROVE_AGENT_DOCTRINE, visibleTiers } from "./toolDefinitions.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
 
 export function createTroveMcpServer(store: GraphStore, authContext?: AuthContext): McpServer {
@@ -32,22 +32,24 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
   const canWrite = !authContext
     || authContext.scopes.includes("graph:admin")
     || authContext.scopes.some((scope) => scope.startsWith("graph:write"));
-  const server = new McpServer({
-    name: "trove",
-    version: "0.2.0",
-  });
+  // Server-level instructions reach any MCP client that surfaces them on
+  // initialize (Claude, Cursor, Codex, custom hosts). Skills are optional.
+  const server = new McpServer(
+    { name: "trove", version: "0.2.0" },
+    { instructions: TROVE_AGENT_DOCTRINE },
+  );
 
   registerTroveResources(server, store, authContext, operationContext);
   registerTrovePrompts(server);
 
   // ---- core: the everyday agent vocabulary --------------------------------
+  // Descriptions come from toolDefinitions (shared with GET /v1/tools).
 
   if (canWrite) server.registerTool(
     "remember",
     {
       title: "Remember",
-      description:
-        "Save a memory. If the title (or an explicit slug/nodeId) matches an existing node it revises it; otherwise it creates one. Returns the action taken plus similar nodes it did NOT merge into.",
+      description: toolDescription("remember"),
       inputSchema: rememberInputSchema,
     },
     async (input) => withScopes(
@@ -61,7 +63,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
     "recall",
     {
       title: "Recall",
-      description: "Retrieve relevant memory as a token-budgeted context pack with citations.",
+      description: toolDescription("recall"),
       inputSchema: recallInputSchema,
     },
     async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.recall(input, operationContext))),
@@ -71,8 +73,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
     "grep",
     {
       title: "Grep Memories",
-      description:
-        "Exact/regex text search over memories and raw sources. Use for identifiers, ports, error strings — anything where exact match beats semantic search.",
+      description: toolDescription("grep"),
       inputSchema: grepInputSchema,
     },
     async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.grep(input, operationContext))),
@@ -82,7 +83,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
     "read",
     {
       title: "Read",
-      description: "Read anything by id or slug: a memory node with evidence, or a raw source document.",
+      description: toolDescription("read"),
       inputSchema: readAnyInputSchema,
     },
     async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await readAny(store, input, operationContext))),
@@ -92,8 +93,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
     "connect",
     {
       title: "Connect Memories",
-      description:
-        "Create a typed relationship between two memories. Pass supersedesEdgeId to replace an old belief on the record.",
+      description: toolDescription("connect"),
       inputSchema: linkInputSchema,
     },
     async (input) => withScopes(
@@ -107,8 +107,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
     "forget",
     {
       title: "Forget",
-      description:
-        "Retire beliefs on the record. Explicit edgeIds apply immediately; query mode previews first (dryRun defaults true). Nothing is deleted.",
+      description: toolDescription("forget"),
       inputSchema: forgetInputSchema,
     },
     async (input) => withScopes(
@@ -125,7 +124,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       "ingest",
       {
         title: "Ingest Source",
-        description: "Store a long-form source document as evidence, split into addressable text units.",
+        description: toolDescription("ingest"),
         inputSchema: ingestInputSchema,
       },
       async (input) => withScopes(
@@ -139,7 +138,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       "annotate",
       {
         title: "Annotate Evidence",
-        description: "Attach meaning to a source or text unit without rewriting raw evidence.",
+        description: toolDescription("annotate"),
         inputSchema: annotateInputSchema,
       },
       async (input) => withScopes(
@@ -153,7 +152,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       "neighborhood",
       {
         title: "Graph Neighborhood",
-        description: "Return a bounded graph neighborhood, optionally as of a past time or including expired edges.",
+        description: toolDescription("neighborhood"),
         inputSchema: neighborhoodInputSchema,
       },
       async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.neighborhood(input, operationContext))),
@@ -163,7 +162,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       "project",
       {
         title: "Project Node",
-        description: "Render a node as markdown, a mind map, or an agent context pack.",
+        description: toolDescription("project"),
         inputSchema: projectInputSchema,
       },
       async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.project(input, operationContext))),
@@ -173,7 +172,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       "views",
       {
         title: "List Views",
-        description: "List saved mind-map and projection views.",
+        description: toolDescription("views"),
         inputSchema: listViewsInputSchema,
       },
       async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.views(input, operationContext))),
@@ -183,7 +182,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       "read_view",
       {
         title: "Read View",
-        description: "Read a saved mind-map view with included nodes and edges.",
+        description: toolDescription("read_view"),
         inputSchema: readViewInputSchema,
       },
       async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.readView(input, operationContext))),
@@ -193,7 +192,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       "create_view",
       {
         title: "Create View",
-        description: "Create a durable saved mind-map view from a root node, search query, or explicit node set.",
+        description: toolDescription("create_view"),
         inputSchema: createViewInputSchema,
       },
       async (input) => withScopes(
@@ -207,7 +206,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       "delete_view",
       {
         title: "Delete View",
-        description: "Delete a saved mind-map view by id or slug.",
+        description: toolDescription("delete_view"),
         inputSchema: deleteViewInputSchema,
       },
       async (input) => withScopes(
@@ -225,7 +224,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       "events",
       {
         title: "Event Feed",
-        description: "Read cursor-paginated graph mutation events for interface sync.",
+        description: toolDescription("events"),
         inputSchema: eventFeedInputSchema,
       },
       async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.events(input, operationContext))),
@@ -235,7 +234,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       "lint",
       {
         title: "Lint Graph",
-        description: "Find graph health issues such as orphan nodes, missing evidence, duplicate titles, and dangling edges.",
+        description: toolDescription("lint"),
       },
       async () => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.lint(operationContext))),
     );
@@ -244,7 +243,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       "jobs",
       {
         title: "List Jobs",
-        description: "List durable maintenance jobs for projections, lint, and embedding refresh.",
+        description: toolDescription("jobs"),
         inputSchema: listJobsInputSchema,
       },
       async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.jobs(input))),
@@ -254,7 +253,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       "enqueue_job",
       {
         title: "Enqueue Job",
-        description: "Enqueue a durable maintenance job. Admin scope required.",
+        description: toolDescription("enqueue_job"),
         inputSchema: enqueueJobInputSchema,
       },
       async (input) => withScopes(
@@ -268,7 +267,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       "run_job",
       {
         title: "Run Job",
-        description: "Claim and run one pending durable maintenance job inline. Admin scope required.",
+        description: toolDescription("run_job"),
         inputSchema: runJobInputSchema,
       },
       async (input) => withScopes(
@@ -282,7 +281,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
       "export_obsidian",
       {
         title: "Export Obsidian Projection",
-        description: "Render semantic nodes as deterministic Obsidian-compatible markdown files.",
+        description: toolDescription("export_obsidian"),
       },
       async () => withScopes(authContext, ["graph:export"], async () =>
         jsonToolResult(buildObsidianVaultExport(
@@ -302,6 +301,28 @@ function registerTroveResources(
   authContext: AuthContext | undefined,
   operationContext: ReturnType<typeof operationContextFromAuth> | undefined,
 ): void {
+  // Always-available doctrine: clients that ignore server instructions can still
+  // resources/read this URI (or hosts can inject it into the system prompt).
+  server.registerResource(
+    "trove-doctrine",
+    "trove://doctrine",
+    {
+      title: "Trove Agent Operating Doctrine",
+      description:
+        "How any LLM should use Trove: read routing (grep/read/recall), continuous capture (ingest→remember→connect), supersession, session loop. Read this at session start.",
+      mimeType: "text/plain",
+    },
+    async (uri) => ({
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: "text/plain",
+          text: TROVE_AGENT_DOCTRINE,
+        },
+      ],
+    }),
+  );
+
   server.registerResource(
     "trove-health",
     "trove://health",
@@ -380,7 +401,7 @@ function registerTrovePrompts(server: McpServer): void {
     "trove-recall",
     {
       title: "Trove Recall",
-      description: "Answer a question from Trove memory with citations.",
+      description: "Answer a question from Trove memory with citations (grep/read/recall routing).",
       argsSchema: {
         question: z.string().describe("Question or topic to recall from Trove."),
       },
@@ -394,13 +415,12 @@ function registerTrovePrompts(server: McpServer): void {
             text: [
               `Recall from Trove: ${question}`,
               "",
-              "Tool routing:",
-              "1) Exact string (port, IP, slug, error, flag) → grep first, then read the hit if you need the full page.",
-              "2) Known page slug/title → read for the full body (Scribe-depth runbook).",
-              "3) Open-ended question → recall with tokenBudget around 8000 (higher for broad synthesis).",
-              "If recall's top atom is right but the pack is thin, follow with read on that slug.",
-              "Answer concisely and cite node slugs or source evidence.",
-              "If the session revealed durable new knowledge, suggest remember.",
+              "Follow Trove doctrine (also at resource trove://doctrine):",
+              "1) Exact string (ticket id, error text, config key) → grep first, then read if you need the full note.",
+              "2) Known note name → read for the full body.",
+              "3) Open question ('how do we handle refunds?') → recall with tokenBudget around 8000.",
+              "If the top hit is right but the brief is thin, follow with read on that note.",
+              "Answer concisely and cite note names. If the answer is a useful synthesis, remember it back.",
             ].join("\n"),
           },
         },
@@ -412,7 +432,7 @@ function registerTrovePrompts(server: McpServer): void {
     "trove-remember",
     {
       title: "Trove Remember",
-      description: "Save durable knowledge into Trove with evidence-first discipline.",
+      description: "Save durable knowledge with ingest→remember→connect discipline (not one mega-node).",
       argsSchema: {
         topic: z.string().describe("The thing that should become durable memory."),
       },
@@ -426,9 +446,43 @@ function registerTrovePrompts(server: McpServer): void {
             text: [
               `Save to Trove: ${topic}`,
               "",
-              "For long-form raw material, ingest it first, then remember the distilled facts citing that evidence.",
-              "remember dedupes by exact title/slug; check the returned similar list and retarget with slug if it missed.",
-              "Connect new memories to related nodes; supersede rather than duplicate when a belief changed.",
+              "Follow Trove doctrine (resource trove://doctrine):",
+              "- Long notes (meeting, doc, paste) → ingest first, then remember 3–7 short facts citing those spans, then connect each to a topic hub.",
+              "- One fact or decision → remember with type + summary + links; cite evidence or say agent inference.",
+              "- Prefer several small linked notes over one 'notes from today' blob.",
+              "- remember matches exact title/slug; check similar and retarget with slug if it almost matched.",
+              "- Outdated beliefs: connect with supersedesEdgeId or forget — never delete.",
+            ].join("\n"),
+          },
+        },
+      ],
+    }),
+  );
+
+  server.registerPrompt(
+    "trove-session",
+    {
+      title: "Trove Session Loop",
+      description: "Run a full boot→work→capture→close loop against Trove for a topic or task.",
+      argsSchema: {
+        task: z.string().describe("What you are about to work on or just finished."),
+      },
+    },
+    async ({ task }) => ({
+      messages: [
+        {
+          role: "user" as const,
+          content: {
+            type: "text" as const,
+            text: [
+              `Trove session for: ${task}`,
+              "",
+              TROVE_AGENT_DOCTRINE,
+              "",
+              "Now: (1) load relevant context with the read routing above,",
+              "(2) do the work,",
+              "(3) capture crystallised decisions/facts/gotchas as separate atoms with links,",
+              "(4) do not dump a single end-of-day mega-node.",
             ].join("\n"),
           },
         },

@@ -41,14 +41,14 @@ Visibility is tiered by credential scope: **core** tools are shown to every cred
 
 ### Core Tools
 
-**Retrieval routing (agents):** exact string → `grep` (then optional `read`) · known slug → `read` · open question → `recall` (then `read` if the pack is thin). Do not use `recall` as the only tool for ports/IPs or full runbooks.
+**Retrieval routing (agents):** exact string (ticket id, error text, config key) → `grep` (then optional `read`) · known note name → `read` · open question (“how do we handle refunds?”) → `recall` (then `read` if the brief is thin). Full guide: [agent-usage.md](agent-usage.md).
 
 `recall`
 
 - Input: `query`, `tokenBudget` (default **8000**), optional `types`, `depth`, `asOf`, `includeEvidence`
 - Output: a token-budgeted context pack — packed atoms with scores, connecting edges, evidence text units, citations, `spentTokens`, and `truncated`
 - Open-ended questions only: hybrid search seeds a graph expansion, candidates are ranked by match plus ACT-R-style activation (recency, frequency) plus degree, and a greedy packer fills the budget. Packing a node counts as a read, so recalled memories strengthen.
-- The pack is a **digest**, not always a full page. Primary hop-0 runbooks pack deeply; giant catalog/log pages are teaser-capped. Prefer one good `recall` over blind multi-tool chains for open questions; follow with `read` when you need Scribe-depth completeness.
+- The pack is a **brief**, not always a full note. Primary hits pack deeply; giant catalog notes are teaser-capped. Prefer one good `recall` for open questions; follow with `read` when you need the complete note.
 
 `grep`
 
@@ -60,7 +60,7 @@ Visibility is tiered by credential scope: **core** tools are shown to every cred
 
 - Input: `id` or `slug`
 - Output: a memory node (latest revision, **full content body**, evidence, annotations, revision token) or, when the id belongs to a source, the raw source document
-- One read door: node lookup first, source fallback. Use for known pages and for full runbooks after `grep`/`recall` found the right atom.
+- One read door: node lookup first, source fallback. Use for known note names and for full text after `grep`/`recall` found the right atom.
 
 `remember`
 

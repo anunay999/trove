@@ -18,7 +18,7 @@ describe("vaultImport helpers", () => {
     assert.equal(isStubContent(""), true);
     assert.equal(isStubContent(null), true);
     assert.equal(
-      isStubContent("Azure VM hosting the ai-anunay Slack agent. Reached exclusively over Tailscale."),
+      isStubContent("Annual plans are refundable within 14 days. Customer success owns churn emails."),
       false,
     );
   });
@@ -49,15 +49,15 @@ Long body that is not the summary.
       unit("---", 0),
       unit("title: example", 1),
       unit("# Example", 2),
-      unit("Azure VM hosting the clone over Tailscale — no public IP.", 3),
-      unit("## Recovery", 4),
-      unit("Use az vm deallocate then az vm start when the guest agent is Not Ready.", 5),
+      unit("Annual plans are refundable within 14 days of purchase.", 3),
+      unit("## After the window", 4),
+      unit("Customer success owns churn emails; never promise a refund without checking the clock.", 5),
     ];
     assert.equal(isUsefulEvidenceUnit(units[0]!), false);
     assert.equal(isUsefulEvidenceUnit(units[3]!), true);
     const selected = selectEvidenceUnits(units, 4);
-    assert.ok(selected.some((u) => u.text.includes("Tailscale")));
-    assert.ok(selected.some((u) => u.text.startsWith("## Recovery")));
+    assert.ok(selected.some((u) => u.text.includes("14 days")));
+    assert.ok(selected.some((u) => u.text.startsWith("## After the window")));
     assert.ok(!selected.some((u) => u.text === "---"));
   });
 });

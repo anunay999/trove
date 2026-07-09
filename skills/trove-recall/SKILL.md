@@ -25,13 +25,13 @@ When **not** to use:
 
 | Query shape | Tool | Notes |
 |---|---|---|
-| **Exact string** — port, IP, slug, env var, error code, flag, SHA | `grep { pattern }` | Prefer over `recall`. Then `read` the hit if you need the full page. |
-| **Known page** — you have a slug/title (`anunay-vm-rocket`, `memory-system-…`) | `read { slug }` | Full node body = Scribe-depth runbook. Do not rely on a budgeted pack alone. |
-| **Open / multi-hop question** — "how does X work", "state of Y" | `recall { query, tokenBudget }` | Default budget **8000**. Phrase as a natural-language question. |
+| **Exact string** — ticket id, product code, error text, config key, email | `grep { pattern }` | Prefer over `recall`. Example: `INV-1042`, `ECONNRESET`. Then `read` if you need the full note. |
+| **Known note** — you have the name (`billing-pricing-rules`, `onboarding-checklist`) | `read { slug }` | Full body. Do not rely on a short pack alone. |
+| **Open question** — "how do we handle refunds?", "what's the plan for mobile?" | `recall { query, tokenBudget }` | Default budget **8000**. Phrase as a real question. |
 
-- The `recall` pack is a **digest** (ranked atoms + optional evidence), not a guarantee of the whole document.
-- If the top atom is clearly the right page but the answer is still thin → **`read` that slug** (same as opening the wiki page).
-- Broad synthesis only: push `tokenBudget` toward 12000–16000; never use `recall` for a lone port/IP.
+- The `recall` pack is a **brief**, not always the whole note.
+- If the top hit is right but thin → **`read` that slug**.
+- Never use `recall` for a lone ticket id or error string.
 
 ### Step 2 — drill down (only if needed)
 

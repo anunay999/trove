@@ -13,9 +13,9 @@ Trove (repo `~/dev/trove`, hosted at `https://mytrove.in`, MCP server `trove`) h
 
 | Tool | Use when |
 |---|---|
-| `grep` | **First** for exact strings — port, IP, slug, flag, error code. Regex over nodes + raw sources. |
-| `read` | Full page by slug/id (Scribe-depth body + evidence), or raw source. After grep/recall when the pack is thin. |
-| `recall` | **Open-ended** questions only. Token-budgeted pack (default 8000); not a full-page dump. Not for lone identifiers. |
+| `grep` | **First** for exact strings — ticket id, error text, config key. Regex over notes + sources. |
+| `read` | Full note by name/id, or raw source. After grep/recall when the brief is thin. |
+| `recall` | **Open questions** only ("how do we handle refunds?"). Budgeted brief (default 8000), not a full dump. |
 | `remember` | Saving a fact/decision/gotcha, new or changed. One write door: revises on exact title/slug match, else creates. Check the returned `similar` list — retarget with `slug` if the dedupe missed. |
 | `connect` | Relating two memories. Pass `supersedesEdgeId` to replace a belief on the record. |
 | `forget` | Retiring beliefs. Query mode previews (dryRun) first; explicit edgeIds apply immediately. |
@@ -27,6 +27,10 @@ Trove (repo `~/dev/trove`, hosted at `https://mytrove.in`, MCP server `trove`) h
 **Retrieval routing (match Scribe):** exact string → `grep` → optional `read` · known slug → `read` · open question → `recall` → `read` if the top atom is right but incomplete.
 
 **remember vs ingest:** `remember` writes a belief — a small distilled atom that recall ranks. `ingest` stores evidence — a whole document split into citable text units that never competes as a belief. Pipeline: ingest the transcript → remember the few facts worth believing → connect them.
+
+**Session loop (not end-of-day only):** boot with load → work → `remember` mid-session when a decision/fact/gotcha crystallises → `connect` hubs → supersede corrections → close with 3–8 small linked atoms. Never one mega "session summary" node.
+
+**MCP-only clients:** the same doctrine ships as MCP server `instructions`, resource `trove://doctrine`, prompts `trove-recall` / `trove-remember` / `trove-session`, and tool descriptions — skills are optional sugar for Claude Code.
 
 ## Routing
 
