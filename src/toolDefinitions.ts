@@ -32,32 +32,44 @@ import type { TroveScope } from "./auth.js";
 export type ToolTier = "core" | "curator" | "operator";
 
 /**
- * Operating doctrine for any LLM using Trove MCP (no client-specific skills required).
- * Exposed as server instructions + trove://doctrine resource.
- * Examples stay generic so any product team can map them to their world.
+ * Agent-facing operating guide for Trove MCP.
+ *
+ * This is the single source of truth for “how to use Trove” for any LLM host
+ * (Claude, Cursor, Codex, custom MCP clients). It is not a code comment only —
+ * the string is served as:
+ *   - MCP server `instructions` on initialize
+ *   - resource `trove://doctrine` (resources/read)
+ *   - body of the `trove-session` prompt
+ *
+ * Keep examples everyday and product-agnostic (refunds, ticket ids, owners)
+ * so teams map them to their own domain. Prefer plain language over jargon.
+ * Tool parameter names (slug, tokenBudget, supersedesEdgeId) stay exact so
+ * agents can call tools correctly.
+ *
+ * Human-readable long form: docs/agent-usage.md
  */
 export const TROVE_AGENT_DOCTRINE = `Trove is a working memory graph, not an end-of-day diary.
 
 MENTAL MODEL
-- Sources (ingest): raw long-form evidence — a meeting transcript, a design doc, an email paste. Split into citable spans. Not ranked as beliefs.
-- Atoms (remember): small distilled notes — "we bill monthly, not annually", "staging DB is shared", a how-to. These are what recall finds.
+- Sources (ingest): raw long material — meeting notes, a design doc, an email paste. Split into citable spans. Not ranked as beliefs.
+- Atoms (remember): short distilled notes — "we bill monthly, not annually", "support owns the help inbox", a how-to. These are what recall finds.
 - Edges (connect/forget): links between notes (this decision is for that project). Supersede or retire; never delete history.
 - Packs (recall): a short brief for one open question — not always the whole note.
-- Full pages (read): the complete note when you already know its name.
+- Full notes (read): the complete note when you already know its name.
 
 READ (before reinventing something already known)
-1) Exact string — a product code, ticket id, error text, config key, email, URL path → grep, then read if you need the full note.
-   Example: grep "INV-1042" or "ECONNRESET" or "FEATURE_DARK_MODE".
+1) Exact string — a ticket id, product code, error text, setting name, email → grep, then read if you need the full note.
+   Example: grep "INV-1042" or "payment failed" or "FEATURE_DARK_MODE".
 2) You know the note's name — "billing-pricing-rules", "onboarding-checklist" → read it.
 3) Open question — "how do we handle refunds?" or "what's the plan for mobile?" → recall (tokenBudget ~8000).
    If the top hit is right but the brief is thin → read that note.
 Ask recall in plain language: "How do we handle refunds for annual plans?" — not "refund annual plan keywords".
 
 WRITE (when something becomes true — during the session, not only at the end)
-- Long material (transcript, doc, paste) → ingest first, then remember 3–7 short atoms that cite those spans, then connect each to a project or topic hub.
+- Long material (notes, doc, paste) → ingest first, then remember 3–7 short notes that cite those spans, then connect each to a project or topic.
   Example: ingest the pricing call notes → remember "annual plans are not refundable after 14 days" → connect to billing.
 - One fact or decision → remember with a clear title + summary + links.
-  Example: "Deploy freezes start Friday noon" or "Customer success owns churn emails".
+  Example: "No production deploys after Friday noon" or "Customer success owns churn emails".
 - Prefer several small linked notes over one giant "notes from today" blob.
 - remember updates an existing note when the title/slug matches exactly. ALWAYS check the returned "similar" list; if it almost matched the right note, call again with that slug.
 
