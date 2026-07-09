@@ -31,13 +31,49 @@ import type { TroveScope } from "./auth.js";
  */
 export type ToolTier = "core" | "curator" | "operator";
 
+/**
+ * Operating doctrine for any LLM using Trove MCP (no client-specific skills required).
+ * Exposed as server instructions + trove://doctrine resource.
+ */
+export const TROVE_AGENT_DOCTRINE = `Trove is a working memory graph, not an end-of-day diary.
+
+MENTAL MODEL
+- Sources (ingest): raw long-form evidence, split into citable text units. Do not compete as beliefs.
+- Atoms (remember): small distilled facts/decisions/patterns/runbooks that recall ranks.
+- Edges (connect/forget): typed relationships; supersede or retire, never delete history.
+- Packs (recall): budgeted digests for open questions — not always a full page.
+- Full pages (read): complete node body or raw source when you need Scribe-depth.
+
+READ (before re-deriving project/system knowledge)
+1) Exact string (port, IP, slug, error, flag, SHA) → grep, then read the hit if you need the full doc.
+2) Known slug/title → read (full body).
+3) Open / multi-hop question → recall (tokenBudget ~8000; raise for broad synthesis). If the top atom is right but the pack is thin → read that slug.
+Phrase recall as a natural-language question, not keywords.
+
+WRITE (when beliefs crystallize — mid-session, not only wrap-up)
+- Long material (transcript, PR, page, paste) → ingest first, then remember 3–7 distilled atoms citing textUnitIds, then connect each to a project/domain hub.
+- Single fact/decision/gotcha → remember with type + summary + links; cite evidence or state "agent inference from session YYYY-MM-DD".
+- Prefer several small linked atoms over one mega "session summary" node.
+- remember revises on exact title/slug match; ALWAYS check the returned "similar" list and re-call with slug if the dedupe missed.
+
+CORRECTIONS
+- Wrong atom content → remember with the same slug (new revision).
+- Wrong relationship → connect with supersedesEdgeId.
+- Retire with no replacement → forget (query mode dry-runs first). Never delete.
+
+SESSION LOOP
+boot: load context → work → capture as truths form → link hubs → correct via supersession → close with 3–8 high-value atoms.
+
+INVARIANTS
+Load before re-deriving. Route tools by query shape. Ingest evidence, remember beliefs. Write when true, not only when done. Supersede never delete. Provenance or explicit inference. Cite slugs in answers so the next agent can read them.`;
+
 export const troveTools = [
   // ---- core ----------------------------------------------------------------
   {
     name: "remember",
     tier: "core",
     description:
-      "Save a memory. One write door: if the title (or an explicit slug/nodeId) matches an existing node it revises it, otherwise it creates one. Returns action taken plus similar nodes it did NOT merge into — retarget with slug if the dedupe missed.",
+      "Save a distilled BELIEF (fact/decision/gotcha/pattern), not a raw dump. One write door: exact title/slug match revises, else creates. Prefer several small linked atoms mid-session when truths crystallize — not one end-of-day mega-node. Always check returned `similar` and re-call with slug if dedupe missed. Pass evidence textUnitIds from ingest, or state agent-inference in summary. Use links to attach project/domain hubs.",
     inputSchema: rememberInputSchema,
   },
   {
@@ -65,14 +101,14 @@ export const troveTools = [
     name: "connect",
     tier: "core",
     description:
-      "Create a typed relationship between two memories. Pass supersedesEdgeId to replace an old belief on the record (the old edge is expired, never deleted).",
+      "Create a typed relationship between two memories (part_of, decision_for, implements, relates_to, …). Every new atom should link to a hub. Pass supersedesEdgeId to replace an old belief on the record (old edge is expired, never deleted).",
     inputSchema: linkInputSchema,
   },
   {
     name: "forget",
     tier: "core",
     description:
-      "Retire beliefs. Explicit edgeIds apply immediately; a query previews the affected relationships first (dryRun defaults true for queries). Nothing is deleted — history stays queryable.",
+      "Retire beliefs on the record. Explicit edgeIds apply immediately; a query previews the affected relationships first (dryRun defaults true for queries). Nothing is deleted — history stays queryable via neighborhood asOf/includeExpired.",
     inputSchema: forgetInputSchema,
   },
   // ---- curator ---------------------------------------------------------------
@@ -80,13 +116,14 @@ export const troveTools = [
     name: "ingest",
     tier: "curator",
     description:
-      "Store a long-form source document as evidence, split into addressable text units. Use for transcripts, pages, files — then remember the distilled facts citing it.",
+      "Store long-form RAW EVIDENCE (transcript, page, file, paste) split into addressable text units. Does NOT create a recall-ranked belief — after ingest, remember 3–7 distilled facts citing textUnitIds and connect them. Pipeline: ingest → remember → connect.",
     inputSchema: ingestInputSchema,
   },
   {
     name: "annotate",
     tier: "curator",
-    description: "Attach meaning to a source or text unit without rewriting the raw evidence.",
+    description:
+      "Attach meaning to a source or text unit (supports/contradicts/summarizes/…) without minting a belief. Use when you need provenance marks without a new remember atom.",
     inputSchema: annotateInputSchema,
   },
   {
@@ -168,4 +205,11 @@ export function visibleTiers(scopes: TroveScope[] | undefined): Set<ToolTier> {
   if (scopes.includes("graph:admin")) return new Set(["core", "curator", "operator"]);
   if (scopes.some((scope) => scope.startsWith("graph:write"))) return new Set(["core", "curator"]);
   return new Set(["core"]);
+}
+
+/** Look up the shared tool description used by both HTTP /v1/tools and MCP registerTool. */
+export function toolDescription(name: string): string {
+  const tool = troveTools.find((entry) => entry.name === name);
+  if (!tool) throw new Error(`Unknown trove tool: ${name}`);
+  return tool.description;
 }

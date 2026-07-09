@@ -28,6 +28,10 @@ Trove (repo `~/dev/trove`, hosted at `https://mytrove.in`, MCP server `trove`) h
 
 **remember vs ingest:** `remember` writes a belief — a small distilled atom that recall ranks. `ingest` stores evidence — a whole document split into citable text units that never competes as a belief. Pipeline: ingest the transcript → remember the few facts worth believing → connect them.
 
+**Session loop (not end-of-day only):** boot with load → work → `remember` mid-session when a decision/fact/gotcha crystallises → `connect` hubs → supersede corrections → close with 3–8 small linked atoms. Never one mega "session summary" node.
+
+**MCP-only clients:** the same doctrine ships as MCP server `instructions`, resource `trove://doctrine`, prompts `trove-recall` / `trove-remember` / `trove-session`, and tool descriptions — skills are optional sugar for Claude Code.
+
 ## Routing
 
 | Situation | Skill |

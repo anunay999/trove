@@ -9,16 +9,17 @@ description: Save durable knowledge into the Trove memory graph — new facts, d
 
 ## When to use
 
+- **Mid-session** when a decision, root cause, gotcha, or durable fact crystallises (do not wait for wrap-up).
 - After a debugging or design session that produced new understanding.
 - The user stated a fact, constraint, or preference to remember.
 - A known fact changed: "PR merged — mark it done", "that port is 5433, not 5432", "X replaced Y".
-- End-of-session "wrap up memory" pass.
+- End-of-session pass: 3–8 high-value atoms with links — **not** one mega session-summary node.
 
 When **not** to use:
 
-- A specific external source to index → `trove-ingest`.
+- A specific external source to index → `trove-ingest` first, then remember distilled atoms citing text units.
 - A question to answer → `trove-recall`.
-- Trivial Q&A.
+- Trivial Q&A / ephemeral debugging chatter.
 
 ## Process
 
