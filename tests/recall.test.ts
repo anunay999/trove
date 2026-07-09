@@ -85,4 +85,68 @@ describe("recall", () => {
     assert.ok(third.accessCount >= first.accessCount + 2, "reads must strengthen activation by bumping accessCount");
     assert.ok(third.lastAccessedAt, "reads must stamp lastAccessedAt");
   });
+
+  it("packs full primary-runbook content and only teasers giant catalog pages", async () => {
+    const marker = `ROCKET_MARKER_${stamp}`;
+    const runbookBody = [
+      "# Rocket runbook",
+      "",
+      "Azure VM recovery procedure.",
+      "",
+      `Tailscale IP is 100.68.130.24 and the unique marker is ${marker}.`,
+      "",
+      "## Root cause",
+      "",
+      "Slow memory creep ends in a kernel reclaim livelock.",
+      "",
+      "Guards: MemoryHigh=1536M on the clone unit.",
+      "",
+      "Use az vm deallocate then az vm start — never soft restart.",
+    ].join("\n");
+
+    await store.capture({
+      title: `Rocket runbook ${stamp}`,
+      type: "infrastructure",
+      summary: "Azure VM hosting the clone agent over Tailscale.",
+      content: runbookBody,
+      evidence: [],
+      links: [],
+    }, context);
+
+    // Giant "index" that also matches the query words but must not starve the pack.
+    await store.capture({
+      title: `Catalog index ${stamp}`,
+      type: "entity",
+      summary: "Catalog of every page including rocket recovery and memory creep notes.",
+      content: ("# Index\n\n" + "rocket recovery memory creep ".repeat(2000)).slice(0, 20_000),
+      evidence: [],
+      links: [],
+    }, context);
+
+    // In-memory search is substring-includes on the whole query string.
+    const packed = await store.recall({
+      query: marker,
+      tokenBudget: 6000,
+      depth: 0,
+      includeEvidence: false,
+    });
+
+    assert.ok(
+      packed.atoms.some((atom) => atom.node.title.includes("Rocket runbook")),
+      `expected rocket runbook among packed atoms, got: ${packed.atoms.map((a) => a.node.title).join(", ")}`,
+    );
+    assert.ok(packed.context.includes(marker), "primary runbook body must appear in the pack");
+    assert.ok(packed.context.includes("100.68.130.24"), "runbook IP fact must appear");
+    assert.ok(packed.context.includes("reclaim livelock"), "runbook root-cause fact must appear");
+    assert.ok(packed.context.includes("MemoryHigh=1536M"), "runbook guard fact must appear");
+    // Giant page may appear but must be truncated, not dump the whole 20k.
+    const giantIdx = packed.context.indexOf(`Catalog index ${stamp}`);
+    if (giantIdx >= 0) {
+      const after = packed.context.slice(giantIdx, giantIdx + 8_000);
+      assert.ok(after.length < 6_000 || after.includes("…"), "giant catalog page must be teaser-capped");
+      // Full 20k dump would include far more repeated filler than a teaser.
+      const fillerHits = (after.match(/rocket recovery memory creep/g) ?? []).length;
+      assert.ok(fillerHits < 80, `giant page teaser should be short, saw ${fillerHits} filler phrases`);
+    }
+  });
 });

@@ -374,17 +374,70 @@ export function activationScore(node: GraphNode, nowMs: number): number {
   return 0.6 * recency + 0.4 * frequency;
 }
 
-function renderRecallAtom(node: GraphNode, hops: number): string {
-  const origin = hops === 0 ? "match" : "linked";
-  return [
-    `## ${node.title} [${node.type}/${origin}] (${node.slug})`,
-    node.summary ?? "",
-    (node.content ?? "").slice(0, 800),
-  ].filter(Boolean).join("\n") + "\n";
+/** Vault-import stubs used to point at sources without storing the body. */
+function isPlaceholderContent(content: string | null | undefined): boolean {
+  if (!content) return true;
+  return content.includes("The source document remains the evidence layer.");
 }
 
-function renderRecallEvidence(unit: TextUnit): string {
-  return `> ${unit.text.slice(0, 600)} [source:${unit.sourceId}]\n`;
+/** Catalog/log-style pages are useful as pointers but starve the pack if dumped whole. */
+const GIANT_CONTENT_CHARS = 12_000;
+/** Hard cap for giant pages in a pack (summary + opening). */
+const GIANT_PACK_CHARS = 2_500;
+/** Soft cap for a single non-giant hop-0 page so one match doesn't exhaust the budget. */
+const PRIMARY_PACK_CHARS = 24_000;
+
+/**
+ * Render a node for the recall pack.
+ * - Primary (hop 0) non-giant pages: full body up to remaining budget / soft cap
+ *   so runbooks match Scribe depth.
+ * - Giant pages (index, event log): summary + short opening only.
+ * - Linked neighbors: short teaser.
+ */
+function renderRecallAtom(
+  node: GraphNode,
+  hops: number,
+  remainingTokens: number,
+  options: { primaryMatch?: boolean } = {},
+): { block: string; contentChars: number } {
+  const origin = hops === 0 ? "match" : "linked";
+  const headerLines = [
+    `## ${node.title} [${node.type}/${origin}] (${node.slug})`,
+    node.summary ?? "",
+  ].filter(Boolean);
+  const header = headerLines.join("\n") + "\n";
+  const headerCost = estimateTokens(header);
+  const budgetForContent = Math.max(0, remainingTokens - headerCost);
+
+  let body = "";
+  let contentChars = 0;
+  const raw = node.content ?? "";
+  if (raw && !isPlaceholderContent(raw) && budgetForContent > 0) {
+    const giant = raw.length > GIANT_CONTENT_CHARS;
+    let maxChars: number;
+    if (hops > 0) {
+      maxChars = Math.min(raw.length, 600, budgetForContent * 4);
+    } else if (giant) {
+      maxChars = Math.min(raw.length, GIANT_PACK_CHARS, budgetForContent * 4);
+    } else if (options.primaryMatch) {
+      // Best lexical hit: pack as much as budget allows (Scribe-depth runbook).
+      maxChars = Math.min(raw.length, PRIMARY_PACK_CHARS, budgetForContent * 4);
+    } else {
+      // Other hop-0 hits: leave room for the primary page + neighbors.
+      maxChars = Math.min(raw.length, 4_000, Math.floor(budgetForContent * 4 * 0.35));
+    }
+    body = raw.slice(0, Math.max(0, maxChars));
+    contentChars = body.length;
+    if (body.length < raw.length) body += "\n…";
+  }
+
+  const block = body ? `${header}${body}\n` : header;
+  return { block, contentChars };
+}
+
+function renderRecallEvidence(unit: TextUnit, maxChars = 1200): string {
+  const text = unit.text.length > maxChars ? `${unit.text.slice(0, maxChars)}\n…` : unit.text;
+  return `> ${text} [source:${unit.sourceId}]\n`;
 }
 
 export async function performRecall(store: GraphStore, rawInput: RecallInput, context?: GraphOperationContext): Promise<RecallResult> {
@@ -430,15 +483,29 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
   }
 
   const maxDegree = Math.max(1, ...[...candidates.values()].map((candidate) => candidate.degree));
+  // Prefer hop-0 (direct matches) over linked neighbors so budget goes to full pages.
+  // Soft-penalize giant catalog/log pages so they don't outrank a specific runbook.
   const scored = [...candidates.values()]
-    .map((candidate) => ({
-      ...candidate,
-      score:
-        (candidate.matchRank === null ? 0 : 0.5 / (1 + candidate.matchRank)) +
-        0.3 * activationScore(candidate.node, nowMs) +
-        0.2 * (candidate.degree / maxDegree),
-    }))
-    .sort((left, right) => right.score - left.score || left.node.slug.localeCompare(right.node.slug));
+    .map((candidate) => {
+      const contentLen = candidate.node.content?.length ?? 0;
+      const giantPenalty = contentLen > GIANT_CONTENT_CHARS ? 0.12 : 0;
+      return {
+        ...candidate,
+        score:
+          (candidate.matchRank === null ? 0 : 0.5 / (1 + candidate.matchRank)) +
+          0.3 * activationScore(candidate.node, nowMs) +
+          0.2 * (candidate.degree / maxDegree) +
+          (candidate.hops === 0 ? 0.15 : 0) -
+          giantPenalty,
+      };
+    })
+    .sort((left, right) =>
+      right.score - left.score ||
+      left.hops - right.hops ||
+      // Prefer more specific (shorter) pages when scores tie.
+      (left.node.content?.length ?? 0) - (right.node.content?.length ?? 0) ||
+      left.node.slug.localeCompare(right.node.slug),
+    );
 
   const header = `Recall: ${input.query}\n`;
   let spentTokens = estimateTokens(header);
@@ -448,6 +515,8 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
   const citations: RecallCitation[] = [];
   const citationKeys = new Set<string>();
   const packedNodeIds = new Set<string>();
+  const packedEvidenceIds = new Set<string>();
+  const evidence: TextUnit[] = [];
 
   const addCitation = (citation: RecallCitation): void => {
     const key = `${citation.nodeId}:${citation.sourceId}:${citation.textUnitId}`;
@@ -456,42 +525,97 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     citations.push(citation);
   };
 
-  for (const candidate of scored) {
-    const block = renderRecallAtom(candidate.node, candidate.hops);
+  const pushEvidence = (unit: TextUnit): void => {
+    if (evidence.some((existing) => existing.id === unit.id)) return;
+    evidence.push(unit);
+  };
+
+  const tryPack = (block: string): boolean => {
     const cost = estimateTokens(block);
     if (spentTokens + cost > input.tokenBudget) {
       truncated = true;
-      continue;
+      return false;
     }
     spentTokens += cost;
     contextParts.push(block);
+    return true;
+  };
+
+  // Two-pass packing: first the best non-giant hop-0 match (full body), then the rest.
+  const primary = scored.find(
+    (candidate) =>
+      candidate.hops === 0 &&
+      candidate.matchRank !== null &&
+      (candidate.node.content?.length ?? 0) <= GIANT_CONTENT_CHARS &&
+      !isPlaceholderContent(candidate.node.content),
+  ) ?? scored.find((candidate) => candidate.hops === 0 && candidate.matchRank === 0);
+  const ordered = primary
+    ? [primary, ...scored.filter((candidate) => candidate.node.id !== primary.node.id)]
+    : scored;
+
+  for (const candidate of ordered) {
+    const remaining = input.tokenBudget - spentTokens;
+    // Need room for at least a title + summary.
+    if (remaining < 40) {
+      truncated = true;
+      break;
+    }
+    const isPrimary = primary?.node.id === candidate.node.id;
+    const { block } = renderRecallAtom(candidate.node, candidate.hops, remaining, {
+      primaryMatch: isPrimary,
+    });
+    if (!tryPack(block)) continue;
+
     packedNodeIds.add(candidate.node.id);
-    atoms.push({ node: candidate.node, score: candidate.score, hops: candidate.hops, tokens: cost });
+    atoms.push({
+      node: candidate.node,
+      score: candidate.score,
+      hops: candidate.hops,
+      tokens: estimateTokens(block),
+    });
 
     const detail = await store.read({ nodeId: candidate.node.id }, context);
-    if (detail) {
-      for (const annotation of detail.annotations) {
-        addCitation({
-          nodeId: candidate.node.id,
-          sourceId: annotation.sourceId,
-          textUnitId: annotation.textUnitId,
-        });
+    if (!detail) continue;
+
+    for (const annotation of detail.annotations) {
+      addCitation({
+        nodeId: candidate.node.id,
+        sourceId: annotation.sourceId,
+        textUnitId: annotation.textUnitId,
+      });
+    }
+
+    // Pack this node's own evidence text (not only search-hit units) so vault
+    // pages surface body sections via annotations as well as atom content.
+    // Skip for giant pages — body already carried the useful opening.
+    if (
+      input.includeEvidence &&
+      candidate.hops === 0 &&
+      (candidate.node.content?.length ?? 0) <= GIANT_CONTENT_CHARS
+    ) {
+      for (const item of detail.evidence) {
+        if (!isTextUnit(item)) continue;
+        if (packedEvidenceIds.has(item.id)) continue;
+        const text = item.text.trim();
+        if (!text || text === "---") continue;
+        const evidenceBlock = renderRecallEvidence(item, 2000);
+        if (!tryPack(evidenceBlock)) break;
+        packedEvidenceIds.add(item.id);
+        pushEvidence(item);
+        addCitation({ nodeId: candidate.node.id, sourceId: item.sourceId, textUnitId: item.id });
       }
     }
   }
 
-  const evidence: TextUnit[] = [];
   if (input.includeEvidence) {
     for (const unit of search.textUnits) {
+      if (packedEvidenceIds.has(unit.id)) continue;
+      const text = unit.text.trim();
+      if (!text || text === "---") continue;
       const block = renderRecallEvidence(unit);
-      const cost = estimateTokens(block);
-      if (spentTokens + cost > input.tokenBudget) {
-        truncated = true;
-        continue;
-      }
-      spentTokens += cost;
-      contextParts.push(block);
-      evidence.push(unit);
+      if (!tryPack(block)) break;
+      packedEvidenceIds.add(unit.id);
+      pushEvidence(unit);
       addCitation({ nodeId: null, sourceId: unit.sourceId, textUnitId: unit.id });
     }
   }

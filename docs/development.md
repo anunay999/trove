@@ -107,6 +107,7 @@ The dashboard reads a service token from `localStorage.trove_token` when auth is
 
 ```bash
 DATABASE_URL=postgres://trove:trove@localhost:5433/trove npm run import:scribe -- ~/Documents/obsidian/claude
+# or, against hosted: TROVE_API_URL=https://mytrove.in npm run backfill:vault -- ~/Documents/obsidian/claude
 ```
 
 The importer is evidence-first and episodic-aware:
