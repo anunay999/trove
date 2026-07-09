@@ -1,11 +1,12 @@
 ---
 name: trove-recall
-description: Use when a question should be answered from the Trove memory graph rather than re-derived - prior projects, decisions, system knowledge, preferences, "what was I working on". Calls recall for a token-budgeted context pack (or grep for exact strings), synthesizes with citations, and remembers non-trivial answers back so exploration compounds.
+description: Use when a question should be answered from the Trove memory graph rather than re-derived - prior projects, decisions, system knowledge, preferences, "what was I working on". Routes grep → read → recall by query shape (exact string, known slug, open question), synthesizes with citations, and remembers non-trivial answers back so exploration compounds.
 ---
 
 # trove-recall
 
 > Good answers don't disappear into chat history — they become graph atoms.
+> Match Scribe depth: exact lookup and full-page read first; `recall` is for open questions.
 
 ## When to use
 
@@ -20,18 +21,22 @@ When **not** to use:
 
 ## Process
 
-### Step 1 — pick the retrieval tool
+### Step 1 — pick the retrieval tool (order matters)
 
-- Question contains an **exact string** (port, slug, env var, error message, identifier) → `grep { pattern }` first. Exact match beats semantic search there.
-- Otherwise → `recall { query: "<the question, as natural language>", tokenBudget: 2000 }`.
-  - Budget 1500–3000 for most questions; toward 4000 only for broad syntheses.
-  - Phrase the query as the actual question, not keywords.
-  - The pack contains atoms (matched + graph-expanded), connecting edges, evidence excerpts, and citations.
+| Query shape | Tool | Notes |
+|---|---|---|
+| **Exact string** — port, IP, slug, env var, error code, flag, SHA | `grep { pattern }` | Prefer over `recall`. Then `read` the hit if you need the full page. |
+| **Known page** — you have a slug/title (`anunay-vm-rocket`, `memory-system-…`) | `read { slug }` | Full node body = Scribe-depth runbook. Do not rely on a budgeted pack alone. |
+| **Open / multi-hop question** — "how does X work", "state of Y" | `recall { query, tokenBudget }` | Default budget **8000**. Phrase as a natural-language question. |
+
+- The `recall` pack is a **digest** (ranked atoms + optional evidence), not a guarantee of the whole document.
+- If the top atom is clearly the right page but the answer is still thin → **`read` that slug** (same as opening the wiki page).
+- Broad synthesis only: push `tokenBudget` toward 12000–16000; never use `recall` for a lone port/IP.
 
 ### Step 2 — drill down (only if needed)
 
-- `read { id | slug }` for a specific atom's full summary and evidence, or a raw source document.
-- `neighborhood { nodeId, depth, asOf? }` when structure or history matters.
+- `read { id | slug }` for full body + evidence, or a raw source document by source id.
+- `neighborhood { nodeId, depth, asOf? }` when structure or belief history matters.
 
 ### Step 3 — synthesize
 
@@ -51,6 +56,8 @@ One-sentence recap; note anything remembered back.
 
 ## Anti-patterns
 
-- **Don't** chain grep→read→read→neighborhood when one `recall` call answers it.
+- **Don't** call `recall` for an exact identifier — use `grep`.
+- **Don't** answer a known runbook from a thin pack — `read` the slug for the full body.
+- **Don't** chain grep→read→read→neighborhood when one well-chosen `recall` already answers an open question.
 - **Don't** dump the raw context pack on the user. Synthesize.
 - **Don't** remember trivial lookups back into the graph.
