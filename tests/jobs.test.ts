@@ -10,6 +10,11 @@ describe("jobs", () => {
   });
 
   it("a graph write enqueues durable maintenance jobs", async () => {
+    // Maintenance jobs use a global dedupe key (`maintenance:${kind}`). Under
+    // parallel node:test + shared Postgres, a sibling suite (or job-worker)
+    // may already hold the pending/running row — or drain it between capture
+    // and list. Assert "active or just-finished", not "pending in isolation".
+    const startedAt = Date.now();
     await store.capture({
       title: `Job smoke ${stamp}`,
       type: "claim",
@@ -19,10 +24,23 @@ describe("jobs", () => {
       links: [],
     }, context);
 
-    const pendingJobs = await store.jobs({ status: "pending", limit: 100 });
-    const pendingKinds = new Set(pendingJobs.map((job) => job.kind));
-    for (const expected of ["refresh_obsidian_projection", "lint_graph", "refresh_embeddings"]) {
-      assert.ok(pendingKinds.has(expected as never), `expected pending maintenance job ${expected}`);
+    const listed = await store.jobs({ limit: 200 });
+    for (const expected of ["refresh_obsidian_projection", "lint_graph", "refresh_embeddings"] as const) {
+      const ofKind = listed.filter((job) => job.kind === expected);
+      const active = ofKind.some(
+        (job) => job.status === "pending" || job.status === "running",
+      );
+      const justFinished = ofKind.some((job) => {
+        if (job.status !== "succeeded" && job.status !== "failed") return false;
+        const stampMs = Date.parse(job.finishedAt ?? job.updatedAt);
+        return Number.isFinite(stampMs) && stampMs >= startedAt - 2_000;
+      });
+      assert.ok(
+        active || justFinished,
+        `expected maintenance job ${expected} pending/running or finished around this capture; saw ${
+          ofKind.map((j) => j.status).join(",") || "none"
+        }`,
+      );
     }
   });
 

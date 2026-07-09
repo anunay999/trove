@@ -5,6 +5,14 @@ import { PgGraphStore } from "../src/pgStore.js";
 import { UserStore } from "../src/users.js";
 import { slugify } from "../src/slug.js";
 import type { CaptureInput, GraphSource, TextUnit } from "../src/contracts.js";
+import {
+  evidenceRefsFromUnits,
+  extractWikilinkSlugs,
+  nodeTypeFromPath,
+  pageSummary,
+  parseFrontmatter,
+  titleFromPath,
+} from "../src/vaultImport.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -61,11 +69,13 @@ try {
       continue;
     }
 
+    // Full page body is the belief content so recall/grep/read match Scribe depth.
+    // Sources remain the immutable evidence layer; evidence annotations cite units.
     await capturePageNode(store, {
       title,
       type,
-      summary: firstUsefulLine(parsed.body) ?? `${title} imported from Scribe vault.`,
-      content: `Imported from ${relPath}. The source document remains the evidence layer.`,
+      summary: pageSummary(parsed.body, title),
+      content: parsed.body.length > 0 ? parsed.body : contentText,
       source,
       textUnits,
     }, importContext);
@@ -127,94 +137,12 @@ async function capturePageNode(
   },
   context?: GraphOperationContext,
 ): Promise<void> {
-  const firstEvidenceUnit = input.textUnits.find(isUsefulEvidenceUnit);
-  const evidence = firstEvidenceUnit
-    ? [{ textUnitId: firstEvidenceUnit.id, selector: {} }]
-    : [{ sourceId: input.source.id, selector: {} }];
-
   await store.capture({
     title: input.title,
     type: input.type,
     summary: input.summary,
     content: input.content,
-    evidence,
+    evidence: evidenceRefsFromUnits(input.textUnits, input.source.id),
     links: [],
   }, context);
-}
-
-function parseFrontmatter(markdown: string): { frontmatter: Record<string, string>; body: string } {
-  if (!markdown.startsWith("---\n")) {
-    return { frontmatter: {}, body: markdown };
-  }
-  const close = markdown.indexOf("\n---", 4);
-  if (close === -1) {
-    return { frontmatter: {}, body: markdown };
-  }
-  const raw = markdown.slice(4, close).trim();
-  const frontmatter: Record<string, string> = {};
-  for (const line of raw.split("\n")) {
-    const match = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
-    if (!match) continue;
-    frontmatter[match[1] ?? ""] = (match[2] ?? "").replace(/^["']|["']$/g, "");
-  }
-  return { frontmatter, body: markdown.slice(close + 4).trim() };
-}
-
-function titleFromPath(path: string): string {
-  return basename(path, extname(path))
-    .split(/[-_]/g)
-    .filter(Boolean)
-    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
-function firstUsefulLine(body: string): string | null {
-  const line = body
-    .split("\n")
-    .map((candidate) => candidate.trim())
-    .find((candidate) => candidate.length > 0 && !candidate.startsWith("#"));
-  return line ? line.slice(0, 300) : null;
-}
-
-function isUsefulEvidenceUnit(unit: TextUnit): boolean {
-  const text = unit.text.trim();
-  if (text.length === 0) return false;
-  if (text === "---") return false;
-  if (/^[A-Za-z0-9_-]+:\s/.test(text)) return false;
-  return true;
-}
-
-function extractWikilinkSlugs(markdown: string): string[] {
-  const slugs = new Set<string>();
-  const regex = /\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = regex.exec(markdown)) !== null) {
-    const rawTarget = match[1]?.trim();
-    if (!rawTarget) continue;
-    const basenameTarget = rawTarget.split("/").filter(Boolean).at(-1) ?? rawTarget;
-    slugs.add(slugify(basenameTarget));
-  }
-
-  return [...slugs];
-}
-
-function nodeTypeFromPath(path: string): CaptureInput["type"] {
-  const [folder] = path.split("/");
-  switch (folder) {
-    case "projects":
-      return "project";
-    case "patterns":
-      return "pattern";
-    case "domains":
-      return "domain";
-    case "people":
-      return "person";
-    case "infrastructure":
-      return "infrastructure";
-    case "sources":
-      return "entity";
-    default:
-      return slugify(path).includes("decision") ? "decision" : "entity";
-  }
 }

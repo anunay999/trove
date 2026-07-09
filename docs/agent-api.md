@@ -41,24 +41,26 @@ Visibility is tiered by credential scope: **core** tools are shown to every cred
 
 ### Core Tools
 
+**Retrieval routing (agents):** exact string → `grep` (then optional `read`) · known slug → `read` · open question → `recall` (then `read` if the pack is thin). Do not use `recall` as the only tool for ports/IPs or full runbooks.
+
 `recall`
 
-- Input: `query`, `tokenBudget` (default 2000), optional `types`, `depth`, `asOf`, `includeEvidence`
+- Input: `query`, `tokenBudget` (default **8000**), optional `types`, `depth`, `asOf`, `includeEvidence`
 - Output: a token-budgeted context pack — packed atoms with scores, connecting edges, evidence text units, citations, `spentTokens`, and `truncated`
-- The flagship read operator: hybrid search seeds a graph expansion, candidates are ranked by match plus ACT-R-style activation (recency, frequency) plus degree, and a greedy packer fills the budget. Packing a node counts as a read, so recalled memories strengthen.
-- Prefer one `recall` call over grep-then-read-then-neighborhood chains.
+- Open-ended questions only: hybrid search seeds a graph expansion, candidates are ranked by match plus ACT-R-style activation (recency, frequency) plus degree, and a greedy packer fills the budget. Packing a node counts as a read, so recalled memories strengthen.
+- The pack is a **digest**, not always a full page. Primary hop-0 runbooks pack deeply; giant catalog/log pages are teaser-capped. Prefer one good `recall` over blind multi-tool chains for open questions; follow with `read` when you need Scribe-depth completeness.
 
 `grep`
 
 - Input: `pattern` (regex; invalid regex degrades to a literal match), optional `scope` (`nodes` | `sources` | `all`), `caseSensitive`, `limit`
 - Output: matches with node/source ids, the matched field, and an excerpt around the first hit
-- Use when the query contains an exact string — ports, slugs, env vars, error messages. Exact match beats semantic search there.
+- **Prefer over `recall`** when the query contains an exact string — ports, IPs, slugs, env vars, error messages. Exact match beats semantic search there.
 
 `read`
 
 - Input: `id` or `slug`
-- Output: a memory node (latest revision, evidence, annotations, revision token) or, when the id belongs to a source, the raw source document
-- One read door: node lookup first, source fallback.
+- Output: a memory node (latest revision, **full content body**, evidence, annotations, revision token) or, when the id belongs to a source, the raw source document
+- One read door: node lookup first, source fallback. Use for known pages and for full runbooks after `grep`/`recall` found the right atom.
 
 `remember`
 

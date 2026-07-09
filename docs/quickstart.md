@@ -76,7 +76,22 @@ Import an Obsidian vault (or any folder of markdown):
 npm run import:vault -- ~/path/to/vault
 ```
 
-Re-running is safe: unchanged files are hash-deduped no-ops, and dated log files only store new entries.
+Re-running is safe: unchanged files are hash-deduped no-ops, and dated log files only store new entries. Each page becomes a graph atom whose **content is the full markdown body** (so `recall` / `read` / `grep` match Scribe depth), with the raw file kept as an immutable source.
+
+If you imported before that behavior (stubs like *"Imported from … evidence layer"*), backfill from the vault:
+
+```bash
+# Hosted graph (production)
+TROVE_API_URL=https://mytrove.in npm run backfill:vault -- ~/Documents/obsidian/claude
+
+# Direct Postgres
+DATABASE_URL=postgres://… npm run backfill:vault -- ~/path/to/vault
+
+# Optional: also re-annotate evidence text units (slower)
+TROVE_API_URL=https://mytrove.in npm run backfill:vault -- --with-evidence ~/path/to/vault
+```
+
+Content-only is the default and is enough for accurate recall. Re-running only rewrites stubs (or pass `--force`).
 
 ## Semantic search (optional)
 

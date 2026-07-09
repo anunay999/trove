@@ -155,7 +155,9 @@ export const grepInputSchema = z.object({
 
 export const recallInputSchema = z.object({
   query: z.string().min(1),
-  tokenBudget: z.number().int().min(100).max(32000).default(2000),
+  // Default high enough to pack full Scribe-style runbook pages on hop-0 matches.
+  // Latency is acceptable on hobby hosting; accuracy is the goal.
+  tokenBudget: z.number().int().min(100).max(32000).default(8000),
   types: z.array(nodeTypeSchema).optional(),
   depth: z.number().int().min(0).max(2).default(1),
   asOf: z.string().optional(),

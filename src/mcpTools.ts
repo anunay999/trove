@@ -394,7 +394,11 @@ function registerTrovePrompts(server: McpServer): void {
             text: [
               `Recall from Trove: ${question}`,
               "",
-              "Call recall with a sensible tokenBudget first; use grep when the question contains exact identifiers.",
+              "Tool routing:",
+              "1) Exact string (port, IP, slug, error, flag) → grep first, then read the hit if you need the full page.",
+              "2) Known page slug/title → read for the full body (Scribe-depth runbook).",
+              "3) Open-ended question → recall with tokenBudget around 8000 (higher for broad synthesis).",
+              "If recall's top atom is right but the pack is thin, follow with read on that slug.",
               "Answer concisely and cite node slugs or source evidence.",
               "If the session revealed durable new knowledge, suggest remember.",
             ].join("\n"),

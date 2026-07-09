@@ -28,6 +28,8 @@
     "web:build": "(test -d web/node_modules || npm --prefix web ci) && npm --prefix web run build",
     "export:obsidian": "tsx scripts/exportObsidianVault.ts",
     "import:vault": "tsx scripts/importScribeVault.ts",
+    "import:scribe": "tsx scripts/importScribeVault.ts",
+    "backfill:vault": "tsx scripts/backfillVaultContent.ts",
     "typecheck": "tsc --noEmit",
     "lint": "npx oxlint src scripts tests",
     "check": "npm run typecheck && npm run lint",

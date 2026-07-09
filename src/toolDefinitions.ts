@@ -44,20 +44,21 @@ export const troveTools = [
     name: "recall",
     tier: "core",
     description:
-      "Retrieve relevant memory as a token-budgeted context pack: hybrid search, graph expansion, activation ranking, citations. Use this for questions; never exceeds tokenBudget.",
+      "Open-ended memory questions only — hybrid search + graph expansion into a token-budgeted context pack with citations. NOT for exact strings (use grep) or when you already know the page slug (use read). Default tokenBudget is 8000; raise for broad syntheses. The pack is a digest, not always a full page — if the top atom is the right runbook but the answer is thin, follow with read on that slug.",
     inputSchema: recallInputSchema,
   },
   {
     name: "grep",
     tier: "core",
     description:
-      "Exact/regex text search over memories and raw source documents. Use for identifiers, ports, error strings, flags — anything where exact match beats semantic search. Invalid regex degrades to a literal match.",
+      "Prefer this over recall when the query has an exact string: port, IP, slug, env var, error code, flag, commit SHA. Regex over node titles/summaries/content AND raw sources; invalid regex falls back to literal. Returns excerpts + ids — then read the hit if you need the full document.",
     inputSchema: grepInputSchema,
   },
   {
     name: "read",
     tier: "core",
-    description: "Read anything by id or slug: a memory node (with evidence and annotations) or a raw source document.",
+    description:
+      "Full document by id or slug: complete node body (Scribe-depth runbooks) with evidence/annotations, or a raw source when the id is a source. Use when you know the slug/title, or after recall/grep found the right atom and you need the whole page — not a budgeted pack.",
     inputSchema: readAnyInputSchema,
   },
   {
