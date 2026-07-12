@@ -83,6 +83,10 @@
     --sidebar-accent-foreground: #111111;
     --sidebar-border: #eaeaea;
     --sidebar-ring: #c3c2b7;
+    --signal: #e3a15f;
+    --signal-strong: #9a5d27;
+    --cta-bg: #171716;
+    --cta-fg: #f7f6f3;
 }
 
 .dark {
@@ -117,6 +121,10 @@
     --sidebar-accent-foreground: #f5f5f2;
     --sidebar-border: #2c2c2a;
     --sidebar-ring: #52514e;
+    --signal: #dda064;
+    --signal-strong: #e5b27e;
+    --cta-bg: #dda064;
+    --cta-fg: #19130f;
 }
 
 @layer base {
@@ -125,10 +133,45 @@
     }
   body {
     @apply bg-background text-foreground;
+    margin: 0;
+    min-width: 320px;
+    text-rendering: optimizeLegibility;
     }
   html {
     @apply font-sans;
+    scroll-behavior: smooth;
     }
+}
+
+::selection {
+  background: color-mix(in srgb, var(--signal) 42%, transparent);
+}
+
+.landing-shell {
+  isolation: isolate;
+  background:
+    radial-gradient(circle at 88% 9%, color-mix(in srgb, var(--signal) 8%, transparent), transparent 29rem),
+    var(--background);
+}
+
+.landing-shell > * {
+  position: relative;
+  z-index: 1;
+}
+
+.landing-dot-field {
+  background-image: radial-gradient(color-mix(in srgb, var(--foreground) 18%, transparent) 0.7px, transparent 0.7px);
+  background-size: 15px 15px;
+  mask-image: linear-gradient(to bottom, black 10%, transparent 82%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* Obsidian-style document rendering inside the node drawer. */
