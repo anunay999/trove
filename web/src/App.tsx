@@ -110,7 +110,7 @@ export default function App() {
     <div className={activeTab === "graph" && dashboardReady ? "flex h-dvh flex-col overflow-hidden" : "flex min-h-screen flex-col"}>
       <header className="sticky top-0 z-20 shrink-0 border-b bg-background/90 backdrop-blur">
         <div className="mx-auto flex h-14 w-full max-w-6xl items-center gap-6 px-6">
-          <h1 className="font-serif text-xl tracking-tight">Trove</h1>
+          <span className="font-serif text-xl tracking-tight">Trove</span>
           {dashboardReady && (
             <nav className="flex items-center gap-1">
               {tabs.map((candidate) => (
