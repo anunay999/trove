@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useState } from "react";
 import { AuthenticateWithRedirectCallback } from "@clerk/clerk-react";
 import { siGithub } from "simple-icons";
 import { Overview } from "@/pages/Overview";
-import { GraphView } from "@/pages/GraphView";
+// The force-graph library is the biggest thing we ship. Split it out so the
+// landing, which most visitors never scroll past, doesn't download the explorer.
+const GraphView = lazy(() => import("@/pages/GraphView").then((m) => ({ default: m.GraphView })));
 import { Landing } from "@/pages/Landing";
 import { ApiKeys } from "@/pages/ApiKeys";
 import { Admin } from "@/pages/Admin";
@@ -107,7 +109,13 @@ export default function App() {
   const openSignUp = useCallback((email?: string) => setDrawer({ open: true, mode: "sign-up", email }), []);
 
   return (
-    <div className={activeTab === "graph" && dashboardReady ? "flex h-dvh flex-col overflow-hidden" : "flex min-h-screen flex-col"}>
+    // The landing is always dark. The night tokens go on the shell, not just the
+    // header: the header is 90% opaque, so a light body showed through as a grey bar.
+    <div
+      className={`${showLanding ? "landing-chrome bg-background" : ""} ${
+        activeTab === "graph" && dashboardReady ? "flex h-dvh flex-col overflow-hidden" : "flex min-h-screen flex-col"
+      }`}
+    >
       <header className="sticky top-0 z-20 shrink-0 border-b bg-background/90 backdrop-blur">
         <div className="mx-auto flex h-14 w-full max-w-6xl items-center gap-6 px-6">
           <span className="font-serif text-xl tracking-tight">Trove</span>
@@ -168,17 +176,20 @@ export default function App() {
                 <path d={siGithub.path} />
               </svg>
             </a>
-            <button
-              type="button"
-              onClick={() => setDark((current) => !current)}
-              aria-label="Toggle theme"
-              className="flex size-7 items-center justify-center rounded-md border text-muted-foreground transition-colors hover:text-foreground"
-            >
-              <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden>
-                <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
-                <path d="M8 1.5 A6.5 6.5 0 0 1 8 14.5 Z" fill="currentColor" />
-              </svg>
-            </button>
+            {/* The landing ignores the theme, so the toggle would do nothing there. */}
+            {!showLanding && (
+              <button
+                type="button"
+                onClick={() => setDark((current) => !current)}
+                aria-label="Toggle theme"
+                className="flex size-7 items-center justify-center rounded-md border text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden>
+                  <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                  <path d="M8 1.5 A6.5 6.5 0 0 1 8 14.5 Z" fill="currentColor" />
+                </svg>
+              </button>
+            )}
             {clerkEnabled && <AuthControls onOpenLogin={openLogin} onSessionChange={onSessionChange} dark={dark} />}
           </div>
         </div>
@@ -192,7 +203,6 @@ export default function App() {
         <WaitlistGate email={identity?.email ?? null} dark={dark} />
       ) : showLanding ? (
         <Landing
-          dark={dark}
           onJoin={(email) => openSignUp(email)}
           onLogin={openLogin}
           onConnectKey={() => setSignedOutView("connect")}
@@ -252,7 +262,9 @@ export default function App() {
         </main>
       ) : activeTab === "graph" ? (
         <main className="min-h-0 flex-1">
-          <GraphView snapshot={snapshot} dark={dark} />
+          <Suspense fallback={<div className="h-full w-full" />}>
+            <GraphView snapshot={snapshot} dark={dark} />
+          </Suspense>
         </main>
       ) : activeTab === "keys" ? (
         <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">
