@@ -30,10 +30,8 @@ export function CaptureReveal({ memory, slot }: CaptureRevealProps) {
       }
       transition={{ duration: REVEAL_MS / 1000, times: [0, 0.14, 0.66, 1], ease: "easeOut" }}
     >
-      <p className="text-[13px] font-medium leading-snug text-foreground [text-shadow:0_2px_10px_rgba(0,0,0,0.8)]">
-        {memory.fact}
-      </p>
-      <p className="mt-1 font-mono text-[9px] text-[var(--signal)] [text-shadow:0_2px_10px_rgba(0,0,0,0.8)]">
+      <p className="label-knockout text-[13px] font-medium leading-snug text-foreground">{memory.fact}</p>
+      <p className="label-knockout mt-1 font-mono text-[9px] text-[var(--signal)]">
         ↳ {memory.source} · {memory.agent}
       </p>
     </motion.div>

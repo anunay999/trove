@@ -197,17 +197,15 @@
   background: radial-gradient(ellipse 46% 42% at 50% 46%, var(--background) 30%, color-mix(in srgb, var(--background) 72%, transparent) 58%, transparent 78%);
 }
 
-/* Smoothly rotatable gradient for the bubble rim. */
-@property --rim-spin {
-  syntax: "<angle>";
-  initial-value: 0deg;
-  inherits: false;
-}
-
 /*
- * A soap bubble is mostly window: you see through the middle, the film only
- * catches light toward the rim, and a hard specular marks the light source. The
- * film is colourless — the light it catches is the whole effect.
+ * The bubble's film is drawn by a WebGL thin-film shader — see
+ * `hero/bubble-shader.ts`. Layered CSS gradients were tried first and could not
+ * get there: interference colour depends on the viewing angle and on a film
+ * thickness that flows, and a gradient has no access to either. It read as
+ * brushed chrome.
+ *
+ * What stays here is only what the shader cannot do, because it is clipped to
+ * the bubble's own box: the glow the bubble throws onto the field around it.
  */
 /*
  * Size comes from `--bubble-size`, set per bubble. Fixed rem sizes overflowed a
@@ -228,76 +226,60 @@
   }
 }
 
+/*
+ * No background: the shader owns every pixel inside the circle. This is only
+ * the faint iridescent halo the film casts outward, which has to live outside
+ * the canvas to escape its bounds.
+ */
 .bubble-skin {
   border-radius: 9999px;
-  background:
-    /* hard specular — the light source itself */
-    radial-gradient(circle at 30% 24%, rgba(255, 255, 255, 0.95) 0 3%, rgba(255, 255, 255, 0.32) 7%, transparent 15%),
-    /* bloom around it */
-    radial-gradient(circle at 31% 25%, rgba(255, 255, 255, 0.13), transparent 42%),
-    /* light bouncing back up through the far wall */
-    radial-gradient(circle at 68% 76%, rgba(255, 255, 255, 0.11), transparent 30%),
-    /* the film itself: clear through the centre, brightening to the rim */
-    radial-gradient(circle at 50% 50%, transparent 58%, rgba(255, 255, 255, 0.07) 86%, rgba(255, 255, 255, 0.02) 95%);
   box-shadow:
-    inset 0 0 30px rgba(255, 255, 255, 0.08),
-    inset 5px -7px 24px -12px rgba(255, 255, 255, 0.22),
-    0 0 40px -14px rgba(255, 255, 255, 0.4);
-}
-
-/* Refraction, where supported. The bubble stays legible without it. */
-@supports (backdrop-filter: blur(1px)) {
-  .bubble-skin {
-    backdrop-filter: blur(3px) brightness(1.1);
-  }
-}
-
-/*
- * The rim: a slowly turning ramp of white, masked to a hairline ring, so the
- * highlight travels around the edge the way it does on a real bubble.
- */
-.bubble-skin::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  padding: 1.5px;
-  background: conic-gradient(
-    from var(--rim-spin),
-    rgba(255, 255, 255, 0.1),
-    rgba(255, 255, 255, 0.72),
-    rgba(255, 255, 255, 0.16),
-    rgba(255, 255, 255, 0.55),
-    rgba(255, 255, 255, 0.1)
-  );
-  filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.28));
-  mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  mask-composite: exclude;
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  animation: rim-drift 14s linear infinite;
-}
-
-@keyframes rim-drift {
-  to {
-    --rim-spin: 360deg;
-  }
+    0 0 34px -16px rgba(214, 190, 255, 0.5),
+    0 0 60px -22px rgba(150, 226, 255, 0.4);
 }
 
 .bubble-skin:hover {
   box-shadow:
-    inset 0 0 30px rgba(255, 255, 255, 0.14),
-    inset 5px -7px 24px -12px rgba(255, 255, 255, 0.3),
-    0 0 46px -10px rgba(255, 255, 255, 0.6);
+    0 0 40px -12px rgba(214, 190, 255, 0.7),
+    0 0 72px -18px rgba(150, 226, 255, 0.55);
 }
 
-/* Popping brightens the whole rim for a beat before the burst. */
-.bubble-skin[data-popping="true"]::before {
-  background: conic-gradient(from var(--rim-spin), #ffffff, rgba(255, 255, 255, 0.85), #ffffff);
+/* The film flares as it stretches, a beat before it fails. */
+.bubble-skin[data-popping="true"] {
+  box-shadow:
+    0 0 50px -8px rgba(255, 255, 255, 0.8),
+    0 0 90px -14px rgba(180, 230, 255, 0.6);
+}
+
+/*
+ * Edges are drawn under the labels, but "under" is not enough when the label is
+ * bare text — the line reads straight through the letterforms. This punches a
+ * tight halo of page background around the glyphs so the edge stops at the
+ * label and picks up on the other side. Stacked rather than blurred: a soft
+ * drop shadow darkens the text without ever cutting the line.
+ */
+.label-knockout {
+  text-shadow:
+    0 0 6px var(--background),
+    0 0 6px var(--background),
+    0 0 6px var(--background),
+    0 0 13px var(--background),
+    0 0 13px var(--background),
+    0 0 13px var(--background);
+}
+
+/*
+ * The agent tag rides on the film, which is bright, coloured and moving — the
+ * one place on the page where a label has no stable ground under it. Same
+ * knockout idea as above, inverted: a dark halo carves the letterforms out of
+ * whatever the bubble happens to be doing behind them.
+ */
+.bubble-tag {
+  text-shadow:
+    0 0 3px rgba(0, 0, 0, 0.95),
+    0 0 3px rgba(0, 0, 0, 0.95),
+    0 0 7px rgba(0, 0, 0, 0.9),
+    0 1px 2px rgba(0, 0, 0, 0.95);
 }
 
 .landing-dot-field {

@@ -22,12 +22,24 @@ type MemoryNodeProps = {
 export function MemoryNode({ memory, superseded }: MemoryNodeProps) {
   const reduceMotion = useReducedMotion();
   const onLeft = memory.slot.x < 50;
+  // Nodes in the top of the field open their evidence downward. Opening upward
+  // from a slot at y:9 pushed the card past the top of the section, where the
+  // field's `overflow-hidden` simply cut it off.
+  const openDown = memory.slot.y < 45;
 
   return (
     // A zero-size anchor sitting exactly on the slot, so the dot lands on the
     // point the edges are drawn to and the label hangs off it.
+    //
+    // z-30 is load-bearing and belongs here rather than on the tooltip. This is
+    // a motion.div, so it carries a transform and opens its own stacking
+    // context — a z-30 on the tooltip inside it is measured against its
+    // siblings, not against the z-20 copy column, and the evidence card ended up
+    // painted under the waitlist and behind the session line. The anchor is the
+    // element that has to clear the copy; everything inside it then rides along.
+    // Safe because the slots keep the centre column clear for the headline.
     <motion.div
-      className="pointer-events-none absolute z-10"
+      className="pointer-events-none absolute z-30"
       style={{ left: `${memory.slot.x}%`, top: `${memory.slot.y}%` }}
       initial={reduceMotion ? false : { opacity: 0, scale: 0.3 }}
       animate={{ opacity: 1, scale: 1 }}
@@ -55,7 +67,7 @@ export function MemoryNode({ memory, superseded }: MemoryNodeProps) {
         aria-label={`${memory.fact}. Source: ${memory.source}.${superseded ? " Superseded, still inspectable." : ""}`}
       >
         <span
-          className={`text-[10px] font-medium transition-colors ${
+          className={`label-knockout text-[10px] font-medium transition-colors ${
             superseded ? "text-muted-foreground line-through decoration-1" : "text-foreground"
           }`}
         >
@@ -64,9 +76,9 @@ export function MemoryNode({ memory, superseded }: MemoryNodeProps) {
 
         {/* The evidence, on demand — the graph stays readable, the receipt stays reachable. */}
         <span
-          className={`pointer-events-none absolute bottom-full z-30 mb-2 w-[13rem] scale-95 whitespace-normal rounded-lg border border-border bg-[var(--card)] p-2.5 opacity-0 shadow-xl transition-all group-hover:scale-100 group-hover:opacity-100 group-focus-visible:scale-100 group-focus-visible:opacity-100 ${
+          className={`pointer-events-none absolute z-30 w-[13rem] scale-95 whitespace-normal rounded-lg border border-border bg-[var(--card)] p-2.5 opacity-0 shadow-xl transition-all group-hover:scale-100 group-hover:opacity-100 group-focus-visible:scale-100 group-focus-visible:opacity-100 ${
             onLeft ? "left-0" : "right-0"
-          }`}
+          } ${openDown ? "top-full mt-2" : "bottom-full mb-2"}`}
         >
           <span className="block text-[11px] font-medium leading-snug text-foreground">{memory.fact}</span>
           <span className="mt-1 block font-mono text-[9px] text-[var(--signal)]">

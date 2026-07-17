@@ -51,7 +51,15 @@ export function HeroCapture({ onJoin, onLogin, onConnectKey }: HeroCaptureProps)
        * lg, not md: at 768px the copy column leaves ~48px of gutter, which would
        * put bubbles underneath the headline.
        */}
-      <div className="relative h-72 shrink-0 lg:absolute lg:inset-0 lg:z-0 lg:h-auto">
+      {/*
+       * Deliberately no z-index: `z-0` on a positioned element opens a stacking
+       * context, which would seal the nodes' evidence tooltips inside the field
+       * and under the z-20 copy — they rendered behind the waitlist card and
+       * blended into the session line. Left to stack naturally, the field's
+       * children compete with the copy directly, so bubbles (z-auto) still sit
+       * behind it while a tooltip (z-30) can rise above it.
+       */}
+      <div className="relative h-72 shrink-0 lg:absolute lg:inset-0 lg:h-auto">
         <BubbleField
           remaining={remaining}
           captured={captured}

@@ -1,9 +1,17 @@
 import { useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
+import { BubbleSkin } from "@/components/hero/BubbleSkin";
 import type { MemoryFact, Slot } from "@/lib/hero-memories";
 
 const DROPLETS = 8;
 const BURST_MS = 420;
+
+/** Stable per-bubble seed, so each film drains its own way across reloads. */
+function seedFrom(id: string) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (Math.imul(h, 31) + id.charCodeAt(i)) | 0;
+  return Math.abs(h % 1000) / 10;
+}
 
 type BubbleProps = {
   memory: MemoryFact;
@@ -72,13 +80,24 @@ export function Bubble({ memory, slot, onCapture, cued = false }: BubbleProps) {
         className="bubble-skin group relative grid -translate-x-1/2 -translate-y-1/2 cursor-pointer place-items-center rounded-full transition-shadow focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--signal)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--background)]"
         data-popping={popping}
       >
+        <BubbleSkin seed={seedFrom(memory.id)} popping={popping} />
+
         {/*
-         * The origin tag is what makes these read as agent output rather than
-         * decoration. Hidden below md, where the bubble is too small to hold it —
-         * the capture reveal still names the agent and the source.
+         * The bubble carries the memory, not the agent that wrote it.
+         *
+         * It held the agent name first, and that quietly broke the whole
+         * metaphor: a bubble labelled "cursor" reads as *the agent*, so the
+         * edges between bubbles read as agents talking to each other rather
+         * than as one fact relating to another. Attribution still lands, a beat
+         * later and where it means something — the capture reveal and the node's
+         * evidence both name the agent and the source.
+         *
+         * Hidden below md, where the bubble is too small to hold any of it.
          */}
-        <span className="pointer-events-none relative z-10 hidden px-2 text-center font-mono text-[9px] leading-tight text-[color-mix(in_srgb,var(--foreground)_72%,transparent)] [text-shadow:0_1px_6px_rgba(0,0,0,0.55)] transition-colors group-hover:text-[var(--foreground)] md:block">
-          ● {memory.agent}
+        {/* Capped against the button so the label wraps inside the sphere
+            rather than running out past the film on both sides. */}
+        <span className="bubble-tag pointer-events-none relative z-10 hidden max-w-[80%] text-balance text-center font-mono text-[9px] leading-tight text-white/90 transition-colors group-hover:text-white md:block">
+          {memory.short}
         </span>
       </motion.button>
 
