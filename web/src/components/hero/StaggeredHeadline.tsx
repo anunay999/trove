@@ -19,7 +19,7 @@ export function StaggeredHeadline({ lines, accent }: StaggeredHeadlineProps) {
 
   return (
     <h1
-      className="text-[clamp(2.5rem,5.6vw,4.5rem)] font-medium leading-[0.98] tracking-[-0.06em] text-foreground"
+      className="text-[clamp(2.6rem,5.8vw,5.25rem)] font-medium leading-[0.99] tracking-[-0.055em] text-foreground"
       style={{ transformStyle: "preserve-3d", perspective: "600px" }}
     >
       {lines.map((line) => (

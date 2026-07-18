@@ -1,3 +1,5 @@
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
@@ -5,10 +7,10 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-    --font-heading: var(--font-serif);
-    --font-sans: "SF Pro Display", "Geist Sans", "Helvetica Neue", system-ui, sans-serif;
+    --font-heading: var(--font-sans);
+    --font-sans: "Geist Variable", "SF Pro Display", "Helvetica Neue", system-ui, sans-serif;
     --font-serif: "Iowan Old Style", "Baskerville", Georgia, serif;
-    --font-mono: "Geist Mono", "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+    --font-mono: "Geist Mono Variable", "SF Mono", "JetBrains Mono", ui-monospace, monospace;
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -154,19 +156,19 @@
  */
 .landing-shell,
 .landing-chrome {
-  --background: #0b0d10;
-  --foreground: #edebe4;
-  --card: #12151a;
-  --card-foreground: #edebe4;
-  --muted: #191d23;
-  --muted-foreground: #9b9d9f;
-  --border: #23272e;
-  --input: #23272e;
+  --background: #08090c;
+  --foreground: #ecebe5;
+  --card: #0e1116;
+  --card-foreground: #ecebe5;
+  --muted: #151920;
+  --muted-foreground: #8e939b;
+  --border: #1d222b;
+  --input: #1d222b;
   --ring: #4c5057;
   --signal: #f2c46b;
   --signal-strong: #f2c46b;
-  --cta-bg: #edebe4;
-  --cta-fg: #0b0d10;
+  --cta-bg: #ecebe5;
+  --cta-fg: #08090c;
 
   color: var(--foreground);
 }
@@ -174,6 +176,9 @@
 .landing-shell {
   isolation: isolate;
   background: var(--background);
+  /* Futuristic pages die on pure flat black. One faint cool wash and a grain
+   * overlay give the ground depth without touching the palette. */
+  background-image: radial-gradient(ellipse 70% 45% at 50% -8%, rgba(148, 178, 220, 0.07), transparent 72%);
 }
 
 .landing-shell > * {
@@ -182,127 +187,57 @@
 }
 
 /*
- * The hero field. Two faint cool washes keep the ground from being flat black and
- * give the bubbles something to refract, plus a vignette that keeps the headline
- * legible when a bubble drifts behind it.
+ * Film grain over the whole landing, fixed so it doesn't scroll away. The SVG
+ * turbulence tile is inline so no asset request is needed. Kept under 4% — any
+ * more and it reads as dirt instead of texture.
  */
-.hero-field {
-  background:
-    radial-gradient(ellipse 60% 50% at 18% 28%, rgba(190, 205, 230, 0.05), transparent 70%),
-    radial-gradient(ellipse 50% 45% at 82% 72%, rgba(190, 215, 230, 0.04), transparent 70%),
-    var(--background);
+.grain-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
-.hero-vignette {
-  background: radial-gradient(ellipse 46% 42% at 50% 46%, var(--background) 30%, color-mix(in srgb, var(--background) 72%, transparent) 58%, transparent 78%);
-}
-
-/*
- * The bubble's film is drawn by a WebGL thin-film shader — see
- * `hero/bubble-shader.ts`. Layered CSS gradients were tried first and could not
- * get there: interference colour depends on the viewing angle and on a film
- * thickness that flows, and a gradient has no access to either. It read as
- * brushed chrome.
- *
- * What stays here is only what the shader cannot do, because it is clipped to
- * the bubble's own box: the glow the bubble throws onto the field around it.
- */
-/*
- * Size comes from `--bubble-size`, set per bubble. Fixed rem sizes overflowed a
- * phone's width once the slot percentages resolved against 390px, so the whole
- * field scales down together below md.
- */
-.bubble-skin,
-.bubble-ring {
-  width: var(--bubble-size);
-  height: var(--bubble-size);
-}
-
-@media (max-width: 1023px) {
-  .bubble-skin,
-  .bubble-ring {
-    width: calc(var(--bubble-size) * 0.6);
-    height: calc(var(--bubble-size) * 0.6);
-  }
-}
-
-/*
- * No background: the shader owns every pixel inside the circle. This is only
- * the faint iridescent halo the film casts outward, which has to live outside
- * the canvas to escape its bounds.
- */
-.bubble-skin {
-  border-radius: 9999px;
-  box-shadow:
-    0 0 34px -16px rgba(214, 190, 255, 0.5),
-    0 0 60px -22px rgba(150, 226, 255, 0.4);
-}
-
-.bubble-skin:hover {
-  box-shadow:
-    0 0 40px -12px rgba(214, 190, 255, 0.7),
-    0 0 72px -18px rgba(150, 226, 255, 0.55);
-}
-
-/* The film flares as it stretches, a beat before it fails. */
-.bubble-skin[data-popping="true"] {
-  box-shadow:
-    0 0 50px -8px rgba(255, 255, 255, 0.8),
-    0 0 90px -14px rgba(180, 230, 255, 0.6);
-}
-
-/*
- * Edges are drawn under the labels, but "under" is not enough when the label is
- * bare text — the line reads straight through the letterforms. This punches a
- * tight halo of page background around the glyphs so the edge stops at the
- * label and picks up on the other side. Stacked rather than blurred: a soft
- * drop shadow darkens the text without ever cutting the line.
- */
-.label-knockout {
-  text-shadow:
-    0 0 6px var(--background),
-    0 0 6px var(--background),
-    0 0 6px var(--background),
-    0 0 13px var(--background),
-    0 0 13px var(--background),
-    0 0 13px var(--background);
-}
-
-/*
- * The agent tag rides on the film, which is bright, coloured and moving — the
- * one place on the page where a label has no stable ground under it. Same
- * knockout idea as above, inverted: a dark halo carves the letterforms out of
- * whatever the bubble happens to be doing behind them.
- */
-.bubble-tag {
-  text-shadow:
-    0 0 3px rgba(0, 0, 0, 0.95),
-    0 0 3px rgba(0, 0, 0, 0.95),
-    0 0 7px rgba(0, 0, 0, 0.9),
-    0 1px 2px rgba(0, 0, 0, 0.95);
-}
-
-.landing-dot-field {
-  background-image: radial-gradient(color-mix(in srgb, var(--foreground) 18%, transparent) 0.7px, transparent 0.7px);
-  background-size: 15px 15px;
-  mask-image: linear-gradient(to bottom, black 10%, transparent 82%);
-}
-
-.hero-graph-grid {
+/* The hero's faint blueprint grid, masked so it dissolves toward the fold. */
+.hero-grid {
   background-image:
-    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
-  background-size: 44px 44px;
-  mask-image: radial-gradient(circle at 48% 48%, black 18%, transparent 74%);
+    linear-gradient(rgba(148, 178, 220, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 178, 220, 0.045) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 90% 80% at 50% 30%, black 25%, transparent 78%);
 }
 
-@media (max-width: 1023px) {
-  /* The field is a band above the copy here, so it gets one wash and no vignette. */
-  .hero-field {
-    background:
-      radial-gradient(ellipse 90% 26% at 50% 16%, rgba(190, 205, 230, 0.06), transparent 74%),
-      var(--background);
-  }
+/* The stream's live dot. Slower than a cursor blink — a pulse, not an alarm. */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, var(--signal) 55%, transparent); }
+  50% { opacity: 0.55; box-shadow: 0 0 0 5px transparent; }
+}
+.live-dot {
+  animation: pulse-dot 2.4s ease-in-out infinite;
+}
+
+/*
+ * Rows in the memory stream enter from below and settle. The older rows are
+ * not removed — they dim and compress, because the whole point of the page is
+ * that nothing is thrown away.
+ */
+.stream-mask {
+  mask-image: linear-gradient(to bottom, transparent 0%, black 14%);
+}
+
+/* Superseded beliefs stay visible, struck through — retired, not deleted. */
+.superseded-line {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--signal) 60%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+/* Tabular numerals anywhere the landing shows counts or timestamps. */
+.tnum {
+  font-variant-numeric: tabular-nums;
 }
 
 @media (prefers-reduced-motion: reduce) {
