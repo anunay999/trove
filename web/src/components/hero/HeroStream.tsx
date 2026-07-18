@@ -24,8 +24,8 @@ export function HeroStream({ onJoin, onLogin, onConnectKey }: HeroStreamProps) {
       {/* Blueprint grid — the only set dressing. */}
       <div className="hero-grid pointer-events-none absolute inset-0" />
 
-      <div className="relative mx-auto grid w-full max-w-7xl flex-1 items-center gap-14 px-6 pb-20 pt-14 lg:grid-cols-[1.02fr_0.98fr] lg:gap-20 lg:px-10 lg:py-16">
-        <div className="max-w-xl">
+      <div className="relative mx-auto grid w-full max-w-7xl flex-1 items-center gap-14 px-6 pb-20 pt-14 lg:grid-cols-[1.02fr_0.98fr] lg:gap-20 lg:px-10 lg:py-16 2xl:max-w-[88rem]">
+        <div className="w-full">
           <motion.p
             initial={reduceMotion ? false : { opacity: 0 }}
             animate={{ opacity: 1 }}

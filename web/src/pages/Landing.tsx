@@ -67,7 +67,7 @@ export function Landing({ onJoin, onLogin, onConnectKey }: LandingProps) {
       <AgentLogos />
 
       {/* The thesis, assembled by the reader's own scroll. */}
-      <section className="mx-auto w-full max-w-7xl px-6 py-28 md:py-40 lg:px-10">
+      <section className="mx-auto w-full max-w-7xl px-6 py-28 md:py-40 lg:px-10 2xl:max-w-[88rem]">
         <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--signal)]">The problem</p>
         <h2 className="mt-8 max-w-5xl text-[clamp(2.4rem,5.6vw,4.75rem)] font-medium leading-[1.04] tracking-[-0.045em]">
           <RevealText text="Chat history expires." className="text-muted-foreground" />
@@ -123,7 +123,7 @@ export function Landing({ onJoin, onLogin, onConnectKey }: LandingProps) {
         </div>
       </section>
 
-      <footer className="mx-auto flex w-full max-w-7xl flex-col gap-3 px-6 py-8 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between lg:px-10">
+      <footer className="mx-auto flex w-full max-w-7xl flex-col gap-3 px-6 py-8 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between lg:px-10 2xl:max-w-[88rem]">
         <span>Trove. Evidence-backed memory for agents.</span>
         <a href="https://github.com/anunay999/trove" target="_blank" rel="noreferrer noopener" className="font-medium text-foreground transition-colors hover:text-[var(--signal)]">
           View source on GitHub

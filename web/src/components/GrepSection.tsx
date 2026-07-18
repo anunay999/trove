@@ -37,7 +37,7 @@ export function GrepSection() {
   const reduceMotion = useReducedMotion();
 
   return (
-    <section className="mx-auto w-full max-w-7xl px-6 py-24 md:py-32 lg:px-10">
+    <section className="mx-auto w-full max-w-7xl px-6 py-24 md:py-32 lg:px-10 2xl:max-w-[88rem]">
       <div className="max-w-3xl">
         <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--signal)]">Read routing</p>
         <h2 className="mt-5 text-4xl font-medium leading-[1.02] tracking-[-0.045em] md:text-6xl">
