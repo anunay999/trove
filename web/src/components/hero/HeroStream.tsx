@@ -21,15 +21,8 @@ export function HeroStream({ onJoin, onLogin, onConnectKey }: HeroStreamProps) {
 
   return (
     <section className="relative isolate flex min-h-[calc(100dvh-3.5rem)] flex-col overflow-hidden">
-      {/* Blueprint grid and one warm glow — the only set dressing. */}
+      {/* Blueprint grid — the only set dressing. */}
       <div className="hero-grid pointer-events-none absolute inset-0" />
-      <div
-        className="pointer-events-none absolute inset-0"
-        style={{
-          background:
-            "radial-gradient(ellipse 42% 36% at 78% 42%, rgba(242, 196, 107, 0.055), transparent 70%)",
-        }}
-      />
 
       <div className="relative mx-auto grid w-full max-w-7xl flex-1 items-center gap-14 px-6 pb-20 pt-14 lg:grid-cols-[1.02fr_0.98fr] lg:gap-20 lg:px-10 lg:py-16">
         <div className="max-w-xl">
@@ -53,8 +46,8 @@ export function HeroStream({ onJoin, onLogin, onConnectKey }: HeroStreamProps) {
             transition={{ duration: 0.7, delay: 0.55 }}
             className="mt-7 max-w-[27rem] text-base leading-relaxed text-muted-foreground"
           >
-            One evidence-backed memory graph that every agent reads and writes over MCP — so each
-            session starts where the last one ended.
+            A hosted evidence graph for agent memory. Your agents write what they learn over MCP
+            and recall it in later sessions — every fact traced to the source that justifies it.
           </motion.p>
 
           <motion.div

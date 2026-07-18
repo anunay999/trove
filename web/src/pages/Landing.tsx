@@ -13,9 +13,9 @@ type LandingProps = {
 };
 
 const PRIMITIVES: Array<[string, string, string]> = [
-  ["01", "Evidence first", "Every memory points back to the source text that earned it. Nothing enters the graph without a citation."],
-  ["02", "Time aware", "Ask what is true now, or what the graph believed last March. Superseded beliefs stay inspectable."],
-  ["03", "Agent native", "Claude, Codex, Gemini, scripts, and your own tools read and write the same graph over MCP."],
+  ["01", "Evidence first", "Nothing is a free-floating fact. Every memory cites the exact source span that justifies it — or is marked as agent inference."],
+  ["02", "Time aware", "Beliefs change by supersession, never deletion. Ask what is true now, or what the graph believed at any point in the past."],
+  ["03", "Agent native", "One MCP endpoint for Claude, Codex, Cursor, and your scripts. Scoped keys per agent, one private graph per account."],
 ];
 
 /** One word of a scroll-driven reveal: opacity tied to its slice of the scroll range. */
@@ -82,8 +82,8 @@ export function Landing({ onJoin, onLogin, onConnectKey }: LandingProps) {
           className="mt-10 max-w-[38rem] text-base leading-relaxed text-muted-foreground md:text-lg"
         >
           Trove turns sources, notes, and agent discoveries into durable knowledge with proof and
-          history. When a fact changes, the old belief stays inspectable — the latest answer never
-          erases how you got there.
+          history. And every recall strengthens the memories it touches — so the graph gets more
+          useful the longer your agents work.
         </motion.p>
 
         <div className="mt-20 border-t">
@@ -109,15 +109,8 @@ export function Landing({ onJoin, onLogin, onConnectKey }: LandingProps) {
       <DashboardProof />
 
       {/* Closer: one claim, one action, nothing else. */}
-      <section className="relative border-t border-border px-6 py-28 md:py-40 lg:px-10">
-        <div
-          className="pointer-events-none absolute inset-0"
-          style={{
-            background:
-              "radial-gradient(ellipse 46% 38% at 50% 62%, rgba(242, 196, 107, 0.06), transparent 72%)",
-          }}
-        />
-        <div className="relative mx-auto flex max-w-3xl flex-col items-center text-center">
+      <section className="border-t border-border px-6 py-28 md:py-40 lg:px-10">
+        <div className="mx-auto flex max-w-3xl flex-col items-center text-center">
           <h2 className="text-[clamp(2.2rem,4.8vw,3.9rem)] font-medium leading-[1.05] tracking-[-0.045em]">
             Give your agents something worth remembering.
           </h2>

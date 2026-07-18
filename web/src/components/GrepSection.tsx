@@ -21,7 +21,7 @@ const ROUTES = [
     ],
     lead: "Ranked meaning, packed to a budget.",
     body: "Lexical and semantic search together, then one hop out through the graph to pull in what the answer depends on — packed into the token budget you set, with evidence attached.",
-    notes: ["Hybrid lexical + semantic", "One-hop graph expansion", "Returns a brief, not the whole note"],
+    notes: ["Hybrid lexical + semantic", "One-hop graph expansion", "Returns a brief, not the whole note", "Recalling a memory strengthens it"],
   },
 ];
 
