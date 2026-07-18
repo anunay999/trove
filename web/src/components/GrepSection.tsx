@@ -21,7 +21,7 @@ const ROUTES = [
     ],
     lead: "Ranked meaning, packed to a budget.",
     body: "Lexical and semantic search together, then one hop out through the graph to pull in what the answer depends on — packed into the token budget you set, with evidence attached.",
-    notes: ["Hybrid lexical + semantic", "One-hop graph expansion", "Returns a brief, not the whole note"],
+    notes: ["Hybrid lexical + semantic", "One-hop graph expansion", "Returns a brief, not the whole note", "Recalling a memory strengthens it"],
   },
 ];
 
@@ -39,8 +39,8 @@ export function GrepSection() {
   return (
     <section className="mx-auto w-full max-w-7xl px-6 py-24 md:py-32 lg:px-10">
       <div className="max-w-3xl">
-        <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--signal)]">Read routing</p>
-        <h2 className="mt-5 text-4xl font-medium leading-[1.02] tracking-[-0.05em] md:text-6xl">
+        <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--signal)]">Read routing</p>
+        <h2 className="mt-5 text-4xl font-medium leading-[1.02] tracking-[-0.045em] md:text-6xl">
           Your agent already knows
           <br />
           what it&apos;s looking for.
@@ -61,7 +61,10 @@ export function GrepSection() {
             transition={{ duration: 0.6, delay: index * 0.1, ease: [0.16, 1, 0.3, 1] }}
             className={`bg-[var(--card)] p-6 md:p-9 ${index === 0 ? "border-b md:border-b-0 md:border-r" : ""}`}
           >
-            <p className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground">{route.when}</p>
+            <div className="flex items-baseline justify-between gap-4">
+              <p className="font-mono text-lg font-medium tracking-tight text-foreground">{route.tool}</p>
+              <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">{route.when}</p>
+            </div>
 
             <pre className="mt-5 overflow-x-auto rounded-lg border bg-[var(--background)] p-4 font-mono text-[11px] leading-relaxed md:text-[12px]">
               <code>

@@ -40,8 +40,8 @@ export function DashboardProof() {
   return (
     <section className="mx-auto w-full max-w-7xl px-6 py-24 md:py-32 lg:px-10">
       <div className="max-w-3xl">
-        <p className="font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--signal)]">The dashboard</p>
-        <h2 className="mt-5 max-w-2xl text-4xl font-medium leading-[1.02] tracking-[-0.05em] md:text-6xl">
+        <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--signal)]">The dashboard</p>
+        <h2 className="mt-5 max-w-2xl text-4xl font-medium leading-[1.02] tracking-[-0.045em] md:text-6xl">
           Inspect what your agents remember.
         </h2>
         <p className="mt-6 max-w-[37rem] text-base leading-relaxed text-muted-foreground md:text-lg">
@@ -72,8 +72,8 @@ export function DashboardProof() {
                   key={label}
                   className={`p-4 ${index % 2 === 0 ? "border-r" : ""} ${index > 1 ? "border-t" : ""}`}
                 >
-                  <p className="font-mono text-[10px] uppercase tracking-[0.1em] text-muted-foreground">{label}</p>
-                  <p className="mt-2 text-2xl font-medium tracking-tight">{value}</p>
+                  <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">{label}</p>
+                  <p className="tnum mt-2 text-2xl font-medium tracking-tight">{value}</p>
                 </div>
               ))}
             </div>
