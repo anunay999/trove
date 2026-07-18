@@ -117,7 +117,7 @@ export default function App() {
       }`}
     >
       <header className="sticky top-0 z-20 shrink-0 border-b bg-background/90 backdrop-blur">
-        <div className="mx-auto flex h-14 w-full max-w-6xl items-center gap-6 px-6">
+        <div className="mx-auto flex h-14 w-full max-w-7xl items-center gap-6 px-6 2xl:max-w-[88rem]">
           <span className="font-serif text-xl tracking-tight">Trove</span>
           {dashboardReady && (
             <nav className="flex items-center gap-1">

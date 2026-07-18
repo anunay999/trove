@@ -1,32 +1,43 @@
-import { useEffect, useRef, useState } from "react";
+import { useMemo, useRef, useState, useEffect } from "react";
 import ForceGraph2D from "react-force-graph-2d";
 import { typeColor } from "@/lib/viz";
 import type { NodeType } from "@/lib/api";
 
-type Seed = { id: string; title: string; type: NodeType };
+type Seed = {
+  id: string;
+  title: string;
+  type: NodeType;
+  /** What the evidence card shows when the node is inspected. */
+  detail: string;
+  /** The source the memory cites. Sources themselves have none — they are it. */
+  source?: string;
+  /** Set when a newer belief retired this one. It stays on the graph. */
+  retiredBy?: string;
+};
 
 /**
- * A slice of the graph the hero just built, as the dashboard would draw it.
+ * A slice of the graph the hero's stream just wrote, as the dashboard draws it.
  *
- * Same decisions, now with the evidence and infrastructure hanging off them, so
- * the section shows the real explorer rather than an illustration of one.
+ * Retired beliefs ("Deploys go to Fly.io") stay rendered, dimmed and struck —
+ * that is the bitemporal promise made visible, and the reason the supersede
+ * edges get the signal colour instead of blending in.
  */
 const SEEDS: Seed[] = [
-  { id: "trove", title: "trove", type: "project" },
-  { id: "postgres", title: "Postgres 16 + pgvector", type: "infrastructure" },
-  { id: "railway", title: "Moved to Railway", type: "decision" },
-  { id: "fly", title: "Deploys go to Fly.io", type: "decision" },
-  { id: "node-test", title: "Moved to node:test", type: "decision" },
-  { id: "vitest", title: "Tests run on Vitest", type: "decision" },
-  { id: "clerk", title: "Clerk owns auth", type: "decision" },
-  { id: "keys", title: "Keys in .env, never in git", type: "pattern" },
-  { id: "hnsw", title: "HNSW index still off", type: "claim" },
-  { id: "recall", title: "recall falls back to lexical", type: "claim" },
-  { id: "railway-json", title: "railway.json", type: "entity" },
-  { id: "schema-sql", title: "db/schema.sql", type: "entity" },
-  { id: "adr-003", title: "adr-003.md", type: "entity" },
-  { id: "pr-12", title: "pr-12.md", type: "entity" },
-  { id: "anunay", title: "Anunay", type: "person" },
+  { id: "trove", title: "trove", type: "project", detail: "One graph. Every agent, every session, everything they decided to keep." },
+  { id: "postgres", title: "Postgres 16 + pgvector", type: "infrastructure", detail: "The canonical evidence ledger. Vectors are an index over knowledge, not the knowledge.", source: "db/schema.sql" },
+  { id: "railway", title: "Moved to Railway", type: "decision", detail: "Fly kept recycling the Postgres volume, so deploys moved. The old call stays on the record.", source: "railway.json" },
+  { id: "fly", title: "Deploys go to Fly.io", type: "decision", detail: "The only host with a Postgres volume in our region — true when written, retired when it wasn't.", source: "adr-002.md", retiredBy: "Moved to Railway" },
+  { id: "node-test", title: "Moved to node:test", type: "decision", detail: "One less dev dependency to pin, and the suite stopped noticing.", source: "pr-12.md" },
+  { id: "vitest", title: "Tests run on Vitest", type: "decision", detail: "Believed for five months. Superseded, still inspectable.", source: "package.json", retiredBy: "Moved to node:test" },
+  { id: "clerk", title: "Clerk owns auth", type: "decision", detail: "Sessions and OAuth stay out of the graph entirely — auth is a boundary, not a memory.", source: "adr-003.md" },
+  { id: "keys", title: "Keys in .env, never in git", type: "pattern", detail: "The repo can't tell an agent this; the graph has to. That's what it's for.", source: "runbook" },
+  { id: "hnsw", title: "HNSW index still off", type: "claim", detail: "Personal scale doesn't feel it yet. Revisit when the graph does.", source: "db/schema.sql" },
+  { id: "recall", title: "recall falls back to lexical", type: "claim", detail: "While HNSW is off, semantic search quietly degrades to lexical — documented so no agent re-debugs it.", source: "queryBuilder.ts" },
+  { id: "railway-json", title: "railway.json", type: "entity", detail: "Raw source. Cited by: Moved to Railway." },
+  { id: "schema-sql", title: "db/schema.sql", type: "entity", detail: "Raw source. Cited by: HNSW index still off." },
+  { id: "adr-003", title: "adr-003.md", type: "entity", detail: "Raw source. Cited by: Clerk owns auth." },
+  { id: "pr-12", title: "pr-12.md", type: "entity", detail: "Raw source. Cited by: Moved to node:test." },
+  { id: "anunay", title: "Anunay", type: "person", detail: "Owns the graph. Approves the waitlist." },
 ];
 
 const LINKS: { source: string; target: string; predicate: string }[] = [
@@ -50,13 +61,36 @@ const LINKS: { source: string; target: string; predicate: string }[] = [
 
 const degreeOf = (id: string) => LINKS.filter((l) => l.source === id || l.target === id).length;
 
+/** Legend labels — "entity" reads as "source" here, because that is the story. */
+const TYPE_LABEL: Partial<Record<NodeType, string>> = {
+  project: "project",
+  infrastructure: "infra",
+  decision: "decision",
+  pattern: "pattern",
+  claim: "claim",
+  entity: "source",
+  person: "person",
+};
+
+const LEGEND_TYPES = ["project", "decision", "claim", "pattern", "source", "person"] as const;
+const LEGEND_COLOR: Record<(typeof LEGEND_TYPES)[number], string> = {
+  project: typeColor("project", true),
+  decision: typeColor("decision", true),
+  claim: typeColor("claim", true),
+  pattern: typeColor("pattern", true),
+  source: typeColor("entity", true),
+  person: typeColor("person", true),
+};
+
+const seedById = new Map(SEEDS.map((s) => [s.id, s]));
+
 /**
- * The dashboard's own force graph, on seeded data.
+ * The dashboard's own force graph, on seeded data — now inspectable.
  *
- * Deliberately the same renderer as the explorer — `ForceGraph2D` with the shared
- * `typeColor` scale and degree-scaled radii — so what the page shows is what the
- * product draws. It is lazy-loaded: the library is far too heavy to sit in the
- * landing's initial bundle.
+ * Same renderer as the explorer (`ForceGraph2D`, shared `typeColor`, degree-scaled
+ * radii), so what the page shows is what the product draws. Click a node and the
+ * evidence card opens its source; that interaction is the section's headline
+ * made literal. Lazy-loaded: the library is too heavy for the landing bundle.
  */
 export default function MiniGraph({ className = "" }: { className?: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -65,6 +99,8 @@ export default function MiniGraph({ className = "" }: { className?: string }) {
   const graphRef = useRef<any>(null);
   const fitted = useRef(false);
   const [size, setSize] = useState({ width: 0, height: 0 });
+  const [hoverId, setHoverId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   useEffect(() => {
     const element = containerRef.current;
@@ -76,13 +112,48 @@ export default function MiniGraph({ className = "" }: { className?: string }) {
     return () => observer.disconnect();
   }, []);
 
-  const data = {
-    nodes: SEEDS.map((seed) => ({ ...seed, degree: degreeOf(seed.id) })),
-    links: LINKS.map((link) => ({ ...link })),
+  const neighbors = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const link of LINKS) {
+      if (!map.has(link.source)) map.set(link.source, new Set());
+      if (!map.has(link.target)) map.set(link.target, new Set());
+      map.get(link.source)!.add(link.target);
+      map.get(link.target)!.add(link.source);
+    }
+    return map;
+  }, []);
+
+  // Stable identity: a fresh object per render would reheat the simulation on
+  // every hover/selection change, and the nodes would jump out from under clicks.
+  const data = useMemo(
+    () => ({
+      nodes: SEEDS.map((seed) => ({ ...seed, degree: degreeOf(seed.id) })),
+      links: LINKS.map((link) => ({ ...link })),
+    }),
+    [],
+  );
+
+  const selected = selectedId ? seedById.get(selectedId) : undefined;
+
+  /** Dimming pass: when hovering, only the node and its neighbours stay lit. */
+  const nodeAlpha = (id: string, retired: boolean) => {
+    const base = retired ? 0.45 : 1;
+    if (!hoverId) return base;
+    return id === hoverId || neighbors.get(hoverId)?.has(id) ? base : 0.12;
+  };
+
+  const linkState = (link: { source: unknown; target: unknown; predicate: string }) => {
+    const sourceId = typeof link.source === "object" ? (link.source as Seed).id : String(link.source);
+    const targetId = typeof link.target === "object" ? (link.target as Seed).id : String(link.target);
+    const connected = hoverId != null && (sourceId === hoverId || targetId === hoverId);
+    if (link.predicate === "supersedes") return { color: "rgba(242, 196, 107, 0.55)", width: 1.2, dash: [4, 3] as number[] };
+    if (hoverId && !connected) return { color: "rgba(237, 235, 228, 0.04)", width: 1, dash: [] };
+    if (connected) return { color: "rgba(237, 235, 228, 0.5)", width: 1.4, dash: [] };
+    return { color: "rgba(237, 235, 228, 0.16)", width: 1, dash: [] };
   };
 
   return (
-    <div ref={containerRef} className={`h-full w-full ${className}`}>
+    <div ref={containerRef} className={`relative h-full w-full ${className}`}>
       {size.width > 0 && (
         <ForceGraph2D
           ref={graphRef}
@@ -90,14 +161,21 @@ export default function MiniGraph({ className = "" }: { className?: string }) {
           height={size.height}
           graphData={data}
           backgroundColor="rgba(0,0,0,0)"
-          nodeLabel={() => ""}
+          nodeLabel={(node) => (node as Seed).title}
           linkLabel={(link: { predicate: string }) => link.predicate}
-          linkColor={() => "rgba(237, 235, 228, 0.16)"}
-          linkWidth={1}
+          linkColor={(link) => linkState(link as { source: unknown; target: unknown; predicate: string }).color}
+          linkWidth={(link) => linkState(link as { source: unknown; target: unknown; predicate: string }).width}
+          linkLineDash={(link) => linkState(link as { source: unknown; target: unknown; predicate: string }).dash}
           linkDirectionalArrowLength={2.5}
           linkDirectionalArrowRelPos={1}
           cooldownTicks={90}
           enableZoomInteraction={false}
+          onNodeHover={(node) => {
+            setHoverId(node ? (node as Seed).id : null);
+            if (containerRef.current) containerRef.current.style.cursor = node ? "pointer" : "";
+          }}
+          onNodeClick={(node) => setSelectedId((current) => (current === (node as Seed).id ? null : (node as Seed).id))}
+          onBackgroundClick={() => setSelectedId(null)}
           onEngineStop={() => {
             if (fitted.current || !graphRef.current) return;
             fitted.current = true;
@@ -105,21 +183,94 @@ export default function MiniGraph({ className = "" }: { className?: string }) {
           }}
           nodeCanvasObject={(rawNode, ctx, globalScale) => {
             const node = rawNode as Seed & { degree: number; x?: number; y?: number };
+            const retired = Boolean(node.retiredBy);
+            const alpha = nodeAlpha(node.id, retired);
             const radius = 2.5 + Math.sqrt(node.degree + 1) * 1.3;
+
+            ctx.globalAlpha = alpha;
             ctx.beginPath();
             ctx.arc(node.x ?? 0, node.y ?? 0, radius, 0, 2 * Math.PI);
             ctx.fillStyle = typeColor(node.type, true);
             ctx.fill();
 
+            if (node.id === selectedId) {
+              ctx.beginPath();
+              ctx.arc(node.x ?? 0, node.y ?? 0, radius + 3 / globalScale, 0, 2 * Math.PI);
+              ctx.strokeStyle = "rgba(242, 196, 107, 0.9)";
+              ctx.lineWidth = 1 / globalScale;
+              ctx.stroke();
+            }
+
             const label = node.title.length > 26 ? `${node.title.slice(0, 24)}…` : node.title;
-            ctx.font = `${10 / globalScale}px "SF Pro Display", system-ui, sans-serif`;
+            const fontSize = 10 / globalScale;
+            ctx.font = `${fontSize}px "Geist Variable", system-ui, sans-serif`;
             ctx.textAlign = "center";
             ctx.textBaseline = "top";
-            ctx.fillStyle = "rgba(237, 235, 228, 0.72)";
-            ctx.fillText(label, node.x ?? 0, (node.y ?? 0) + radius + 2.5 / globalScale);
+            const labelY = (node.y ?? 0) + radius + 2.5 / globalScale;
+            ctx.fillStyle = retired ? "rgba(237, 235, 228, 0.5)" : "rgba(237, 235, 228, 0.72)";
+            ctx.fillText(label, node.x ?? 0, labelY);
+
+            if (retired) {
+              // Retired, not deleted: the label carries the strike on the record.
+              const width = ctx.measureText(label).width;
+              const strikeY = labelY + fontSize * 0.55;
+              ctx.beginPath();
+              ctx.moveTo((node.x ?? 0) - width / 2, strikeY);
+              ctx.lineTo((node.x ?? 0) + width / 2, strikeY);
+              ctx.strokeStyle = "rgba(242, 196, 107, 0.6)";
+              ctx.lineWidth = 0.8 / globalScale;
+              ctx.stroke();
+            }
+            ctx.globalAlpha = 1;
           }}
         />
       )}
+
+      {/* Type legend — teaches the model without leaving the demo. */}
+      <div className="pointer-events-none absolute right-4 top-4 grid grid-cols-2 gap-x-4 gap-y-1.5">
+        {LEGEND_TYPES.map((type) => (
+          <span key={type} className="flex items-center gap-1.5 font-mono text-[9px] uppercase tracking-[0.08em] text-muted-foreground">
+            <span className="size-1.5 rounded-full" style={{ background: LEGEND_COLOR[type] }} />
+            {type}
+          </span>
+        ))}
+      </div>
+
+      {/* The evidence card: the section's promise, working. */}
+      <div className="absolute bottom-4 left-4 max-w-[17rem] rounded-md border bg-[var(--card)]/90 px-3.5 py-3 backdrop-blur">
+        {selected ? (
+          <>
+            <p className="font-mono text-[9px] uppercase tracking-[0.1em]" style={{ color: typeColor(selected.type, true) }}>
+              {TYPE_LABEL[selected.type] ?? selected.type}
+              {selected.retiredBy && <span className="text-muted-foreground"> · retired</span>}
+            </p>
+            <p className={`mt-1.5 text-[13px] font-medium leading-snug ${selected.retiredBy ? "superseded-line" : ""}`}>
+              {selected.title}
+            </p>
+            <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">{selected.detail}</p>
+            <p className="mt-2 font-mono text-[10px] text-muted-foreground">
+              {selected.source && (
+                <>
+                  <span className="text-[var(--signal)]">←</span> {selected.source}
+                </>
+              )}
+              {selected.retiredBy && (
+                <>
+                  {selected.source && <span className="mx-2 text-border">·</span>}
+                  superseded by <span className="text-foreground/80">{selected.retiredBy}</span>
+                </>
+              )}
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="font-mono text-[9px] uppercase tracking-[0.1em] text-[var(--signal)]">Inspect</p>
+            <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+              Click a node — every memory opens the source text that earned it.
+            </p>
+          </>
+        )}
+      </div>
     </div>
   );
 }

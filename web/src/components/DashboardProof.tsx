@@ -1,5 +1,8 @@
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
+import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
+import { formatDay } from "@/lib/viz";
 
 // The force-graph library is far heavier than the rest of the landing put
 // together, so it is split out and only fetched once this section is near.
@@ -30,7 +33,23 @@ const STATS = [
   ["Superseded", "182"],
 ];
 
-const ACTIVITY = [18, 30, 24, 44, 36, 58, 48, 69, 61, 82, 74, 92];
+/*
+ * Seeded writes for the mock workspace: twelve real week-starts ending today,
+ * counts organic — quiet early weeks, a couple of dips, no round numbers.
+ */
+const WEEKLY_WRITES = [14, 22, 19, 31, 38, 33, 47, 52, 49, 63, 71, 86];
+
+const activityData = WEEKLY_WRITES.map((writes, index) => {
+  const week = new Date();
+  week.setDate(week.getDate() - (WEEKLY_WRITES.length - 1 - index) * 7);
+  const key = week.toISOString().slice(0, 10);
+  return { date: key, day: formatDay(key), writes };
+});
+
+/* Fixed colour, not a theme pair: the landing is dark regardless of html.dark. */
+const activityConfig = {
+  writes: { label: "Writes", color: "#f2c46b" },
+} satisfies ChartConfig;
 
 export function DashboardProof() {
   const reduceMotion = useReducedMotion();
@@ -38,7 +57,7 @@ export function DashboardProof() {
   const near = useNear(ref);
 
   return (
-    <section className="mx-auto w-full max-w-7xl px-6 py-24 md:py-32 lg:px-10">
+    <section className="mx-auto w-full max-w-7xl px-6 py-24 md:py-32 lg:px-10 2xl:max-w-[88rem]">
       <div className="max-w-3xl">
         <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--signal)]">The dashboard</p>
         <h2 className="mt-5 max-w-2xl text-4xl font-medium leading-[1.02] tracking-[-0.045em] md:text-6xl">
@@ -83,31 +102,29 @@ export function DashboardProof() {
                 <p className="text-sm font-medium">Memory activity</p>
                 <span className="font-mono text-[10px] text-muted-foreground">writes / week</span>
               </div>
-              <div className="mt-6 flex h-24 items-end gap-2 border-b pb-px">
-                {ACTIVITY.map((height, index) => (
-                  <motion.span
-                    key={`${height}-${index}`}
-                    initial={reduceMotion ? false : { scaleY: 0 }}
-                    whileInView={{ scaleY: 1 }}
-                    viewport={{ once: true }}
-                    transition={{ duration: 0.55, delay: index * 0.035, ease: [0.16, 1, 0.3, 1] }}
-                    className="flex-1 origin-bottom bg-[var(--signal)] opacity-70"
-                    style={{ height: `${height}%` }}
+              <ChartContainer config={activityConfig} className="mt-6 aspect-auto h-32 w-full">
+                <AreaChart data={activityData} margin={{ top: 6, right: 4, bottom: 0, left: 0 }}>
+                  <CartesianGrid vertical={false} strokeOpacity={0.35} />
+                  <XAxis dataKey="day" tickLine={false} axisLine={false} minTickGap={32} tickMargin={8} />
+                  <YAxis tickLine={false} axisLine={false} width={26} allowDecimals={false} />
+                  <ChartTooltip content={<ChartTooltipContent indicator="line" />} />
+                  <Area
+                    dataKey="writes"
+                    type="monotone"
+                    fill="var(--color-writes)"
+                    fillOpacity={0.16}
+                    stroke="var(--color-writes)"
+                    strokeWidth={1.5}
+                    isAnimationActive={!reduceMotion}
                   />
-                ))}
-              </div>
+                </AreaChart>
+              </ChartContainer>
             </div>
           </div>
 
-          {/* The explorer itself, on seeded data — not a drawing of it. */}
+          {/* The explorer itself, on seeded data — not a drawing of it. Click a node. */}
           <div className="relative h-[26rem] bg-[var(--background)] lg:h-[30rem]">
             <Suspense fallback={null}>{near && <MiniGraph />}</Suspense>
-            <div className="pointer-events-none absolute bottom-4 left-4 rounded-md border bg-[var(--card)]/90 px-3 py-2 backdrop-blur">
-              <p className="font-mono text-[9px] uppercase tracking-[0.1em] text-[var(--signal)]">Evidence attached</p>
-              <p className="mt-1.5 text-[11px] text-muted-foreground">
-                Every node opens the source text that earned it.
-              </p>
-            </div>
           </div>
         </div>
       </motion.div>

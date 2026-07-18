@@ -69,7 +69,7 @@ export function MemoryStream() {
 
   return (
     <div className="overflow-hidden rounded-2xl border bg-[var(--card)]/70 backdrop-blur">
-      <div className="flex h-11 items-center justify-between border-b px-5">
+      <div className="flex h-11 items-center justify-between border-b px-5 2xl:h-12">
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
           trove · memory stream
         </span>
@@ -80,7 +80,7 @@ export function MemoryStream() {
       </div>
 
       {/* Decorative replay of the pitch, not data — keep it out of the a11y tree. */}
-      <div aria-hidden="true" className="stream-mask flex h-[23rem] flex-col justify-end gap-4 overflow-hidden p-5 md:h-[25rem]">
+      <div aria-hidden="true" className="stream-mask flex h-[23rem] flex-col justify-end gap-4 overflow-hidden p-5 md:h-[25rem] 2xl:h-[31rem] 2xl:gap-5 2xl:p-6">
         <AnimatePresence initial={false}>
           {visible.map((row, index) => (
             <motion.div
