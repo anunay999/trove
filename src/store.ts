@@ -166,16 +166,18 @@ export class InMemoryGraphStore implements GraphStore {
   }
 
   async search(input: SearchInput): Promise<SearchResult> {
-    const lexical = this.lexicalSearch(input);
-    if (input.mode === "lexical") return lexical;
+    const provider = input.mode === "lexical" ? null : createEmbeddingProviderFromEnv();
 
-    const provider = createEmbeddingProviderFromEnv();
-    if (!provider) {
-      return input.mode === "semantic" ? { nodes: [], textUnits: [] } : lexical;
+    // Mirrors PgGraphStore.search: a semantic-only search must not run (and
+    // discard) a lexical pass. No Promise.all here — this driver's lexical arm
+    // is synchronous, so there is nothing to overlap.
+    if (input.mode === "semantic") {
+      return provider ? this.semanticSearch(input, provider) : { nodes: [], textUnits: [] };
     }
+    const lexical = this.lexicalSearch(input);
+    if (input.mode === "lexical" || !provider) return lexical;
 
     const semantic = await this.semanticSearch(input, provider);
-    if (input.mode === "semantic") return semantic;
 
     return {
       nodes: reciprocalRankFusion(lexical.nodes, semantic.nodes),

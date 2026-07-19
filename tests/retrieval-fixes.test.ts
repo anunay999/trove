@@ -2,7 +2,7 @@ import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import pg from "pg";
-import { suiteStore, closeStore, hasPostgres, sleep } from "./helpers.js";
+import { suiteStore, closeStore, hasPostgres, sleep, isolateDatabase } from "./helpers.js";
 import type { GraphJob, GraphOperationContext } from "../src/graphCore.js";
 import { FakeEmbeddingProvider, cosineSimilarity } from "../src/embeddings.js";
 import { normalizeRetrievalQuery } from "../src/queryNormalize.js";
@@ -13,42 +13,9 @@ import { UserStore } from "../src/users.js";
 process.env.TROVE_EMBEDDING_PROVIDER = "fake";
 delete process.env.TROVE_SEMANTIC_MAX_DISTANCE;
 
-/**
- * Sibling pg suites share DATABASE_URL and some assert on GLOBAL job state
- * (e.g. "no pending jobs after drain"). This suite runs many captures, so it
- * gets its own freshly-created database per run and can neither break nor be
- * broken by concurrent suites.
- */
-async function isolateDatabaseUrl(baseUrl: string): Promise<string> {
-  const dbName = "trove_retrieval_fixes_test";
-  const admin = new pg.Client({ connectionString: baseUrl });
-  await admin.connect();
-  try {
-    await admin.query(`drop database if exists ${dbName} with (force)`);
-    await admin.query(`create database ${dbName}`);
-  } finally {
-    await admin.end();
-  }
-  const url = new URL(baseUrl);
-  url.pathname = `/${dbName}`;
-  const client = new pg.Client({ connectionString: url.toString() });
-  await client.connect();
-  try {
-    await client.query(await readFile(new URL("../db/schema.sql", import.meta.url), "utf8"));
-    const migrationsDir = new URL("../db/migrations/", import.meta.url);
-    const migrations = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
-    for (const file of migrations) {
-      await client.query(await readFile(new URL(file, migrationsDir), "utf8"));
-    }
-  } finally {
-    await client.end();
-  }
-  return url.toString();
-}
-
-if (process.env.DATABASE_URL && process.env.TROVE_STORE !== "memory") {
-  process.env.DATABASE_URL = await isolateDatabaseUrl(process.env.DATABASE_URL);
-}
+// This suite runs many captures and asserts on queue state; it gets its own
+// database so it can neither break nor be broken by concurrent suites.
+await isolateDatabase("retrieval-fixes");
 
 const { store, driver, context, stamp } = suiteStore("retrieval-fixes");
 

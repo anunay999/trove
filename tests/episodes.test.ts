@@ -1,7 +1,11 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { ingestEpisodic, splitLogicalSegments } from "../src/graphCore.js";
-import { suiteStore, closeStore } from "./helpers.js";
+import { suiteStore, closeStore, isolateDatabase } from "./helpers.js";
+
+// Asserts on exact source counts for a re-ingested log, so it must not see
+// sources left behind by a previous run or a parallel suite. Own database.
+await isolateDatabase("episodes");
 
 const logV1 = [
   "# Log",
