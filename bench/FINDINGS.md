@@ -69,8 +69,30 @@ Lifting published numbers is not an option — they are mutually incomparable. Z
 (third party); Mem0 at 94.4%, 49.0% and ~85%. Much of the ecosystem compares one vendor's *overall*
 against a rival's *sub-task*.
 
-**To close:** run `compare -p trove,rag` at minimum (`rag` is built in and free). Add `mem0`, `zep`,
-`supermemory` if their API keys are funded. Free tiers likely will not cover a full run.
+**Partially attempted, 2026-07-19.** `compare -p trove,rag` completed on 10 questions with
+`questionDate` fixed:
+
+| Provider | Accuracy | Search | Answer | Hit@K | Precision |
+|---|---|---|---|---|---|
+| trove | 40.0% (4/10) | **109 ms** | 1,284 ms | 90.0% | **22.0%** |
+| rag | 30.0% (3/10) | 437 ms | 1,605 ms | **100.0%** | 15.0% |
+
+Ten questions is one question of separation — **not a result**. Two things in it are worth keeping:
+search latency is ~4× better (the HNSW node-path fix showing end-to-end), and per-category,
+**temporal-reasoning scored 0% against rag's 66.7%**, which is a real signal pointing at
+`queryNormalize` stripping `today`/`now`/`ago`/`many`/`count`.
+
+**Mem0 did not complete.** Four attempts. First failed because the API key never reached the harness
+(`. .env` in zsh searches `$PATH`, not the cwd, unless written `./.env` — and the error was
+redirected away). After that, one question sat `in_progress` in Mem0's cloud indexing phase;
+`--from-phase indexing` does not reset an `in_progress` item, and a surgical checkpoint reset to
+`pending` did restart it (52 episodes) but it never converged within ~1 hour of wall clock. State
+left at `ingest 10/10, indexing 9/10`. This appears to be provider-side latency rather than anything
+fixable here.
+
+**To close:** re-attempt `mem0` when its indexing is responsive, and add `zep` / `supermemory` if
+their keys are funded — free tiers likely will not cover a full run. Note that a stuck `in_progress`
+phase blocks resume and needs the checkpoint reset above.
 
 ### 2. Sample size is 3
 
