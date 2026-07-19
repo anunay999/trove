@@ -61,8 +61,20 @@ if ! grep -q 'case "trove"' src/utils/config.ts; then
   echo "    patched src/utils/config.ts (getProviderConfig)"
 fi
 
+# 5. UPSTREAM BUG: the orchestrator drops questionDate.
+#    The LongMemEval loader puts it in metadata.questionDate
+#    (benchmarks/longmemeval/index.ts), checkpoint.initQuestion accepts it, and
+#    every answerPrompt renders "Question Date: ...". Only the caller fails to
+#    forward it, so every question is answered with no notion of "today" and the
+#    temporal-reasoning category is unanswerable regardless of retrieval quality.
+if ! grep -q "questionDate: q.metadata" src/orchestrator/index.ts; then
+  perl -0pi -e 's|(\n(\s+)questionType: q\.questionType,\n)|$1$2questionDate: q.metadata?.questionDate as string \| undefined,\n|' src/orchestrator/index.ts
+  echo "    patched src/orchestrator/index.ts (forward questionDate)"
+fi
+
 # Verify the patches actually landed rather than trusting the regexes.
 missing=""
+grep -q "questionDate: q.metadata" src/orchestrator/index.ts || missing="$missing questionDate"
 grep -q '"trove"' src/types/provider.ts || missing="$missing ProviderName"
 grep -q '^  trove: TroveProvider,' src/providers/index.ts || missing="$missing registry"
 grep -q 'case "trove"' src/utils/config.ts || missing="$missing config"
