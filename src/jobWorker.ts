@@ -1,4 +1,4 @@
-import type { GraphJob, GraphOperationContext, GraphStore } from "./graphCore.js";
+import type { EmbeddingCounts, GraphJob, GraphOperationContext, GraphStore } from "./graphCore.js";
 
 const WORKER_CONTEXT: GraphOperationContext = {
   actorId: "job-worker",
@@ -12,15 +12,15 @@ export function embeddingDrainRemaining(job: GraphJob | null): number {
   if (!job || job.kind !== "refresh_embeddings" || job.status !== "succeeded") return 0;
   const result = job.result ?? {};
   if (result.status !== "refreshed") return 0;
-  const missing = (result.missingBefore ?? {}) as Record<string, unknown>;
-  const before = Number(missing.nodeRevisions ?? 0) + Number(missing.textUnits ?? 0);
-  // pgStore reports `embedded` as { nodeRevisions, textUnits }; older results
-  // used a bare number. Number(object) is NaN, which silently zeroed the drain.
-  const raw = result.embedded;
-  const embedded = typeof raw === "number"
-    ? raw
-    : Number((raw as Record<string, unknown> | undefined)?.nodeRevisions ?? 0) +
-      Number((raw as Record<string, unknown> | undefined)?.textUnits ?? 0);
+  // Both halves are EmbeddingCounts (see RefreshEmbeddingsResult). Summing them
+  // through one helper keeps the two sides from drifting apart again — reading
+  // `embedded` as a bare number is what produced NaN and stalled the drain.
+  const sum = (counts: unknown): number => {
+    const value = (counts ?? {}) as Partial<EmbeddingCounts>;
+    return Number(value.nodeRevisions ?? 0) + Number(value.textUnits ?? 0);
+  };
+  const before = sum(result.missingBefore);
+  const embedded = sum(result.embedded);
   if (!Number.isFinite(before) || !Number.isFinite(embedded)) return 0;
   return Math.max(0, before - embedded);
 }

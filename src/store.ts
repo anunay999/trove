@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { normalizeRetrievalQuery, retrievalQueryTerms } from "./queryNormalize.js";
+import { contentTerms, normalizeRetrievalQuery, retrievalQueryTerms } from "./queryNormalize.js";
 import type {
   AnnotateInput,
   CaptureInput,
@@ -228,8 +228,11 @@ export class InMemoryGraphStore implements GraphStore {
     const textUnits = input.includeTextUnits
       ? [...this.textUnits.values()]
         .filter((unit) => {
+          // `text.includes(query)` is subsumed: every term is a substring of the
+          // lowercased query, and `terms` is never empty (normalizeRetrievalQuery
+          // falls back to the original), so the term test alone is equivalent.
           const text = unit.text.toLowerCase();
-          return text.includes(query) || terms.some((term) => text.includes(term));
+          return terms.some((term) => text.includes(term));
         })
         .slice(0, input.limit)
       : [];
@@ -1149,25 +1152,25 @@ function edgeValidAt(edge: GraphEdge, validAt: string): boolean {
   return true;
 }
 
-/**
- * Minimal English stop-word set mirroring what the pg english dictionary
- * drops; a query with no surviving token has no lexical signal (F6).
- */
-const STOP_WORDS = new Set([
-  "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
-  "how", "if", "in", "into", "is", "it", "no", "not", "of", "on", "or",
-  "so", "such", "that", "the", "their", "then", "there", "these", "they",
-  "this", "to", "was", "what", "when", "where", "which", "who", "will", "with",
-]);
-
 function hasLexicalSignal(query: string): boolean {
-  return tokenSet(query).size > 0;
+  // contentTerms, NOT retrievalQueryTerms: the latter falls back to the original
+  // string when every token is a stop word, which would let "the" through the
+  // gate and reinstate the substring-noise behavior F6/R7 exist to prevent.
+  return contentTerms(query).length > 0;
 }
 
+/**
+ * Content terms of a DOCUMENT, using the same vocabulary as the query side.
+ *
+ * Both sides must strip the same words. `tokenOverlap` is |query ∩ text| /
+ * |query|, so a term that survives query normalization but is stripped from
+ * every document can never match while still inflating the denominator — which
+ * is what happened when this used a second, older stop-word list: "not"/"with"
+ * survived `retrievalQueryTerms` but were dropped here, capping a perfect
+ * negation match at 0.5.
+ */
 function tokenSet(text: string): Set<string> {
-  return new Set(
-    text.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length > 0 && !STOP_WORDS.has(token)),
-  );
+  return new Set(contentTerms(text));
 }
 
 /** |query ∩ text| / |query| — coverage of the query terms. */

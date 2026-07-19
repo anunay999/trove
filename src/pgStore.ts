@@ -344,11 +344,18 @@ export class PgGraphStore implements GraphStore {
     // natural-language questions).
     const tsquery = await this.pool.query(
       `select websearch_to_tsquery('english', $1)::text as query,
-              (select string_agg(lexeme, ' | ') from unnest(tsvector_to_array(to_tsvector('english', $1))) as terms(lexeme)) as or_query`,
+              (select string_agg(lexeme, ' | ') from unnest(tsvector_to_array(to_tsvector('english', $1))) as terms(lexeme)) as or_query,
+              (select count(*)::int from unnest(tsvector_to_array(to_tsvector('english', $1)))) as lexeme_count`,
       [retrievalQuery],
     );
     const tsqueryText = String(tsquery.rows[0]?.query ?? "");
     const orQueryText = String(tsquery.rows[0]?.or_query ?? "");
+    // Gate the fallback on lexeme COUNT, not on the two strings differing:
+    // websearch_to_tsquery quotes lexemes ('wed') while string_agg does not
+    // (wed), so `orQueryText !== tsqueryText` is true even for a single-term
+    // query and every miss fired a second, byte-identical query. With one
+    // lexeme the OR form is identical in meaning, so there is nothing to retry.
+    const hasOrFallback = Number(tsquery.rows[0]?.lexeme_count ?? 0) > 1 && orQueryText.length > 0;
     if (retrievalQuery.length < 3 || tsqueryText.length === 0) {
       return { nodes: [], textUnits: [] };
     }
@@ -391,10 +398,13 @@ export class PgGraphStore implements GraphStore {
       this.pool.query(nodeSql, [
         input.query, typeFilter, input.limit, `%${input.query}%`, !scope.scoped, scope.ownerId, effectiveTsquery,
       ]);
-    let nodeResult = await runNodeSearch(tsqueryText);
-    if (nodeResult.rows.length === 0 && orQueryText.length > 0 && orQueryText !== tsqueryText) {
-      nodeResult = await runNodeSearch(orQueryText);
-    }
+    // Strict AND first so precision is preserved whenever every term co-occurs;
+    // the looser OR form only runs when AND found nothing at all.
+    const withOrFallback = async (run: (tsquery: string) => Promise<pg.QueryResult>) => {
+      const strict = await run(tsqueryText);
+      return strict.rows.length > 0 || !hasOrFallback ? strict : run(orQueryText);
+    };
+    const nodeResult = await withOrFallback(runNodeSearch);
 
     const unitSql = `with q as (select $5::tsquery as query)
        select id, source_id, ordinal, section_path, char_start, char_end, text, content_sha256,
@@ -414,13 +424,9 @@ export class PgGraphStore implements GraphStore {
       this.pool.query(unitSql, [
         input.limit, `%${input.query}%`, !scope.scoped, scope.ownerId, effectiveTsquery,
       ]);
-    let textUnitResult = { rows: [] as Record<string, unknown>[] };
-    if (input.includeTextUnits) {
-      textUnitResult = await runUnitSearch(tsqueryText);
-      if (textUnitResult.rows.length === 0 && orQueryText.length > 0 && orQueryText !== tsqueryText) {
-        textUnitResult = await runUnitSearch(orQueryText);
-      }
-    }
+    const textUnitResult = input.includeTextUnits
+      ? await withOrFallback(runUnitSearch)
+      : { rows: [] as Record<string, unknown>[] };
 
     return {
       nodes: nodeResult.rows.map(mapNode),
@@ -485,19 +491,46 @@ export class PgGraphStore implements GraphStore {
       ],
     );
 
-    const textUnitResult = input.includeTextUnits
-      ? await this.pool.query(
-        `select tu.id, tu.source_id, tu.ordinal, tu.section_path, tu.char_start, tu.char_end, tu.text, tu.content_sha256
-         from embedding e
-         join text_unit tu on tu.id = e.owner_id and e.owner_table = 'text_unit'
-         where e.model = ${p(1)}
-           and ${distExpr} < ${p(5)}
-           and (${p(2)} or tu.owner_id = ${p(3)})
-         order by ${distExpr}
-         limit ${p(4)}`,
-        [...vectors, provider.model, !scope.scoped, scope.ownerId, input.limit, maxDistance],
+    // One indexable probe PER vector, merged in JS — never `least(...)` here.
+    // `order by e.embedding <=> $1::vector limit N` is the only shape pgvector
+    // can serve from embedding_hnsw_idx (migration 009); wrapping it in least()
+    // makes the sort key a non-indexable expression and silently degrades this
+    // to a sequential scan over every embedding row. Verified with
+    // enable_seqscan=off: the single-vector form plans an
+    // "Index Scan using embedding_hnsw_idx", the least() form has no index path
+    // at all. That mattered precisely on natural-language queries, since those
+    // are the ones where normalized !== raw and a second vector exists.
+    // Two indexed probes beat one unindexed scan; the union is exact because
+    // min-over-vectors of a per-row distance is the same set either way.
+    const unitSql = `select tu.id, tu.source_id, tu.ordinal, tu.section_path, tu.char_start, tu.char_end, tu.text, tu.content_sha256,
+              (e.embedding <=> $1::vector) as distance
+       from embedding e
+       join text_unit tu on tu.id = e.owner_id and e.owner_table = 'text_unit'
+       where e.model = $2
+         and (e.embedding <=> $1::vector) < $6
+         and ($3 or tu.owner_id = $4)
+       order by e.embedding <=> $1::vector
+       limit $5`;
+    const unitRowsByVector = input.includeTextUnits
+      ? await Promise.all(
+        vectors.map((vector) =>
+          this.pool.query(unitSql, [vector, provider.model, !scope.scoped, scope.ownerId, input.limit, maxDistance]),
+        ),
       )
-      : { rows: [] };
+      : [];
+    // Keep each unit once at its best (smallest) distance across the probes.
+    const bestUnits = new Map<string, Record<string, unknown>>();
+    for (const result of unitRowsByVector) {
+      for (const row of result.rows) {
+        const existing = bestUnits.get(String(row.id));
+        if (!existing || Number(row.distance) < Number(existing.distance)) bestUnits.set(String(row.id), row);
+      }
+    }
+    const textUnitResult = {
+      rows: [...bestUnits.values()]
+        .sort((left, right) => Number(left.distance) - Number(right.distance))
+        .slice(0, input.limit),
+    };
 
     return {
       nodes: nodeResult.rows.map(mapNode),

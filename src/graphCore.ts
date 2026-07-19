@@ -51,6 +51,21 @@ export type GraphEventFeed = {
   hasMore: boolean;
 };
 
+/**
+ * Row counts for the two owner types the embedding backfill touches.
+ *
+ * `GraphJob.result` is an untyped `Record<string, unknown>`, so producer and
+ * consumer were never checked against each other — that is how `Number(object)`
+ * -> NaN compiled silently and stalled the drain loop. Anything reading a
+ * refresh_embeddings result should narrow through these types rather than
+ * re-deriving the shape.
+ */
+export type EmbeddingCounts = { nodeRevisions: number; textUnits: number };
+
+export type RefreshEmbeddingsResult =
+  | { status: "refreshed"; missingBefore: EmbeddingCounts; embedded: EmbeddingCounts; provider: string; model: string }
+  | { status: "skipped_no_embedding_provider"; missing: EmbeddingCounts; provider: string; model: string };
+
 export type GraphJob = {
   id: string;
   kind: GraphJobKind;
