@@ -41,6 +41,8 @@ type IngestResult = { documentIds: string[]; taskIds?: string[] };
 
 const EXTRACT = process.env.TROVE_BENCH_EXTRACT !== "0";
 const EXTRACT_MODEL = process.env.TROVE_BENCH_EXTRACT_MODEL ?? "gpt-4o-mini";
+/** Parallel extraction calls per haystack. Raise if your rate limit allows. */
+const EXTRACT_CONCURRENCY = Number(process.env.TROVE_BENCH_EXTRACT_CONCURRENCY ?? 8);
 // The dial the whole exercise exists to measure. Trove caps recall at 32000.
 const TOKEN_BUDGET = Number(process.env.TROVE_BENCH_TOKEN_BUDGET ?? 8000);
 const RECALL_DEPTH = Number(process.env.TROVE_BENCH_DEPTH ?? 1);
@@ -106,31 +108,36 @@ export class TroveProvider {
   async ingest(sessions: UnifiedSession[], options: IngestOptions): Promise<IngestResult> {
     const ownerId = await this.ownerFor(options.containerTag);
     const ctx = this.ctx(ownerId, options.containerTag);
+
+    // Ingest is sequential (cheap, all local SQL), but distillation is one LLM
+    // round trip per session and dominates wall clock: a LongMemEval haystack is
+    // ~50 sessions, so serializing it cost ~150s of a ~170s ingest. Sessions are
+    // independent — each writes its own source, and atom titles are already
+    // session-scoped so there is no slug contention — so the extraction calls
+    // fan out over a bounded pool. The cap keeps us under provider rate limits
+    // and bounds the damage if a haystack is unusually large.
+    const pending: Array<{ session: UnifiedSession; textUnits: Array<{ id: string }> }> = [];
     const documentIds: string[] = [];
 
     for (const session of sessions) {
       // One source per session preserves LongMemEval's session granularity —
       // which the paper's own index-side findings say matters — and gives each
       // turn its own citable text unit.
-      const transcript = session.messages
-        .map((message) => `${message.role}: ${message.content}`)
-        .join("\n");
       const dateLine = session.timestamp ? `Session date: ${session.timestamp}\n` : "";
       const { source, textUnits } = await this.store.ingest(
         {
           kind: "paste",
           title: `Session ${session.sessionId}`,
-          contentText: `${dateLine}${transcript}`,
+          contentText: `${dateLine}${transcriptOf(session)}`,
           metadata: { sessionId: session.sessionId, timestamp: session.timestamp ?? null },
         },
         ctx,
       );
       documentIds.push(source.id);
-
-      if (EXTRACT) {
-        await this.distill(session, textUnits, ctx);
-      }
+      if (EXTRACT) pending.push({ session, textUnits });
     }
+
+    await inPool(EXTRACT_CONCURRENCY, pending, (item) => this.distill(item.session, item.textUnits, ctx));
 
     return { documentIds };
   }
@@ -145,7 +152,7 @@ export class TroveProvider {
     textUnits: Array<{ id: string }>,
     ctx: GraphOperationContext,
   ): Promise<void> {
-    const transcript = session.messages.map((m) => `${m.role}: ${m.content}`).join("\n");
+    const transcript = transcriptOf(session);
     const dated = session.timestamp ? `This conversation happened on ${session.timestamp}.\n\n` : "";
     const facts = await chat(EXTRACT_MODEL, [
       {
@@ -317,6 +324,24 @@ export class TroveProvider {
       await (this.store as any).close();
     }
   }
+}
+
+/** Render a session the same way for ingest and for extraction — the atoms cite
+ *  spans built from the ingested text, so the two must not drift apart. */
+function transcriptOf(session: UnifiedSession): string {
+  return session.messages.map((message) => `${message.role}: ${message.content}`).join("\n");
+}
+
+/** Run `work` over `items` with at most `limit` in flight. */
+async function inPool<T>(limit: number, items: T[], work: (item: T) => Promise<void>): Promise<void> {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor++];
+      if (item !== undefined) await work(item);
+    }
+  });
+  await Promise.all(workers);
 }
 
 // ---- minimal OpenAI-compatible chat call for the extraction step.
