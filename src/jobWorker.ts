@@ -64,11 +64,15 @@ export function startJobWorker(store: GraphStore, options: JobWorkerOptions = {}
         continue;
       }
       if (embeddingDrainRemaining(job) > 0) {
+        // Preserve the finished job's owner scope: an owner-scoped drain must
+        // follow up with an owner-scoped batch (and its own dedupe key), not
+        // get absorbed into the global maintenance job.
+        const ownerId = typeof job.payload.ownerId === "string" ? job.payload.ownerId : null;
         await store.enqueueJob({
           kind: "refresh_embeddings",
-          payload: { reason: "drain_continue" },
+          payload: { reason: "drain_continue", ...(ownerId ? { ownerId } : {}) },
           priority: 40,
-          dedupeKey: "maintenance:refresh_embeddings",
+          dedupeKey: ownerId ? `maintenance:refresh_embeddings:${ownerId}` : "maintenance:refresh_embeddings",
         }, WORKER_CONTEXT);
       }
     }
