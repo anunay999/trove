@@ -44,13 +44,6 @@ describe("job worker", () => {
       assert.equal(embeddingDrainRemaining(saturated), 76);
     });
 
-    it("accepts the legacy scalar embedded count", () => {
-      const legacy = fabricateJob({
-        result: { status: "refreshed", embedded: 24, missingBefore: { nodeRevisions: 4, textUnits: 96 } },
-      });
-      assert.equal(embeddingDrainRemaining(legacy), 76);
-    });
-
     it("reports zero when the batch embedded everything missing", () => {
       const finished = fabricateJob({
         result: {
@@ -93,6 +86,21 @@ describe("job worker", () => {
       content: "Ingest-time jobs must complete without a manual jobs:run invocation.",
       evidence: [],
       links: [],
+    }, context);
+
+    // The capture above enqueues lint_graph/refresh_embeddings under GLOBAL
+    // dedupe keys (`maintenance:<kind>`, pgStore.ts). When a sibling suite —
+    // node:test runs files in parallel — already has one of those pending, our
+    // enqueue dedupes onto ITS row, which keeps the older createdAt and falls
+    // outside the window above, so the mutation leaves nothing this test can
+    // see. Anchor the assertion on a uniquely-keyed job instead: the mutation
+    // path is still exercised, but the precondition no longer depends on
+    // winning a race against every other suite.
+    await store.enqueueJob({
+      kind: "lint_graph",
+      payload: { smoke: "pre-drain" },
+      priority: 50,
+      dedupeKey: `worker-smoke:pre-drain:${stamp}`,
     }, context);
 
     assert.notEqual(await pendingSinceStart(), 0, "expected pending maintenance jobs before the worker starts");

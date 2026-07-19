@@ -14,9 +14,16 @@
  * empty-tsquery guard keeps behaving as before (F6/R7).
  */
 
+// NOTE: this is NOT a superset of Postgres's english dictionary — pg also
+// strips `after, because, all, each, before, during, while, until, just, some,
+// most, any, both` and more, none of which are listed here. On the pg path that
+// is harmless (to_tsvector filters again downstream), but the in-memory driver
+// uses these terms as raw substring probes, so a missing entry like "all"
+// becomes a live probe matching "call"/"small". Keep that asymmetry in mind
+// before treating this list as authoritative for both drivers.
 const QUESTION_STOP_WORDS = new Set([
-  // English stop words (superset of the pg english dictionary list; negators
-  // "no"/"not"/"nor" deliberately kept OUT — stripping them flips meaning)
+  // English stop words (negators "no"/"not"/"nor" deliberately kept OUT —
+  // stripping them flips meaning)
   "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
   "if", "in", "into", "of", "off", "on", "or", "out",
   "over", "so", "such", "than", "that", "the", "their", "then", "there",
@@ -42,12 +49,25 @@ const QUESTION_STOP_WORDS = new Set([
  * single-letter fragments removed; numerals kept). Returns the trimmed original
  * query when no term survives.
  */
+/**
+ * Content terms with NO fallback: an all-stop-word input yields `[]`.
+ *
+ * This is the honest "does this text carry lexical signal?" question. Callers
+ * that must not silently resurrect a stop-word-only query — the empty-tsquery
+ * gate (F6/R7) and document-side token extraction — use this, not
+ * `retrievalQueryTerms`, which deliberately falls back to the original text.
+ */
+export function contentTerms(text: string): string[] {
+  const tokens = text.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  return [
+    ...new Set(
+      tokens.filter((token) => token.length > 1 && (/^\d+$/.test(token) || !QUESTION_STOP_WORDS.has(token))),
+    ),
+  ];
+}
+
 export function normalizeRetrievalQuery(query: string): string {
-  const tokens = query.toLowerCase().match(/[a-z0-9]+/g) ?? [];
-  const kept = tokens.filter(
-    (token) => token.length > 1 && (/^\d+$/.test(token) || !QUESTION_STOP_WORDS.has(token)),
-  );
-  const normalized = [...new Set(kept)].join(" ").trim();
+  const normalized = contentTerms(query).join(" ").trim();
   return normalized.length >= 2 ? normalized : query.trim();
 }
 
