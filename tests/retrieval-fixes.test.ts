@@ -1,24 +1,19 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
 import pg from "pg";
 import { suiteStore, closeStore, hasPostgres, sleep, isolateDatabase } from "./helpers.js";
 import type { GraphJob, GraphOperationContext } from "../src/graphCore.js";
 import { FakeEmbeddingProvider, cosineSimilarity } from "../src/embeddings.js";
 import { normalizeRetrievalQuery } from "../src/queryNormalize.js";
 import { UserStore } from "../src/users.js";
-
 // Self-contained semantic behavior: the deterministic offline provider runs in
 // both store modes and the default distance floor (0.55) applies.
 process.env.TROVE_EMBEDDING_PROVIDER = "fake";
 delete process.env.TROVE_SEMANTIC_MAX_DISTANCE;
-
 // This suite runs many captures and asserts on queue state; it gets its own
 // database so it can neither break nor be broken by concurrent suites.
 await isolateDatabase("retrieval-fixes");
-
 const { store, driver, context, stamp } = suiteStore("retrieval-fixes");
-
 /** Run claimable maintenance jobs (pg: this is what writes embeddings). Only
  * touches shared maintenance rows and this suite's own jobs. */
 async function drainJobs(limit = 200): Promise<void> {
@@ -30,7 +25,6 @@ async function drainJobs(limit = 200): Promise<void> {
     await store.runJob({ jobId: next.id });
   }
 }
-
 /** Push a job's last-update past any retry backoff. */
 async function ageJob(jobId: string): Promise<void> {
   if (driver === "postgres") {
@@ -47,21 +41,18 @@ async function ageJob(jobId: string): Promise<void> {
   const job = jobs.get(jobId);
   if (job) jobs.set(jobId, { ...job, updatedAt: new Date(Date.now() - 172_800_000).toISOString() });
 }
-
 after(async () => {
   // Leave no claimable jobs behind: sibling pg suites share this database and
   // some assert on global pending counts.
   await drainJobs();
   await closeStore(store);
 });
-
 describe("retrieval fixes", () => {
   it("fake provider: deterministic, cosine-meaningful, offline", async () => {
     const provider = new FakeEmbeddingProvider();
     const [first, second] = await provider.embed(["alpha beta gamma", "alpha beta gamma"]);
     assert.deepEqual(first, second, "same input must yield the same vector");
     assert.equal(first?.length, 1536);
-
     const [query, shared, disjoint] = await provider.embed([
       "alpha beta",
       "alpha beta gamma",
@@ -73,7 +64,6 @@ describe("retrieval fixes", () => {
     assert.ok(disjointCosine < 0.2, `disjoint texts should be far, got ${disjointCosine}`);
     await assert.rejects(() => provider.embed([""]));
   });
-
   it("F4: trackAccess:false, revise read-backs, and recall do not bump activation", async () => {
     const marker = `actprobe${stamp}`;
     const node = await store.capture({
@@ -85,13 +75,11 @@ describe("retrieval fixes", () => {
       links: [],
     }, context);
     assert.equal(node.accessCount, 0, "capture's internal read-back must not bump");
-
     const tracked = await store.read({ nodeId: node.id }, context);
     assert.equal(tracked?.accessCount, 1, "default reads still bump activation");
     await store.read({ nodeId: node.id }, context, { trackAccess: false });
     const untracked = await store.read({ nodeId: node.id }, context, { trackAccess: false });
     assert.equal(untracked?.accessCount, 1, "trackAccess:false must not bump");
-
     const revised = await store.update({
       nodeId: node.id,
       baseRevisionId: tracked?.revisionId ?? "",
@@ -101,13 +89,11 @@ describe("retrieval fixes", () => {
     assert.equal(revised.accessCount, 1, "update's internal read-back must not bump");
     const afterRevise = await store.read({ nodeId: node.id }, context, { trackAccess: false });
     assert.equal(afterRevise?.accessCount, 1);
-
     await store.recall({ query: marker, tokenBudget: 2000 });
     const afterRecall = await store.read({ nodeId: node.id }, context, { trackAccess: false });
     assert.equal(afterRecall?.accessCount, 1, "recall must not bump access activation");
     await drainJobs();
   });
-
   it("F5: semantic search floors unrelated queries to zero hits", async () => {
     const marker = `semfloor${stamp}`;
     const node = await store.capture({
@@ -119,7 +105,6 @@ describe("retrieval fixes", () => {
       links: [],
     }, context);
     await drainJobs();
-
     const control = await store.search({
       query: "quasar bakery lighthouse",
       includeTextUnits: false,
@@ -127,7 +112,6 @@ describe("retrieval fixes", () => {
       limit: 10,
     });
     assert.ok(control.nodes.some((candidate) => candidate.id === node.id), "control: matching query should find the node");
-
     const hits = await store.search({
       query: "zzzqxv wrench nebula unrelated",
       includeTextUnits: false,
@@ -136,7 +120,6 @@ describe("retrieval fixes", () => {
     });
     assert.equal(hits.nodes.length, 0, "unrelated query must return no semantic hits");
   });
-
   it("F6: stop-word-only queries return no lexical hits", async () => {
     await store.capture({
       title: `Stop word ${stamp}`,
@@ -151,7 +134,6 @@ describe("retrieval fixes", () => {
     assert.equal(hits.textUnits.length, 0, "'the' must not match text units via ilike fallback");
     await drainJobs();
   });
-
   it("F7: hybrid fusion (RRF) ranks a semantic-relevant node above weak lexical hits", async () => {
     // Weak lexical: title substring-matches "mercur" but stems to 'mercuri',
     // so no tsquery hit — it ranks only via the 0.2 title ilike boost.
@@ -173,7 +155,6 @@ describe("retrieval fixes", () => {
       links: [],
     }, context);
     await drainJobs();
-
     const hybrid = await store.search({ query: "mercur", includeTextUnits: false, mode: "hybrid", limit: 10 });
     const ids = hybrid.nodes.map((candidate) => candidate.id);
     const weakIndex = ids.indexOf(weak.id);
@@ -185,7 +166,6 @@ describe("retrieval fixes", () => {
       `RRF must rank the semantic-relevant node first (${strongIndex} vs ${weakIndex}); concat fusion would pin it behind`,
     );
   });
-
   it("F8: giant nodes are excluded from search unless the query hits title or slug", async () => {
     const marker = `needleword${stamp}`;
     const filler = "padding filler words ".repeat(900); // ~19k chars > 12k
@@ -207,14 +187,11 @@ describe("retrieval fixes", () => {
       links: [],
     }, context);
     await drainJobs();
-
     const contentQuery = await store.search({ query: marker, includeTextUnits: false, mode: "lexical", limit: 10 });
     assert.ok(contentQuery.nodes.some((candidate) => candidate.id === normal.id), "normal node should match its content");
     assert.ok(!contentQuery.nodes.some((candidate) => candidate.id === giant.id), "giant node must be excluded on a content match");
-
     const titleQuery = await store.search({ query: `Giant catalog ${stamp}`, includeTextUnits: false, mode: "lexical", limit: 10 });
     assert.ok(titleQuery.nodes.some((candidate) => candidate.id === giant.id), "giant node must surface on a title match");
-
     // The giant's embedding is nearly identical to this query (same repeated
     // tokens) — without the exclusion it would rank first semantically.
     const semanticQuery = await store.search({
@@ -225,7 +202,6 @@ describe("retrieval fixes", () => {
     });
     assert.ok(!semanticQuery.nodes.some((candidate) => candidate.id === giant.id), "giant node must be excluded from semantic search");
   });
-
   it("F11: neighborhood caps nodes, reports BFS level, and filters edges by validAt", async () => {
     const root = await store.capture({ title: `F11 root ${stamp}`, type: "domain", summary: "s", content: "c", evidence: [], links: [] }, context);
     const chain = await store.capture({ title: `F11 chain ${stamp}`, type: "domain", summary: "s", content: "c", evidence: [], links: [] }, context);
@@ -236,18 +212,15 @@ describe("retrieval fixes", () => {
       const fan = await store.capture({ title: `F11 fan ${stamp} ${index}`, type: "domain", summary: "s", content: "c", evidence: [], links: [] }, context);
       await store.link({ fromNodeId: root.id, toNodeId: fan.id, predicate: "f11_fan", weight: 1 }, context);
     }
-
     const full = await store.neighborhood({ nodeId: root.id, depth: 2 });
     const byId = new Map(full.nodes.map((node) => [node.id, node]));
     assert.equal(byId.get(root.id)?.level, 0, "seed is level 0");
     assert.equal(byId.get(chain.id)?.level, 1, "direct neighbor is level 1");
     assert.equal(byId.get(leaf.id)?.level, 2, "second-degree neighbor is level 2");
-
     const capped = await store.neighborhood({ nodeId: root.id, depth: 1, maxNodes: 3 });
     assert.equal(capped.nodes.length, 3, "maxNodes must cap total nodes");
     assert.equal(capped.nodes[0]?.id, root.id, "cap ordering is level-then-id: the seed comes first");
     assert.ok(capped.nodes.every((node) => typeof node.level === "number"));
-
     const past = await store.capture({ title: `F11 past ${stamp}`, type: "domain", summary: "s", content: "c", evidence: [], links: [] }, context);
     const future = await store.capture({ title: `F11 future ${stamp}`, type: "domain", summary: "s", content: "c", evidence: [], links: [] }, context);
     await store.link({ fromNodeId: root.id, toNodeId: past.id, predicate: "f11_time", weight: 1, validFrom: "2020-01-01T00:00:00.000Z" }, context);
@@ -259,7 +232,6 @@ describe("retrieval fixes", () => {
     assert.ok(!atTime.edges.some((edge) => edge.fromNodeId === future.id || edge.toNodeId === future.id));
     await drainJobs();
   });
-
   it("F9: concurrent same-title captures all resolve without unique violations", async () => {
     const title = `Concurrent capture ${stamp}`;
     const actors = ["actor-a", "actor-b", "actor-c", "actor-d"].map((actorId) => ({
@@ -278,7 +250,6 @@ describe("retrieval fixes", () => {
     assert.equal(new Set(nodes.map((node) => node.slug)).size, 4, "each capture must land a distinct slug");
     await drainJobs();
   });
-
   it("F2: tombstone removes a node from every read path, idempotently", async () => {
     const marker = `tombmark${stamp}`;
     const doomed = await store.capture({
@@ -294,10 +265,8 @@ describe("retrieval fixes", () => {
     await drainJobs();
     const before = await store.search({ query: marker, includeTextUnits: false, mode: "lexical", limit: 10 });
     assert.ok(before.nodes.some((candidate) => candidate.id === doomed.id), "fixture node should be findable");
-
     const result = await store.tombstoneNodes([doomed.id], context);
     assert.deepEqual(result.tombstoned, [doomed.id]);
-
     assert.equal(await store.read({ nodeId: doomed.id }, context), null, "tombstoned node must not read");
     const afterSearch = await store.search({ query: marker, includeTextUnits: false, mode: "lexical", limit: 10 });
     assert.ok(!afterSearch.nodes.some((candidate) => candidate.id === doomed.id), "tombstoned node must not search");
@@ -306,15 +275,12 @@ describe("retrieval fixes", () => {
     const hood = await store.neighborhood({ nodeId: neighbor.id, depth: 1 }, context);
     assert.ok(!hood.nodes.some((node) => node.id === doomed.id), "tombstoned node must not appear in neighborhoods");
     assert.equal(hood.edges.length, 0, "incident edges must be expired");
-
     const again = await store.tombstoneNodes([doomed.id], context);
     assert.deepEqual(again.tombstoned, [], "second tombstone must be a no-op");
-
     await drainJobs();
     const semanticHits = await store.search({ query: `${marker} content`, includeTextUnits: false, mode: "semantic", limit: 10 });
     assert.ok(!semanticHits.nodes.some((candidate) => candidate.id === doomed.id), "tombstoned node must not surface semantically");
   });
-
   it("F12a: lint job results carry the findings array", async () => {
     const job = await store.enqueueJob({
       kind: "lint_graph",
@@ -334,7 +300,6 @@ describe("retrieval fixes", () => {
     assert.ok((lint.findings as unknown[]).length > 0, "findings should not be empty");
     await drainJobs();
   });
-
   it("F12b: captures no longer auto-enqueue the obsidian projection job", async () => {
     await drainJobs();
     // Owner-scoped so the event feed only carries this capture's jobs (pg
@@ -367,7 +332,6 @@ describe("retrieval fixes", () => {
     assert.ok(!kinds.has("refresh_obsidian_projection"), "projection must not be auto-enqueued");
     await drainJobs();
   });
-
   it("F12c: failed jobs retry with backoff and dead-letter at five attempts", async (t) => {
     const patched = store as unknown as { performJob: (job: GraphJob) => unknown };
     const original = patched.performJob;
@@ -377,7 +341,6 @@ describe("retrieval fixes", () => {
     t.after(() => {
       patched.performJob = original;
     });
-
     const job = await store.enqueueJob({
       kind: "lint_graph",
       payload: {},
@@ -400,7 +363,6 @@ describe("retrieval fixes", () => {
     assert.equal(again?.attempts, 5, "a dead job must never be reclaimed");
     assert.equal(again?.status as string, "dead");
   });
-
   it("F1: semantic search never resurrects superseded revisions and never duplicates a node", { skip: !hasPostgres() }, async () => {
     const marker = `franken${stamp}`;
     const node = await store.capture({
@@ -412,7 +374,6 @@ describe("retrieval fixes", () => {
       links: [],
     }, context);
     await drainJobs();
-
     const revised = await store.update({
       nodeId: node.id,
       baseRevisionId: node.revisionId,
@@ -420,7 +381,6 @@ describe("retrieval fixes", () => {
     }, context);
     assert.ok(revised && !("conflict" in revised), "revise failed");
     await drainJobs();
-
     const oldPhrase = await store.search({
       query: `zephyrus oldphrase ${marker}`,
       includeTextUnits: false,
@@ -432,7 +392,6 @@ describe("retrieval fixes", () => {
       0,
       "deleted-phrase query must not hit the superseded revision",
     );
-
     const current = await store.search({
       query: `completely different replacement text ${marker}`,
       includeTextUnits: false,
@@ -445,7 +404,6 @@ describe("retrieval fixes", () => {
       "current-phrase query must hit the node exactly once",
     );
   });
-
   it("batched evidence fetch: unranked returns all, ranked caps and orders by relevance", async () => {
     const marker = `zorble${stamp}`;
     const lines = [
@@ -473,30 +431,24 @@ describe("retrieval fixes", () => {
       evidence: ingested.textUnits.map((unit) => ({ textUnitId: unit.id, selector: {} })),
       links: [],
     }, context);
-
     const all = await store.getEvidenceForNodes([node.id], context);
     assert.equal(all.get(node.id)?.length, ingested.textUnits.length, "unranked fetch returns every unit");
-
     const detail = await store.read({ nodeId: node.id }, context);
     assert.equal(detail?.evidence.length, ingested.textUnits.length, "read must assemble the same evidence without per-unit queries");
-
     const ranked = await store.getEvidenceForNodes([node.id], context, { query: `${marker} caching` });
     const rankedUnits = ranked.get(node.id) ?? [];
     assert.ok(rankedUnits.length <= 5, "ranked fetch defaults to at most 5 units per node");
     assert.ok(rankedUnits[0]?.text.includes(marker), "best-matching unit must rank first");
-
     const capped = await store.getEvidenceForNodes([node.id], context, { query: `${marker} caching`, perNodeLimit: 2 });
     assert.equal(capped.get(node.id)?.length, 2);
     await drainJobs();
   });
-
   it("NL0: normalizeRetrievalQuery strips question scaffolding, keeps content terms", () => {
     assert.equal(normalizeRetrievalQuery("How many weddings have I attended in this year?"), "weddings attended year");
     assert.equal(normalizeRetrievalQuery("What is the refund policy for annual plans?"), "refund policy annual plans");
     assert.equal(normalizeRetrievalQuery("events in 2024"), "events 2024", "numerals survive");
     assert.equal(normalizeRetrievalQuery("the"), "the", "stop-word-only queries fall back to the original so the empty-tsquery guard still fires");
   });
-
   it("NL1: a natural-language question retrieves the answering node (bench finding 1)", async () => {
     // The LongMemEval pilot: this exact question returned 0 across lexical,
     // semantic, and hybrid against a 291-atom container that held the answer.
@@ -509,7 +461,6 @@ describe("retrieval fixes", () => {
       links: [],
     }, context);
     await drainJobs();
-
     const question = "How many weddings have I attended in this year?";
     const lexical = await store.search({ query: question, includeTextUnits: false, mode: "lexical", limit: 10 });
     assert.ok(
@@ -517,7 +468,6 @@ describe("retrieval fixes", () => {
       "lexical must find the answering node from a natural-language question",
     );
   });
-
   it("NL2: OR-fallback fires when no node holds every query term", async () => {
     const wedding = await store.capture({
       title: `Weddings recap ${stamp}`,
@@ -536,14 +486,12 @@ describe("retrieval fixes", () => {
       links: [],
     }, context);
     await drainJobs();
-
     // "weddings kubernetes" co-occurs in no node: AND misses, OR must return both.
     const hits = await store.search({ query: "weddings kubernetes", includeTextUnits: false, mode: "lexical", limit: 10 });
     const ids = hits.nodes.map((node) => node.id);
     assert.ok(ids.includes(wedding.id), "OR-fallback should return the weddings node");
     assert.ok(ids.includes(kube.id), "OR-fallback should return the kubernetes node");
   });
-
   it("NL3: recall packs atoms for a natural-language question", async () => {
     const wedding = await store.capture({
       title: `Wedding attendance log ${stamp}`,
@@ -554,7 +502,6 @@ describe("retrieval fixes", () => {
       links: [],
     }, context);
     await drainJobs();
-
     const pack = await store.recall({ query: "How many weddings have I attended in this year?", tokenBudget: 2000 });
     assert.ok(pack.atoms.length > 0, "recall must not return an empty pack for a natural-language question");
     assert.ok(

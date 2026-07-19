@@ -454,9 +454,7 @@ export class PgGraphStore implements GraphStore {
       .filter((vector): vector is number[] => Array.isArray(vector))
       .map(vectorLiteral);
     if (vectors.length === 0) return { nodes: [], textUnits: [] };
-    const distExpr = vectors.length > 1
-      ? `least(${vectors.map((_, index) => `e.embedding <=> $${index + 1}::vector`).join(", ")})`
-      : "e.embedding <=> $1::vector";
+    // Vectors occupy $1..$N; everything else is numbered after them.
     const p = (offset: number): string => `$${vectors.length + offset}`;
     const typeFilter = input.types && input.types.length > 0 ? input.types : null;
     const maxDistance = maxSemanticDistanceFor(input);
