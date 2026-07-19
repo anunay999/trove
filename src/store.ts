@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { normalizeRetrievalQuery, retrievalQueryTerms } from "./queryNormalize.js";
 import type {
   AnnotateInput,
   CaptureInput,
@@ -189,6 +190,10 @@ export class InMemoryGraphStore implements GraphStore {
     if (query.length < 3 || !hasLexicalSignal(query)) {
       return { nodes: [], textUnits: [] };
     }
+    // Content terms of the normalized query drive the fallback below: phrase
+    // matching fails for natural-language questions, so require every term
+    // first (AND), then any term (OR) — mirroring the pg tsquery fallback.
+    const terms = retrievalQueryTerms(input.query);
     const types = new Set(input.types ?? []);
     const slugQuery = query.replace(/\s+/g, "-");
     const scored: Array<{ node: GraphNode; score: number; sequence: number }> = [];
@@ -205,6 +210,12 @@ export class InMemoryGraphStore implements GraphStore {
       if (title.includes(query)) score += 4;
       if (summary.includes(query)) score += 2;
       if (content.includes(query)) score += 1;
+      if (score === 0 && terms.length > 0) {
+        const combined = `${title} ${summary} ${content}`;
+        const hits = terms.filter((term) => combined.includes(term));
+        if (hits.length === terms.length) score = 0.9;
+        else if (hits.length > 0) score = 0.5 * (hits.length / terms.length);
+      }
       if (score === 0) continue;
       // Giant catalog/log pages only surface on a title or slug match.
       if ((node.content?.length ?? 0) > GIANT_CONTENT_CHARS && !title.includes(query) && node.slug !== slugQuery) {
@@ -216,7 +227,10 @@ export class InMemoryGraphStore implements GraphStore {
 
     const textUnits = input.includeTextUnits
       ? [...this.textUnits.values()]
-        .filter((unit) => unit.text.toLowerCase().includes(query))
+        .filter((unit) => {
+          const text = unit.text.toLowerCase();
+          return text.includes(query) || terms.some((term) => text.includes(term));
+        })
         .slice(0, input.limit)
       : [];
 
@@ -224,7 +238,7 @@ export class InMemoryGraphStore implements GraphStore {
   }
 
   private async semanticSearch(input: SearchInput, provider: EmbeddingProvider): Promise<SearchResult> {
-    const [queryVector] = await provider.embed([input.query]);
+    const [queryVector] = await provider.embed([normalizeRetrievalQuery(input.query)]);
     if (!queryVector) return { nodes: [], textUnits: [] };
     const maxDistance = maxSemanticDistanceFor(input);
     const query = input.query.toLowerCase().trim();
@@ -373,9 +387,9 @@ export class InMemoryGraphStore implements GraphStore {
         return unit ? [unit] : [];
       });
       if (opts?.query) {
-        // Ranked mode: token-overlap relevance to the query, best units first,
-        // capped per node (default 5).
-        const queryTokens = tokenSet(opts.query);
+        // Ranked mode: token-overlap relevance to the normalized query, best
+        // units first, capped per node (default 5).
+        const queryTokens = new Set(retrievalQueryTerms(opts.query));
         const perNodeLimit = Math.max(1, Math.trunc(opts.perNodeLimit ?? 5));
         const ranked = units
           .map((unit, index) => ({ unit, index, score: tokenOverlap(queryTokens, tokenSet(unit.text)) }))

@@ -14,7 +14,13 @@ export function embeddingDrainRemaining(job: GraphJob | null): number {
   if (result.status !== "refreshed") return 0;
   const missing = (result.missingBefore ?? {}) as Record<string, unknown>;
   const before = Number(missing.nodeRevisions ?? 0) + Number(missing.textUnits ?? 0);
-  const embedded = Number(result.embedded ?? 0);
+  // pgStore reports `embedded` as { nodeRevisions, textUnits }; older results
+  // used a bare number. Number(object) is NaN, which silently zeroed the drain.
+  const raw = result.embedded;
+  const embedded = typeof raw === "number"
+    ? raw
+    : Number((raw as Record<string, unknown> | undefined)?.nodeRevisions ?? 0) +
+      Number((raw as Record<string, unknown> | undefined)?.textUnits ?? 0);
   if (!Number.isFinite(before) || !Number.isFinite(embedded)) return 0;
   return Math.max(0, before - embedded);
 }

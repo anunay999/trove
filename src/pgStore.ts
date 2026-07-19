@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { normalizeRetrievalQuery } from "./queryNormalize.js";
 import type {
   AnnotateInput,
   CaptureInput,
@@ -331,22 +332,29 @@ export class PgGraphStore implements GraphStore {
   }
 
   private async lexicalSearch(input: SearchInput, scope: OwnerScope): Promise<SearchResult> {
+    // Question-shaped queries arrive at the tsquery as their content terms
+    // ("How many weddings…" -> "weddings attended year"); slug/ilike matching
+    // keeps the original query text.
+    const retrievalQuery = normalizeRetrievalQuery(input.query);
     // Compute the tsquery first: for stop-word-only or near-empty queries
     // websearch_to_tsquery is empty, and the ilike fallbacks would otherwise
     // match noise ("the" boosted 8/10 fixtures). Substring needs are served by
-    // grep, so lexical returns nothing here.
+    // grep, so lexical returns nothing here. The OR form is the fallback for
+    // multi-term queries whose terms never co-occur in one node (e.g.
+    // natural-language questions).
     const tsquery = await this.pool.query(
-      "select websearch_to_tsquery('english', $1)::text as query",
-      [input.query],
+      `select websearch_to_tsquery('english', $1)::text as query,
+              (select string_agg(lexeme, ' | ') from unnest(tsvector_to_array(to_tsvector('english', $1))) as terms(lexeme)) as or_query`,
+      [retrievalQuery],
     );
     const tsqueryText = String(tsquery.rows[0]?.query ?? "");
-    if (input.query.trim().length < 3 || tsqueryText.length === 0) {
+    const orQueryText = String(tsquery.rows[0]?.or_query ?? "");
+    if (retrievalQuery.length < 3 || tsqueryText.length === 0) {
       return { nodes: [], textUnits: [] };
     }
 
     const typeFilter = input.types && input.types.length > 0 ? input.types : null;
-    const nodeResult = await this.pool.query(
-      `with q as (select websearch_to_tsquery('english', $1) as query)
+    const nodeSql = `with q as (select $7::tsquery as query)
        select n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id, n.updated_at, n.access_count, n.last_accessed_at,
               greatest(
                 ts_rank_cd(to_tsvector('english', coalesce(n.title, '') || ' ' || coalesce(n.summary, '')), q.query),
@@ -378,29 +386,41 @@ export class PgGraphStore implements GraphStore {
            or coalesce(nr.content, '') ilike $4
          )
        order by rank desc, n.updated_at desc
-       limit $3`,
-      [input.query, typeFilter, input.limit, `%${input.query}%`, !scope.scoped, scope.ownerId],
-    );
+       limit $3`;
+    const runNodeSearch = (effectiveTsquery: string) =>
+      this.pool.query(nodeSql, [
+        input.query, typeFilter, input.limit, `%${input.query}%`, !scope.scoped, scope.ownerId, effectiveTsquery,
+      ]);
+    let nodeResult = await runNodeSearch(tsqueryText);
+    if (nodeResult.rows.length === 0 && orQueryText.length > 0 && orQueryText !== tsqueryText) {
+      nodeResult = await runNodeSearch(orQueryText);
+    }
 
-    const textUnitResult = input.includeTextUnits
-      ? await this.pool.query(
-        `with q as (select websearch_to_tsquery('english', $1) as query)
-         select id, source_id, ordinal, section_path, char_start, char_end, text, content_sha256,
-                greatest(
-                  ts_rank_cd(to_tsvector('english', text), q.query),
-                  case when text ilike $3 then 0.05 else 0 end
-                ) as rank
-         from text_unit
-         cross join q
-         where ($4 or owner_id = $5) and (
-           to_tsvector('english', text) @@ q.query
-            or text ilike $3
-         )
-         order by rank desc, created_at desc, ordinal
-         limit $2`,
-        [input.query, input.limit, `%${input.query}%`, !scope.scoped, scope.ownerId],
-      )
-      : { rows: [] };
+    const unitSql = `with q as (select $5::tsquery as query)
+       select id, source_id, ordinal, section_path, char_start, char_end, text, content_sha256,
+              greatest(
+                ts_rank_cd(to_tsvector('english', text), q.query),
+                case when text ilike $2 then 0.05 else 0 end
+              ) as rank
+       from text_unit
+       cross join q
+       where ($3 or owner_id = $4) and (
+         to_tsvector('english', text) @@ q.query
+          or text ilike $2
+       )
+       order by rank desc, created_at desc, ordinal
+       limit $1`;
+    const runUnitSearch = (effectiveTsquery: string) =>
+      this.pool.query(unitSql, [
+        input.limit, `%${input.query}%`, !scope.scoped, scope.ownerId, effectiveTsquery,
+      ]);
+    let textUnitResult = { rows: [] as Record<string, unknown>[] };
+    if (input.includeTextUnits) {
+      textUnitResult = await runUnitSearch(tsqueryText);
+      if (textUnitResult.rows.length === 0 && orQueryText.length > 0 && orQueryText !== tsqueryText) {
+        textUnitResult = await runUnitSearch(orQueryText);
+      }
+    }
 
     return {
       nodes: nodeResult.rows.map(mapNode),
@@ -409,9 +429,21 @@ export class PgGraphStore implements GraphStore {
   }
 
   private async semanticSearch(input: SearchInput, provider: EmbeddingProvider, scope: OwnerScope): Promise<SearchResult> {
-    const [queryEmbedding] = await provider.embed([input.query]);
-    if (!queryEmbedding) return { nodes: [], textUnits: [] };
-    const queryVector = vectorLiteral(queryEmbedding);
+    // Dual-embed: the raw query preserves question intent, the normalized query
+    // sharpens keyword overlap — real providers score them inconsistently
+    // (measured: normalization helped one node 0.72→0.64, hurt another
+    // 0.56→0.59), so we embed both in one batched call and take the min
+    // distance. One API call either way.
+    const normalized = normalizeRetrievalQuery(input.query);
+    const queries = normalized === input.query.trim() ? [input.query] : [input.query, normalized];
+    const vectors = (await provider.embed(queries))
+      .filter((vector): vector is number[] => Array.isArray(vector))
+      .map(vectorLiteral);
+    if (vectors.length === 0) return { nodes: [], textUnits: [] };
+    const distExpr = vectors.length > 1
+      ? `least(${vectors.map((_, index) => `e.embedding <=> $${index + 1}::vector`).join(", ")})`
+      : "e.embedding <=> $1::vector";
+    const p = (offset: number): string => `$${vectors.length + offset}`;
     const typeFilter = input.types && input.types.length > 0 ? input.types : null;
     const maxDistance = maxSemanticDistanceFor(input);
 
@@ -423,25 +455,25 @@ export class PgGraphStore implements GraphStore {
       `select * from (
          select distinct on (n.id)
                 n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id, n.updated_at, n.access_count, n.last_accessed_at,
-                (e.embedding <=> $1::vector) as distance
+                ${distExpr} as distance
          from embedding e
          join node_revision nr on nr.id = e.owner_id and e.owner_table = 'node_revision'
          join node n on n.id = nr.node_id and n.deleted_at is null and nr.id = n.current_revision_id
-         where e.model = $2
-           and (e.embedding <=> $1::vector) < $7
-           and ($5 or n.owner_id = $6)
-           and ($3::node_type[] is null or n.type = any($3::node_type[]))
+         where e.model = ${p(1)}
+           and ${distExpr} < ${p(6)}
+           and (${p(4)} or n.owner_id = ${p(5)})
+           and (${p(2)}::node_type[] is null or n.type = any(${p(2)}::node_type[]))
            and (
              coalesce(length(nr.content), 0) <= 12000
-             or n.title ilike $8
-             or n.slug = lower(replace($9, ' ', '-'))
+             or n.title ilike ${p(7)}
+             or n.slug = lower(replace(${p(8)}, ' ', '-'))
            )
-         order by n.id, e.embedding <=> $1::vector
+         order by n.id, ${distExpr}
        ) node_matches
        order by distance
-       limit $4`,
+       limit ${p(3)}`,
       [
-        queryVector,
+        ...vectors,
         provider.model,
         typeFilter,
         input.limit,
@@ -458,12 +490,12 @@ export class PgGraphStore implements GraphStore {
         `select tu.id, tu.source_id, tu.ordinal, tu.section_path, tu.char_start, tu.char_end, tu.text, tu.content_sha256
          from embedding e
          join text_unit tu on tu.id = e.owner_id and e.owner_table = 'text_unit'
-         where e.model = $2
-           and (e.embedding <=> $1::vector) < $6
-           and ($3 or tu.owner_id = $4)
-         order by e.embedding <=> $1::vector
-         limit $5`,
-        [queryVector, provider.model, !scope.scoped, scope.ownerId, input.limit, maxDistance],
+         where e.model = ${p(1)}
+           and ${distExpr} < ${p(5)}
+           and (${p(2)} or tu.owner_id = ${p(3)})
+         order by ${distExpr}
+         limit ${p(4)}`,
+        [...vectors, provider.model, !scope.scoped, scope.ownerId, input.limit, maxDistance],
       )
       : { rows: [] };
 
@@ -542,24 +574,33 @@ export class PgGraphStore implements GraphStore {
 
     if (opts?.query) {
       // Ranked mode: cap each node at its best-matching units (default 5).
+      // Ranking uses the OR tsquery over the normalized query — a unit holding
+      // any content term outranks one holding none (AND would rank most 0).
       const perNodeLimit = Math.max(1, Math.trunc(opts.perNodeLimit ?? 5));
       const ranked = await this.pool.query(
-        `with ranked as (
+        `with q as (
+           select coalesce(
+             (select (string_agg(lexeme, ' | '))::tsquery
+              from unnest(tsvector_to_array(to_tsvector('english', $2))) as terms(lexeme)),
+             ''::tsquery
+           ) as query
+         ), ranked as (
            select a.node_id, tu.id, tu.source_id, tu.ordinal, tu.section_path, tu.char_start, tu.char_end, tu.text, tu.content_sha256,
                   row_number() over (
                     partition by a.node_id
-                    order by ts_rank_cd(to_tsvector('english', tu.text), websearch_to_tsquery('english', $2)) desc,
+                    order by ts_rank_cd(to_tsvector('english', tu.text), q.query) desc,
                              tu.source_id, tu.ordinal
                   ) as per_node_rank
            from annotation a
            join text_unit tu on tu.id = a.text_unit_id
+           cross join q
            where a.node_id = any($1::uuid[]) and ($3 or a.owner_id = $4)
          )
          select node_id, id, source_id, ordinal, section_path, char_start, char_end, text, content_sha256
          from ranked
          where per_node_rank <= $5
          order by node_id, per_node_rank`,
-        [nodeIds, opts.query, !scope.scoped, scope.ownerId, perNodeLimit],
+        [nodeIds, normalizeRetrievalQuery(opts.query), !scope.scoped, scope.ownerId, perNodeLimit],
       );
       for (const row of ranked.rows) {
         evidence.get(String(row.node_id))?.push(mapTextUnit(row));

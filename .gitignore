@@ -11,3 +11,7 @@ exports/
 # macOS
 .DS_Store
 **/.DS_Store
+
+# MemoryBench checkout + benchmark datasets (see bench/README.md)
+bench/.memorybench/
+bench/data/

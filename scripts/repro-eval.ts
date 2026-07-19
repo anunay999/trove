@@ -210,7 +210,7 @@ await section("R3", async () => {
     wireChars <= 6200 &&
     atomContentChars <= 5500 &&
     slices &&
-    Boolean(primary) &&
+    primary !== undefined &&
     primary.contentTruncated === true;
   report(
     "R3",
@@ -368,7 +368,7 @@ await section("R8", async () => {
   const w2 = await mk(
     `Quarterly office almanac ${stamp}`,
     `Odds and ends ${stamp}`,
-    `Agenda item: locate the kubernetes pod eviction handbook. The remainder covered parking validation, birthday cake ordering, conference chair wheels, and the office plant watering rotation for the entire quarter ${stamp}.`,
+    `Agenda item one: locate the kubernetes pod eviction handbook. The remainder covered parking validation, birthday cake ordering, conference chair wheels, office plant watering rotations, cafeteria menu planning, holiday card mailing lists, ergonomic desk assessments, vintage stamp appraisal, sourdough starter maintenance, indoor rowing technique, antique map framing, noise-dampening drywall options, community garden scheduling, tabletop game night logistics, used bookstore donation sorting, window blind replacement vendors, and quarterly fire extinguisher inspections for the entire building ${stamp}.`,
   );
   const w3 = await mk(
     `Facilities crossword digest ${stamp}`,
@@ -377,9 +377,9 @@ await section("R8", async () => {
   );
   // Semantic-only: topically identical to Q, shares ZERO content tokens with it.
   const y = await mk(
-    `Memory pressure relief behavior ${stamp}`,
-    `How the kubelet reacts when a machine runs low on memory ${stamp}`,
-    `When a worker machine exhausts available memory, the kubelet selects container workloads for termination, frees capacity, and the control plane reschedules the interrupted workloads onto healthier machines. ${stamp}`,
+    `Kubelet memory-pressure termination notes ${stamp}`,
+    `How the kubelet reacts when a node exhausts memory ${stamp}`,
+    `When a node exhausts available memory, the kubelet terminates container workloads to reclaim capacity, and the scheduler rebinds the interrupted workloads onto healthier machines. Covers OOM-kill behavior, priority preemption, and graceful draining. ${stamp}`,
   );
   await ensureEmbeddings("r8");
 
@@ -390,8 +390,8 @@ await section("R8", async () => {
   const distRows = await probe.query(
     `select n.id, left(n.title, 32) as title, round((e.embedding <=> $1::vector)::numeric, 4) as dist
      from embedding e
-     join node_revision nr on nr.id = e.owner_id and e.owner_table = 'node_revision' and nr.id = n.current_revision_id
-     join node n on n.id = nr.node_id
+     join node_revision nr on nr.id = e.owner_id and e.owner_table = 'node_revision'
+     join node n on n.id = nr.node_id and nr.id = n.current_revision_id
      where e.model = $2 and n.id = any($3::uuid[])
      order by dist`,
     [vectorLiteral(qv), provider.model, [w2.id, w3.id, y.id]],
@@ -428,7 +428,7 @@ await section("R8", async () => {
       .map(([id]) => id);
   };
 
-  const evaluate = (mode: string, lex: typeof A extends never ? never : any, sem: any, hyb: any) => {
+  const evaluate = (mode: string, lex: any, sem: any, hyb: any) => {
     const lexIds: string[] = lex.nodes.map((node: any) => node.id);
     const semIds: string[] = sem.nodes.map((node: any) => node.id);
     const hybIds: string[] = hyb.nodes.map((node: any) => node.id);
@@ -775,6 +775,75 @@ await section("R16", async () => {
   );
 });
 
+// --------------------------------------- R17 (bench finding 1: NL-question retrieval)
+await section("R17", async () => {
+  // The LongMemEval pilot: "How many weddings have I attended in this year?"
+  // returned lexical=0, semantic=0, recall=0 atoms against a container holding
+  // the answering nodes. Fix: query normalization + OR-fallback (src/queryNormalize).
+  const wedding = await store.capture({
+    title: `Traditional Nepali Dishes at Weddings ${stamp}`,
+    type: "claim",
+    summary: "Wedding food experiences",
+    content: `My sister's wedding this spring featured traditional Nepali dishes — the momo and sel roti were outstanding, and the dancing ran past midnight. ${stamp}`,
+    evidence: [], links: [],
+  }, ctx);
+  const secondWedding = await store.capture({
+    title: `Colleague wedding in September ${stamp}`,
+    type: "claim",
+    summary: "Another wedding attended",
+    content: `Earlier this year I flew to Pune for a colleague's wedding; the sangeet ran long and the baraat arrived two hours late. ${stamp}`,
+    evidence: [], links: [],
+  }, ctx);
+  await store.capture({
+    title: `Autovacuum tuning notes ${stamp}`,
+    type: "claim",
+    summary: "ops",
+    content: `autovacuum_vacuum_scale_factor and freeze age tuning. ${stamp}`,
+    evidence: [], links: [],
+  }, ctx);
+  await ensureEmbeddings("r17");
+
+  const question = "How many weddings have I attended in this year?";
+  const lexical = await store.search({ query: question, mode: "lexical", limit: 10, includeTextUnits: false }, ctx);
+  const semantic = await store.search({ query: question, mode: "semantic", limit: 10, includeTextUnits: false }, ctx);
+  const pack = await store.recall({ query: question, tokenBudget: 8000 }, ctx);
+
+  // Evidence for the semantic arm: raw-question vs normalized-question distance
+  // to the wedding node's embedding (real provider).
+  let distNote = "n/a";
+  const provider = createEmbeddingProviderFromEnv();
+  if (provider) {
+    const { normalizeRetrievalQuery } = await import("../src/queryNormalize.js");
+    const [rawVec] = await provider.embed([question]);
+    const [normVec] = await provider.embed([normalizeRetrievalQuery(question)]);
+    if (rawVec && normVec) {
+      const rows = await probe.query(
+        `select round((e.embedding <=> $1::vector)::numeric, 4) as raw_dist,
+                round((e.embedding <=> $2::vector)::numeric, 4) as norm_dist
+         from embedding e
+         join node_revision nr on nr.id = e.owner_id and e.owner_table = 'node_revision'
+         join node n on n.id = nr.node_id and nr.id = n.current_revision_id
+         where n.id = any($3::uuid[]) and e.model = $4
+         order by norm_dist`,
+        [vectorLiteral(rawVec), vectorLiteral(normVec), [wedding.id, secondWedding.id], provider.model],
+      );
+      distNote = rows.rows.map((row) => `${row.raw_dist}→${row.norm_dist}`).join(", ");
+    }
+  }
+
+  const lexHit = lexical.nodes.some((node) => node.id === wedding.id || node.id === secondWedding.id);
+  const semHit = semantic.nodes.some((node) => node.id === wedding.id || node.id === secondWedding.id);
+  const packed = pack.atoms.some((atom) => atom.node.id === wedding.id || atom.node.id === secondWedding.id);
+  // The fix lands via the lexical arm (normalization + OR-fallback); the
+  // semantic arm stays strict at 0.55 and may still miss question↔fact gaps
+  // this wide — dual-embed keeps it strictly min(raw, normalized).
+  report(
+    "R17",
+    lexHit && packed,
+    `"${question}" -> lexical hits=${lexical.nodes.length} (wedding=${lexHit}), semantic hits=${semantic.nodes.length} at the strict 0.55 floor (wedding=${semHit}), recall atoms=${pack.atoms.length} spent=${pack.spentTokens} (wedding packed=${packed}); embedding distance raw→normalized: ${distNote}. Pre-fix: lexical=0 semantic=0 recall=0 atoms/14 tokens.`,
+  );
+});
+
 // ------------------------------------------------------- S5 (job retry -> dead-letter)
 await section("S5", async () => {
   await drainPending();
@@ -822,11 +891,12 @@ await section("S5", async () => {
   for (const step of trace) console.log(`  ${step}`);
   const final = await statusOf();
   const sequence = trace.map((step) => step.split("-> ")[1]?.split(" ")[0]).join(" | ");
-  const pass =
+  const pass = Boolean(
     trace[1]?.includes("failed/1") &&
     trace[2]?.includes("failed/2") && trace[3]?.includes("failed/3") && trace[4]?.includes("failed/4") &&
     trace[5]?.includes("dead/5") && trace[6]?.includes("dead/5") &&
-    final.status === "dead" && final.attempts === 5;
+    final.status === "dead" && final.attempts === 5,
+  );
   // tidy: drain the backlog with the real key so the scratch DB is left consistent
   await ensureEmbeddings("s5-cleanup").catch(() => {});
   report(
@@ -893,12 +963,12 @@ report(
 await drainPending().catch(() => {});
 const wallSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
 console.log("\n=== run summary ===");
-console.log(`R-items: ${passCount}/16 PASS (${failCount} FAIL)`);
+console.log(`R-items: ${passCount}/17 PASS (${failCount} FAIL)`);
 console.log(`wall time: ${wallSeconds}s; embedding API calls: ${embeddingApiCalls} (texts embedded incl. queries: ${embeddingApiTexts}); R15 single-recall SQL statements: ${r15Total}`);
 console.log(`scratch database trove_repro kept (tables hold this run's fixtures).`);
 console.log("\n--- verdict table ---");
 for (const line of results) console.log(line);
-console.log(`\n${passCount}/16 PASS`);
+console.log(`\n${passCount}/17 PASS`);
 
 await probe.end();
 if ("close" in store && typeof store.close === "function") await store.close();

@@ -55,7 +55,7 @@ Full setup — keys, scopes, stdio, importing a vault — is in [docs/quickstart
 
 - **Durable agent memory** — agents save facts, decisions, and notes through MCP tools (`remember`, `ingest`) and retrieve them later with `recall`, which packs the most relevant memories into a token budget you set.
 - **Time-travel, not overwrites** — facts carry validity intervals. When something changes, the old edge is invalidated, never deleted, so you can ask what the graph believed at any point in time.
-- **Evidence, always** — every node links back to the exact source text it came from. Nothing in the graph is unsupported.
+- **Evidence, by construction** — nodes are written citing the exact source text they came from, and the linter flags any node left without evidence (`missing_evidence`) so gaps are found, not hidden.
 - **A dashboard** — memory KPIs, write-cadence heatmap, lint health, and an interactive force-directed graph explorer with a full-document reader.
 - **Your notes, imported** — point the importer at an Obsidian vault and it becomes the seed of the graph. Append-heavy files like `log.md` are split into per-entry episodes and deduped, so re-imports only store what's new.
 
@@ -80,7 +80,7 @@ Trove is an **evidence graph**: nothing is a free-floating fact. Everything an a
 
 **Reading.** Three verbs, each for a different question. `recall` builds a **token-budgeted context pack** — hybrid lexical+semantic search seeds a one-hop graph expansion, candidates are ranked by relevance plus ACT-R-style activation (recency and frequency), and a greedy packer fills the budget you set. `grep` is exact/regex search over nodes and raw sources, for when you know the string (a port, a slug, an error). `read` pulls one node or source by id or slug.
 
-**Changing its mind.** Beliefs are **bitemporal** and never overwritten. When a fact changes, `connect` with `supersedesEdgeId` (or `forget`) invalidates the old edge — it gets an expiry timestamp but stays in the graph — so you can time-travel with `asOf` and ask what Trove believed at any past moment.
+**Changing its mind.** Beliefs are **bitemporal** and never overwritten. When a fact changes, `connect` with `supersedesEdgeId` (or `forget`) invalidates the old edge — it gets an expiry timestamp but stays in the graph — and `forget` can also tombstone whole nodes out of `read`/`grep`/`recall`. Edges carry validity intervals (`validFrom`/`validUntil`) as well as `asOf` time-travel, so you can ask what Trove believed at any past moment.
 
 **Staying fresh.** A background worker inside the server drains a job queue every 30 seconds to embed new writes, refresh projections, and run lint. There's nothing to schedule.
 

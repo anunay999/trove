@@ -88,7 +88,10 @@ describe("recall packing fixes", () => {
   });
 
   it("labels hops by true BFS depth from the match", async () => {
-    const marker = `HOPSMOKE_${stamp}`;
+    // Stamp-free single token: the OR-fallback matches any query term, and the
+    // suite stamp appears in every fixture title — it would make the
+    // middle/far nodes direct (hops-0) matches.
+    const marker = "hopssmokeuniquexyzzy";
     const seed = await store.capture({
       title: `Hops seed ${marker}`,
       type: "claim",

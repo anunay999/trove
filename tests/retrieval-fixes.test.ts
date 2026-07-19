@@ -5,6 +5,7 @@ import pg from "pg";
 import { suiteStore, closeStore, hasPostgres, sleep } from "./helpers.js";
 import type { GraphJob, GraphOperationContext } from "../src/graphCore.js";
 import { FakeEmbeddingProvider, cosineSimilarity } from "../src/embeddings.js";
+import { normalizeRetrievalQuery } from "../src/queryNormalize.js";
 import { UserStore } from "../src/users.js";
 
 // Self-contained semantic behavior: the deterministic offline provider runs in
@@ -520,5 +521,78 @@ describe("retrieval fixes", () => {
     const capped = await store.getEvidenceForNodes([node.id], context, { query: `${marker} caching`, perNodeLimit: 2 });
     assert.equal(capped.get(node.id)?.length, 2);
     await drainJobs();
+  });
+
+  it("NL0: normalizeRetrievalQuery strips question scaffolding, keeps content terms", () => {
+    assert.equal(normalizeRetrievalQuery("How many weddings have I attended in this year?"), "weddings attended year");
+    assert.equal(normalizeRetrievalQuery("What is the refund policy for annual plans?"), "refund policy annual plans");
+    assert.equal(normalizeRetrievalQuery("events in 2024"), "events 2024", "numerals survive");
+    assert.equal(normalizeRetrievalQuery("the"), "the", "stop-word-only queries fall back to the original so the empty-tsquery guard still fires");
+  });
+
+  it("NL1: a natural-language question retrieves the answering node (bench finding 1)", async () => {
+    // The LongMemEval pilot: this exact question returned 0 across lexical,
+    // semantic, and hybrid against a 291-atom container that held the answer.
+    const wedding = await store.capture({
+      title: `Traditional Nepali Dishes at Weddings ${stamp}`,
+      type: "claim",
+      summary: "wedding food notes",
+      content: "I attended my sister's wedding this year; the Nepali dishes were outstanding.",
+      evidence: [],
+      links: [],
+    }, context);
+    await drainJobs();
+
+    const question = "How many weddings have I attended in this year?";
+    const lexical = await store.search({ query: question, includeTextUnits: false, mode: "lexical", limit: 10 });
+    assert.ok(
+      lexical.nodes.some((node) => node.id === wedding.id),
+      "lexical must find the answering node from a natural-language question",
+    );
+  });
+
+  it("NL2: OR-fallback fires when no node holds every query term", async () => {
+    const wedding = await store.capture({
+      title: `Weddings recap ${stamp}`,
+      type: "claim",
+      summary: "family",
+      content: "the weddings were lovely",
+      evidence: [],
+      links: [],
+    }, context);
+    const kube = await store.capture({
+      title: `Kubernetes runbook ${stamp}`,
+      type: "claim",
+      summary: "ops",
+      content: "kubernetes pod eviction runbook",
+      evidence: [],
+      links: [],
+    }, context);
+    await drainJobs();
+
+    // "weddings kubernetes" co-occurs in no node: AND misses, OR must return both.
+    const hits = await store.search({ query: "weddings kubernetes", includeTextUnits: false, mode: "lexical", limit: 10 });
+    const ids = hits.nodes.map((node) => node.id);
+    assert.ok(ids.includes(wedding.id), "OR-fallback should return the weddings node");
+    assert.ok(ids.includes(kube.id), "OR-fallback should return the kubernetes node");
+  });
+
+  it("NL3: recall packs atoms for a natural-language question", async () => {
+    const wedding = await store.capture({
+      title: `Wedding attendance log ${stamp}`,
+      type: "claim",
+      summary: "weddings attended this year",
+      content: "This year I attended two weddings: my sister's in June and a colleague's in September.",
+      evidence: [],
+      links: [],
+    }, context);
+    await drainJobs();
+
+    const pack = await store.recall({ query: "How many weddings have I attended in this year?", tokenBudget: 2000 });
+    assert.ok(pack.atoms.length > 0, "recall must not return an empty pack for a natural-language question");
+    assert.ok(
+      pack.atoms.some((atom) => atom.node.id === wedding.id),
+      "recall should pack the answering node",
+    );
   });
 });
