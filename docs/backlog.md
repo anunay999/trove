@@ -64,21 +64,39 @@ per-owner progress reporting.
 
 ---
 
-### 3. `queryNormalize` strips meaning-bearing terms ✅
+### 3. `queryNormalize` strips meaning-bearing terms — ❌ **falsified; strip list kept**
 
-**Evidence** — `src/queryNormalize.ts` strips `today`, `now`, `ago`,
-`currently`, `many`, `count`, `number`, `amount`. Verified:
-`retrievalQueryTerms("How long ago did I move and how many boxes are left today?")`
-→ `['long','move','boxes','left']` — every temporal and quantity marker gone.
+The measured 0%-temporal loss is real, but the strip list is not its cause
+(falsified 2026-07-19 against `trove_bench3`, the compare-run containers):
 
-**Impact** — temporal and aggregation intent is destroyed *before* either
-retrieval arm sees it, so nothing downstream can recover it. Measured on
-LongMemEval: **0% on temporal-reasoning vs 66.7% for plain RAG.**
+- All three failing temporal-reasoning questions retrieved the relevant memory
+  in the top 10 **with the strip list active** (checkpoint `retrievalMetrics`:
+  hitAtK=1). The answer failed anyway — the failure is downstream of retrieval.
+- Re-running the lexical arm with the temporal terms kept: the Crown/GoT tsquery
+  is byte-identical (nothing temporal was in that query); the smoker question
+  reshuffles noise (relevant atom 16→8 by cover-density luck while unrelated
+  "days ago" atoms jumped ahead); the Nightingale question only gains a dead
+  `'mani'` probe. No principled gain on the positive set.
+- The semantic arm already embeds the raw, unstripped question (dual-embed,
+  `pgStore.ts:451`), so intent was never destroyed before "either retrieval
+  arm" — only the lexical probes lose the terms.
+- Negative-set risk confirmed: `ago`/`today`/`mani` appear in 25/12/18 of 3015
+  atoms, so keeping them converts strict-AND hits into OR-fallback floods on
+  virtually every temporal query.
 
-**Action** — remove these terms from the strip list. Evaluate over positive
-**and** negative query sets: the list also exists to stop noise terms matching
-everything, so removing entries can regress precision. Consider stripping for the
-lexical tsquery only and leaving the semantic arm the intact query.
+**Actual causes of the 0%, in order** — (a) the compare run's atoms carried
+**no dates at all** (0/3015 contain "Stated on"; the provider's date suffix
+landed after that ingest), so "10 days ago" was unanswerable no matter what
+retrieval returned; (b) extraction relativizes dates ("got a smoker *on the day
+of the conversation*") — that is #4; (c) relevant atoms rank under OR-fallback
+noise — that is #8/#10.
+
+**Action taken** — strip list unchanged. The constructive fix is date anchoring
+in what agents actually read: `renderRecallAtom` headers and
+`renderAgentContext` now carry the node's updated date (`graphCore.ts`). The
+bench provider already appends "Stated on ‹timestamp›" per atom; the temporal
+score should be re-measured on the stratified rerun, with extraction
+absolute-dating (#4) as the remaining lever.
 
 ---
 

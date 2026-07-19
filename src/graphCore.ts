@@ -457,7 +457,10 @@ function renderRecallAtom(
 ): { block: string; body: string; contentTruncated: boolean } {
   const origin = hops === 0 ? "match" : "linked";
   const headerLines = [
-    `## ${node.title} [${node.type}/${origin}] (${node.slug})`,
+    // The updated date anchors each atom in time: temporal questions ("what did
+    // I buy 10 days ago?") are unanswerable from a dateless pack (bench finding —
+    // the compare run's atoms carried no dates and temporal-reasoning scored 0%).
+    `## ${node.title} [${node.type}/${origin}] (${node.slug}) — updated ${node.updatedAt.slice(0, 10)}`,
     node.summary ?? "",
   ].filter(Boolean);
   const header = headerLines.join("\n") + "\n";
@@ -838,6 +841,7 @@ export function renderAgentContext(
   const edges = neighborhood.edges.map((edge) => `${edge.fromNodeId} -[${edge.predicate}]-> ${edge.toNodeId}`);
   return [
     `Node: ${node.title} (${node.type})`,
+    `Updated: ${node.updatedAt}`,
     `Summary: ${node.summary ?? ""}`,
     node.content ? `Content: ${node.content}` : "",
     "Evidence:",

@@ -79,8 +79,11 @@ against a rival's *sub-task*.
 
 Ten questions is one question of separation — **not a result**. Two things in it are worth keeping:
 search latency is ~4× better (the HNSW node-path fix showing end-to-end), and per-category,
-**temporal-reasoning scored 0% against rag's 66.7%**, which is a real signal pointing at
-`queryNormalize` stripping `today`/`now`/`ago`/`many`/`count`.
+**temporal-reasoning scored 0% against rag's 66.7%** — a real signal, but follow-up verification
+**falsified the initial attribution** to `queryNormalize` stripping `today`/`now`/`ago`/`many`/`count`:
+all three failing temporal questions retrieved the relevant memory (hitAtK=1), and not one of the
+3,015 ingested atoms carried a date ("Stated on" landed after that ingest), so "10 days ago" was
+unanswerable answer-side. Date rendering is in the provider now; re-measure on the stratified rerun.
 
 **Mem0 did not complete.** Four attempts. First failed because the API key never reached the harness
 (`. .env` in zsh searches `$PATH`, not the cwd, unless written `./.env` — and the error was
