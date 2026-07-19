@@ -247,6 +247,44 @@ Things the pilot disproved, recorded so they are not re-assumed:
 
 ---
 
+## Post-fix review (2026-07-19, same day)
+
+The retrieval fix landed as `37b3cbe`. A four-angle cleanup review of that commit found two further
+defects, both since fixed on `fix/retrieval-perf-and-ci-isolation`:
+
+### The fix disabled the HNSW index on semantic text-unit search
+
+`semanticSearch` ordered by `least(e.embedding <=> $1, e.embedding <=> $2)`. `least()` is not an
+indexable operator expression, so `embedding_hnsw_idx` (migration 009) became unusable. Measured on a
+50k-row table with the real query shape (join + model filter + distance filter):
+
+| Sort key | Plan | Time |
+|---|---|---|
+| `e.embedding <=> $1` | `Index Scan using emb_hnsw` | **0.214 ms** |
+| `least(<=> $1, <=> $2)` | `Seq Scan` ×2 + top-N heapsort | **47.6 ms** |
+
+222× slower, and it fired *only* when `normalized !== raw` — i.e. exactly on the natural-language
+queries the fix targets. Now one indexable probe per vector, merged by min distance in JS.
+
+> Worth recording how this nearly went unnoticed: on `trove_repro` (245 embedding rows) **both** forms
+> plan a `Sort`, because the planner ignores HNSW at that size. The regression is invisible on the
+> repro fixture and only appears at realistic scale. A first attempt to verify it on the fixture
+> produced a false negative.
+
+### CI was red on main, and it was not a builder flake
+
+Both `37b3cbe` and the `adece49` redeploy failed CI identically:
+`expected pending maintenance jobs before the worker starts` (101 tests, 100 pass, 1 fail). That was
+attributed to a Railway builder flake — but the Railway *deploy* failure and the GitHub *CI* failure
+were two different things, and a local Docker build succeeding says nothing about a failing assertion.
+
+Root cause is test isolation, not the product. Mutations enqueue maintenance jobs under **global**
+dedupe keys (`maintenance:<kind>`, `pgStore.ts:1558`); `node:test` runs files in parallel, so a
+sibling suite's pending job absorbs this test's enqueue, keeping the older `createdAt` and falling
+outside the test's window. Reproduced deterministically — after a sibling capture, a second capture
+1.2s later added 0 rows inside the window. `37b3cbe` added four capture-doing tests (NL0–NL3), which
+turned a latent race into a reliable one.
+
 ## Threats to validity
 
 Known ways this harness could be measuring the wrong thing. All open.
