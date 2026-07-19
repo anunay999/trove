@@ -1,6 +1,10 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { suiteStore, closeStore } from "./helpers.js";
+import { suiteStore, closeStore, isolateDatabase } from "./helpers.js";
+
+// This suite asserts on queue state, and `runJob({})` claims whichever job is
+// next — including a parallel sibling's. Own database, own queue.
+await isolateDatabase("jobs");
 
 describe("jobs", () => {
   const { store, context, stamp } = suiteStore("job");

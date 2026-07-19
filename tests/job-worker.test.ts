@@ -2,7 +2,12 @@ import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { embeddingDrainRemaining, startJobWorker } from "../src/jobWorker.js";
 import type { GraphJob } from "../src/graphCore.js";
-import { suiteStore, closeStore, sleep } from "./helpers.js";
+import { suiteStore, closeStore, sleep, isolateDatabase } from "./helpers.js";
+
+// The worker drains the whole queue, so a parallel sibling's enqueues both
+// break this suite's "queue empty" assertions and get drained out from under it.
+// Own database, own queue.
+await isolateDatabase("job-worker");
 
 function fabricateJob(overrides: Partial<GraphJob>): GraphJob {
   return {

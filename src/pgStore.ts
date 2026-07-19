@@ -314,16 +314,24 @@ export class PgGraphStore implements GraphStore {
 
   async search(input: SearchInput, context?: GraphOperationContext): Promise<SearchResult> {
     const scope = ownerScope(context);
-    const lexical = await this.lexicalSearch(input, scope);
-    if (input.mode === "lexical") return lexical;
+    const provider = input.mode === "lexical" ? null : createEmbeddingProviderFromEnv();
 
-    const provider = createEmbeddingProviderFromEnv();
-    if (!provider) {
-      return input.mode === "semantic" ? { nodes: [], textUnits: [] } : lexical;
+    // Semantic-only searches used to run a full lexical search first and throw
+    // the result away; they now do no lexical work at all.
+    if (input.mode === "semantic") {
+      return provider ? this.semanticSearch(input, provider, scope) : { nodes: [], textUnits: [] };
     }
+    // Lexical-only, or hybrid with no embedding provider configured.
+    if (input.mode === "lexical" || !provider) return this.lexicalSearch(input, scope);
 
-    const semantic = await this.semanticSearch(input, provider, scope);
-    if (input.mode === "semantic") return semantic;
+    // The two arms are independent, and the semantic one blocks on an embedding
+    // API round trip. Running them concurrently hides the lexical SQL entirely
+    // behind that call rather than adding to it — recall (the hot path) calls
+    // this with limit 50.
+    const [lexical, semantic] = await Promise.all([
+      this.lexicalSearch(input, scope),
+      this.semanticSearch(input, provider, scope),
+    ]);
 
     return {
       nodes: reciprocalRankFusion(lexical.nodes, semantic.nodes),
@@ -453,30 +461,55 @@ export class PgGraphStore implements GraphStore {
     const typeFilter = input.types && input.types.length > 0 ? input.types : null;
     const maxDistance = maxSemanticDistanceFor(input);
 
-    // Only current revisions carry embeddings (superseded ones are pruned on
-    // update/tombstone and by migration 010); the join + distance floor keep
-    // stale text and irrelevant neighbors out. distinct on collapses any
-    // duplicate embedding rows per node, then we re-order by distance.
+    // Probe the HNSW index FIRST, then join and filter — never filter-then-sort.
+    //
+    // The previous shape selected from embedding JOIN node_revision JOIN node
+    // with `distinct on (n.id) ... order by n.id, <distance>`. Ordering by n.id
+    // is something the vector index cannot provide, so Postgres read and sorted
+    // EVERY embedding row on every semantic search: measured at 50k rows, three
+    // sequential scans and 60.8ms. Probing the index for a bounded candidate set
+    // and joining afterwards plans as index scans throughout: 0.99ms, ~61x.
+    //
+    // Each per-vector branch is `order by embedding <=> $n limit K`, the only
+    // shape pgvector can serve from embedding_hnsw_idx (migration 009). Their
+    // union is deduped by min() rather than `distinct on`, which also removes
+    // the need for the n.id ordering that caused the problem — a revision can
+    // hold several embedding rows (the unique key includes content_sha256), and
+    // min() collapses them correctly.
+    //
+    // OVERFETCH exists because the index probe happens BEFORE owner scoping,
+    // type filters and the giant-content rule, so a heavily filtered query can
+    // otherwise come back short. It trades a larger candidate set for recall;
+    // pgvector 0.8's hnsw.iterative_scan would remove the guess entirely.
+    const OVERFETCH = 10;
+    const candidateLimit = Math.max(200, input.limit * OVERFETCH);
+    const candidateBranches = vectors
+      .map((_, index) => `(
+           select e.owner_id, e.embedding <=> $${index + 1}::vector as distance
+           from embedding e
+           where e.owner_table = 'node_revision' and e.model = ${p(1)}
+           order by e.embedding <=> $${index + 1}::vector
+           limit ${p(9)}
+         )`)
+      .join(" union all ");
+
     const nodeResult = await this.pool.query(
-      `select * from (
-         select distinct on (n.id)
-                n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id, n.updated_at, n.access_count, n.last_accessed_at,
-                ${distExpr} as distance
-         from embedding e
-         join node_revision nr on nr.id = e.owner_id and e.owner_table = 'node_revision'
-         join node n on n.id = nr.node_id and n.deleted_at is null and nr.id = n.current_revision_id
-         where e.model = ${p(1)}
-           and ${distExpr} < ${p(6)}
-           and (${p(4)} or n.owner_id = ${p(5)})
-           and (${p(2)}::node_type[] is null or n.type = any(${p(2)}::node_type[]))
-           and (
-             coalesce(length(nr.content), 0) <= 12000
-             or n.title ilike ${p(7)}
-             or n.slug = lower(replace(${p(8)}, ' ', '-'))
-           )
-         order by n.id, ${distExpr}
-       ) node_matches
-       order by distance
+      `with candidates as (${candidateBranches}),
+            best as (select owner_id, min(distance) as distance from candidates group by owner_id)
+       select n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id,
+              n.updated_at, n.access_count, n.last_accessed_at, best.distance
+       from best
+       join node_revision nr on nr.id = best.owner_id
+       join node n on n.id = nr.node_id and n.deleted_at is null and nr.id = n.current_revision_id
+       where best.distance < ${p(6)}
+         and (${p(4)} or n.owner_id = ${p(5)})
+         and (${p(2)}::node_type[] is null or n.type = any(${p(2)}::node_type[]))
+         and (
+           coalesce(length(nr.content), 0) <= 12000
+           or n.title ilike ${p(7)}
+           or n.slug = lower(replace(${p(8)}, ' ', '-'))
+         )
+       order by best.distance
        limit ${p(3)}`,
       [
         ...vectors,
@@ -488,6 +521,7 @@ export class PgGraphStore implements GraphStore {
         maxDistance,
         `%${input.query}%`,
         input.query,
+        candidateLimit,
       ],
     );
 

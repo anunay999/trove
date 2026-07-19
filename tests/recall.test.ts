@@ -1,6 +1,11 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { suiteStore, closeStore } from "./helpers.js";
+import { suiteStore, closeStore, isolateDatabase } from "./helpers.js";
+
+// Recall packs are budget-sensitive: nodes left by a previous run or a parallel
+// suite compete for the same token budget and change what gets packed. Own
+// database.
+await isolateDatabase("recall");
 
 describe("recall", () => {
   const { store, context, stamp } = suiteStore("recall");
