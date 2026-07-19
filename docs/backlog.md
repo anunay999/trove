@@ -26,7 +26,7 @@ Two cautionary examples worth remembering when working this list:
 
 ## P0 — blocks scale or loses to a naive baseline
 
-### 1. `refresh_embeddings` is not owner-scoped ✅
+### 1. `refresh_embeddings` is not owner-scoped ✅ **fixed 2026-07-19**
 
 **Evidence** — `src/pgStore.ts` (~line 1630). The missing-count query has no owner
 filter:
@@ -47,9 +47,19 @@ the benchmark adapter must pin provider concurrency to 1.
 **Action** — add an owner filter to both the count and the backfill; let callers
 request convergence for one owner. Keep a global mode for the background worker.
 
+**Done** — `refresh_embeddings` accepts `payload.ownerId`: the missing-count and
+both backfill selects take the same filter, the result envelope echoes the scope,
+and the worker's drain-follow-up preserves it (dedupe key gains the owner suffix,
+so two owners' drains no longer absorb each other). Global mode is unchanged.
+Callers pass `ownerId` via the normal enqueue path (API/CLI/payload). Covered by
+`tests/embedding-backfill.test.ts`: a scoped drain embeds exactly the owner's
+rows and leaves the rest of the corpus missing. **Note for the bench:** the
+adapter can now request per-container convergence instead of pinning concurrency
+to 1 — worth rewiring before the stratified rerun.
+
 ---
 
-### 2. Embedding backfill drains ≤100 rows per job ✅
+### 2. Embedding backfill drains ≤100 rows per job ✅ **fixed 2026-07-19**
 
 **Evidence** — `refreshMissingEmbeddings` clamps to
 `Math.max(1, Math.min(100, limit))`; default 24. Measured: 22,730 pending rows ⇒
@@ -61,6 +71,12 @@ queue churn. Compounds with #1.
 **Action** — raise the cap (the clamp predates batched embedding calls), and
 embed in provider-sized batches rather than job-sized ones. Depends on #1 for
 per-owner progress reporting.
+
+**Done** — the clamp is now 1000 (default 256, `TROVE_EMBEDDING_JOB_LIMIT`
+override unchanged), and `embedRows` chunks provider calls at 128 texts per
+request — the job size and the API batch size are decoupled. A 22,730-row
+backlog is now ~90 jobs, not ~950. Covered by the `payload.limit` end-to-end
+test in `tests/embedding-backfill.test.ts`.
 
 ---
 
@@ -239,23 +255,32 @@ guess entirely — worth adopting when the deployment's pgvector supports it.
 
 ## ADD — missing capability
 
-### 16. Write-time reconciliation / contradiction detection ✅ — *highest value on this list*
+### 16. Write-time reconciliation / contradiction detection ✅ **implemented 2026-07-19**
 
-**Evidence** — listed as open in `docs/memory-db-design.md`; no contradiction
-pass exists in the write path.
+Shipped as the `reconcile_node` graph job (migration `011`):
 
-**Why it matters more than anything else here** — supersession exists as a
-*capability* (`supersedesEdgeId`, edge invalidation, validity intervals) but
-nothing detects conflicts and invokes it. An agent must notice the contradiction
-itself and choose to supersede, which in practice it will not. Until extraction
-resolves entities against existing nodes and flags temporally-overlapping claims,
-bitemporality is a mechanism nobody drives — the single most differentiated part
-of the design is inert.
+- **On write** — capture and content-changing updates enqueue a per-node
+  reconcile job (dedupe `reconcile:<nodeId>`, priority 30) in the same
+  transaction as the write itself.
+- **Candidate-match** — lexical + semantic search against the node's own owner
+  scope (the semantic arm contributes when an embedding provider is configured).
+- **Judge** — pluggable `ReconcileJudge`; OpenAI (`gpt-4o-mini`,
+  `TROVE_RECONCILE_JUDGE_MODEL`) when a key is configured, otherwise a
+  conservative heuristic that only flags near-identical titles. Verdicts:
+  supersedes / duplicate / contradicts / related / distinct.
+- **Act, conservatively** — a confident `supersedes` writes a non-destructive
+  `supersedes` edge; `contradicts`/`duplicate` become flags in the job result.
+  Nothing is tombstoned or invalidated automatically: a wrong auto-invalidation
+  destroys a belief, a wrong edge only annotates it.
+- **Read-side** — recall marks a superseded atom `SUPERSEDED by <title>` in its
+  header (via `supersededBy` on both drivers), so the reader prefers the
+  successor. The recall tool description teaches the mark.
 
-**Action** — on write: candidate-match against existing nodes (slug, FTS,
-embedding), flag temporally-overlapping claims on the same entity, and enqueue
-LLM-judged contradiction resolution as a `graph_job`. The event log already makes
-this replayable.
+Deliberately out of scope: auto-invalidation of contradicted edges (needs
+temporal judgement we don't trust a heuristic with), entity resolution during
+extraction (the bench-side distillation), and decay/archive (#11). The
+superseded-mark is annotation, not a ranking change — whether superseded atoms
+should rank lower is a #8/#10 question to answer with the ranking work.
 
 ### 17. Provenance quality measurement ✅
 
@@ -323,9 +348,9 @@ dictionary do the rest.
 
 ## Suggested order
 
-1. **#16 write-time reconciliation** — without it, the differentiator is inert
-2. **#1 + #2 owner-scoped, batched embedding backfill** — blocks scale
-3. **#3 temporal terms** — a measured loss to a naive baseline
+1. ~~#16 write-time reconciliation~~ — **done** (reconcile_node job, supersedes marks in recall)
+2. ~~#1 + #2 owner-scoped, batched embedding backfill~~ — **done** (payload.ownerId; 256/1000 limits, 128-text batches)
+3. ~~#3 temporal terms~~ — **falsified**; the fix was date anchoring, not the strip list
 4. **#4 extraction loss** — the write path discards answers
 5. **#8 + #10 ranking** — retrieval finds the evidence and fails to surface it
 
@@ -333,4 +358,5 @@ Then #5 (typed job results) and #6 (driver parity), which are cheap and prevent
 recurrence of bugs already seen once.
 
 **Verify before acting** on every ⚠️ item — #9, #18, and the `deployment.md` /
-`README.md` claims in #22.
+`README.md` claims in #22. (#9, #18 and the `deployment.md` half of #22 were
+verified true on 2026-07-19; they are safe to work from.)

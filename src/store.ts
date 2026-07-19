@@ -59,6 +59,8 @@ import {
 } from "./graphCore.js";
 import { cosineSimilarity, createEmbeddingProviderFromEnv, type EmbeddingProvider } from "./embeddings.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
+import { ownerScope } from "./graphCore.js";
+import { performReconcileNode, type ReconcileJudge } from "./reconcile.js";
 import { slugify } from "./slug.js";
 
 type Revision = {
@@ -87,8 +89,16 @@ export class InMemoryGraphStore implements GraphStore {
   private deletedNodeIds = new Set<string>();
   /** Fake-provider vectors by content hash so semantic search stays cheap. */
   private embeddingCache = new Map<string, number[]>();
+  /**
+   * Reconciliation judge. The in-memory driver defaults to the heuristic
+   * (null) rather than the env OpenAI judge: it backs the test suite, and an
+   * ambient OPENAI_API_KEY must never turn a unit test into an LLM call.
+   * Inject one explicitly to test the judged path.
+   */
+  private reconcileJudge: ReconcileJudge | null;
 
-  constructor() {
+  constructor(options: { reconcileJudge?: ReconcileJudge | null } = {}) {
+    this.reconcileJudge = options.reconcileJudge ?? null;
     this.seed();
   }
 
@@ -440,6 +450,19 @@ export class InMemoryGraphStore implements GraphStore {
     return { tombstoned };
   }
 
+  supersededBy(nodeIds: string[], _context?: GraphOperationContext): Map<string, { byNodeId: string; byTitle: string }> {
+    const map = new Map<string, { byNodeId: string; byTitle: string }>();
+    const wanted = new Set(nodeIds);
+    for (const edge of this.edges.values()) {
+      if (edge.predicate !== "supersedes" || edge.expiredAt !== null) continue;
+      if (!wanted.has(edge.toNodeId)) continue;
+      const by = this.nodes.get(edge.fromNodeId);
+      if (!by || this.deletedNodeIds.has(by.id)) continue;
+      map.set(edge.toNodeId, { byNodeId: by.id, byTitle: by.title });
+    }
+    return map;
+  }
+
   neighborhood(input: NeighborhoodInput): NeighborhoodResult {
     const allowedPredicates = new Set(input.predicates ?? []);
     const maxNodes = Math.max(1, Math.min(500, Math.trunc(input.maxNodes ?? 100)));
@@ -590,6 +613,7 @@ export class InMemoryGraphStore implements GraphStore {
     this.revisions.set(revisionId, { id: revisionId, nodeId: id, content: node.content, createdAt: now });
     this.recordEvent("capture", id, context, now);
     this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
+    this.enqueueReconcileJob(context, id);
 
     for (const evidence of input.evidence) {
       const annotationInput: AnnotateInput = {
@@ -666,6 +690,8 @@ export class InMemoryGraphStore implements GraphStore {
     }
     this.recordEvent("update", updated.id, context, now);
     this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
+    // Reconcile only when content actually changed — new claims, new judgement.
+    if (contentChanged) this.enqueueReconcileJob(context, updated.id);
     return updated;
   }
 
@@ -898,7 +924,7 @@ export class InMemoryGraphStore implements GraphStore {
       .slice(0, input.limit ?? 25);
   }
 
-  runJob(input: RunJobInput = {}, context?: GraphOperationContext): GraphJob | null {
+  async runJob(input: RunJobInput = {}, context?: GraphOperationContext): Promise<GraphJob | null> {
     // Claimable: pending, or failed with retries left whose quadratic backoff
     // (attempts^2 x 10s since last update) has elapsed. Dead jobs never run.
     const claimable = (candidate: GraphJob): boolean => {
@@ -928,7 +954,7 @@ export class InMemoryGraphStore implements GraphStore {
     this.graphJobs.set(running.id, running);
 
     try {
-      const result = this.performJob(running);
+      const result = await this.performJob(running);
       const finishedAt = new Date().toISOString();
       const succeeded: GraphJob = {
         ...running,
@@ -960,11 +986,19 @@ export class InMemoryGraphStore implements GraphStore {
     return { ok: true };
   }
 
-  private performJob(job: GraphJob): Record<string, unknown> {
+  private async performJob(job: GraphJob): Promise<Record<string, unknown>> {
     if (job.kind === "lint_graph") {
       const report = this.lint();
       // Carry the findings themselves (capped) — counts alone are not actionable.
       return { lint: { ...report.summary, findings: report.findings.slice(0, 200) } };
+    }
+
+    if (job.kind === "reconcile_node") {
+      const payload = job.payload as Record<string, unknown>;
+      const nodeId = typeof payload.nodeId === "string" ? payload.nodeId : null;
+      if (!nodeId) throw new Error("reconcile_node: payload.nodeId is required");
+      const ownerId = typeof payload.ownerId === "string" ? payload.ownerId : null;
+      return await performReconcileNode(this, { nodeId, ownerId }, this.reconcileJudge);
     }
 
     if (job.kind === "refresh_obsidian_projection") {
@@ -998,6 +1032,16 @@ export class InMemoryGraphStore implements GraphStore {
         dedupeKey: `maintenance:${kind}`,
       }, context);
     }
+  }
+
+  /** Per-node reconciliation enqueue; see pgStore for the rationale. */
+  private enqueueReconcileJob(context: GraphOperationContext | undefined, nodeId: string): void {
+    this.enqueueJob({
+      kind: "reconcile_node",
+      payload: { reason: "graph_mutation", nodeId, ownerId: ownerScope(context).ownerId },
+      priority: 30,
+      dedupeKey: `reconcile:${nodeId}`,
+    }, context);
   }
 
   private uniqueSlug(baseSlug: string): string {

@@ -320,6 +320,7 @@ export const graphJobKindSchema = z.enum([
   "refresh_obsidian_projection",
   "lint_graph",
   "refresh_embeddings",
+  "reconcile_node",
 ]);
 
 export const graphJobStatusSchema = z.enum([

@@ -63,8 +63,8 @@ export type GraphEventFeed = {
 export type EmbeddingCounts = { nodeRevisions: number; textUnits: number };
 
 export type RefreshEmbeddingsResult =
-  | { status: "refreshed"; missingBefore: EmbeddingCounts; embedded: EmbeddingCounts; provider: string; model: string }
-  | { status: "skipped_no_embedding_provider"; missing: EmbeddingCounts; provider: string; model: string };
+  | { status: "refreshed"; ownerId: string | null; missingBefore: EmbeddingCounts; embedded: EmbeddingCounts; provider: string; model: string }
+  | { status: "skipped_no_embedding_provider"; ownerId: string | null; missing: EmbeddingCounts; provider: string; model: string };
 
 export type GraphJob = {
   id: string;
@@ -284,6 +284,12 @@ export type GraphStore = {
    * (default 5) units per node.
    */
   getEvidenceForNodes(nodeIds: string[], context?: GraphOperationContext, opts?: { query?: string; perNodeLimit?: number }): MaybePromise<Map<string, TextUnit[]>>;
+  /**
+   * Active `supersedes` edges pointing AT the given nodes — i.e. which of them
+   * a newer node has replaced. Recall uses it to mark superseded atoms so an
+   * agent prefers the successor instead of reading two co-equal "truths".
+   */
+  supersededBy(nodeIds: string[], context?: GraphOperationContext): MaybePromise<Map<string, { byNodeId: string; byTitle: string }>>;
   recall(input: RecallInput, context?: GraphOperationContext): MaybePromise<RecallResult>;
   link(input: LinkInput, context?: GraphOperationContext): MaybePromise<GraphEdge | null>;
   invalidateEdge(input: InvalidateEdgeInput, context?: GraphOperationContext): MaybePromise<GraphEdge | null>;
@@ -453,14 +459,15 @@ function renderRecallAtom(
   node: GraphNode,
   hops: number,
   remainingTokens: number,
-  options: { primaryMatch?: boolean; maxContentChars?: number } = {},
+  options: { primaryMatch?: boolean; maxContentChars?: number; supersededByTitle?: string } = {},
 ): { block: string; body: string; contentTruncated: boolean } {
   const origin = hops === 0 ? "match" : "linked";
+  const supersedeMark = options.supersededByTitle ? ` — SUPERSEDED by ${options.supersededByTitle}` : "";
   const headerLines = [
     // The updated date anchors each atom in time: temporal questions ("what did
     // I buy 10 days ago?") are unanswerable from a dateless pack (bench finding —
     // the compare run's atoms carried no dates and temporal-reasoning scored 0%).
-    `## ${node.title} [${node.type}/${origin}] (${node.slug}) — updated ${node.updatedAt.slice(0, 10)}`,
+    `## ${node.title} [${node.type}/${origin}] (${node.slug}) — updated ${node.updatedAt.slice(0, 10)}${supersedeMark}`,
     node.summary ?? "",
   ].filter(Boolean);
   const header = headerLines.join("\n") + "\n";
@@ -627,6 +634,10 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     ? [primary, ...scored.filter((candidate) => candidate.node.id !== primary.node.id)]
     : scored;
 
+  // A node a newer fact supersedes is marked in its header, so the reader
+  // prefers the successor instead of weighing two co-equal "truths".
+  const superseded = await store.supersededBy(ordered.map((candidate) => candidate.node.id), context);
+
   // Phase 1: pack atom bodies/teasers for every candidate in rank order. No
   // per-node store.read — candidates from search/expansion already carry
   // current content, and internal reads must not bump access activation.
@@ -648,9 +659,11 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     // First try the slice the wire room allows; on overflow degrade to
     // header-only before skipping the candidate entirely.
     for (const maxContentChars of [contentRoomTokens * 4, 0]) {
+      const supersededByTitle = superseded.get(candidate.node.id)?.byTitle;
       const rendered = renderRecallAtom(candidate.node, candidate.hops, remaining, {
         primaryMatch: isPrimary,
         maxContentChars,
+        ...(supersededByTitle ? { supersededByTitle } : {}),
       });
       const atom: RecallAtom = {
         // The wire atom carries the packed slice the budgeter chose, never the

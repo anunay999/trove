@@ -61,6 +61,11 @@ import {
 } from "./graphCore.js";
 import { createEmbeddingProviderFromEnv, vectorLiteral, type EmbeddingProvider } from "./embeddings.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
+import {
+  createReconcileJudgeFromEnv,
+  performReconcileNode,
+  type ReconcileJudge,
+} from "./reconcile.js";
 import { slugify } from "./slug.js";
 
 const { Pool } = pg;
@@ -75,13 +80,21 @@ const EMBEDDABLE_TEXT_UNIT = `
 
 type PgStoreOptions = {
   connectionString: string;
+  /**
+   * Override the reconciliation judge (tests inject a fake; production defaults
+   * to the OpenAI judge from env, falling back to the heuristic when
+   * unconfigured). Pass `null` explicitly to force the heuristic.
+   */
+  reconcileJudge?: ReconcileJudge | null;
 };
 
 export class PgGraphStore implements GraphStore {
   private pool: pg.Pool;
+  private reconcileJudge: ReconcileJudge | null;
 
   constructor(options: PgStoreOptions) {
     this.pool = new Pool({ connectionString: options.connectionString, keepAlive: true });
+    this.reconcileJudge = options.reconcileJudge === undefined ? createReconcileJudgeFromEnv() : options.reconcileJudge;
     // Idle clients dropped by the pooler (e.g. Supabase) emit 'error'; without
     // a listener that unhandled event kills the whole process.
     this.pool.on("error", (error) => {
@@ -687,6 +700,28 @@ export class PgGraphStore implements GraphStore {
     return evidence;
   }
 
+  async supersededBy(nodeIds: string[], context?: GraphOperationContext): Promise<Map<string, { byNodeId: string; byTitle: string }>> {
+    const map = new Map<string, { byNodeId: string; byTitle: string }>();
+    if (nodeIds.length === 0) return map;
+    const scope = ownerScope(context);
+    // Only ACTIVE supersedes edges count: an expired/invalidated one is history,
+    // not a reason to distrust the atom today.
+    const result = await this.pool.query(
+      `select e.to_node_id, e.from_node_id, n.title
+       from edge e
+       join node n on n.id = e.from_node_id and n.deleted_at is null
+       where e.predicate = 'supersedes'
+         and e.to_node_id = any($1::uuid[])
+         and e.deleted_at is null and e.expired_at is null
+         and ($2 or e.owner_id = $3)`,
+      [nodeIds, !scope.scoped, scope.ownerId],
+    );
+    for (const row of result.rows) {
+      map.set(String(row.to_node_id), { byNodeId: String(row.from_node_id), byTitle: String(row.title) });
+    }
+    return map;
+  }
+
   async neighborhood(input: NeighborhoodInput, context?: GraphOperationContext): Promise<NeighborhoodResult> {
     const scope = ownerScope(context);
     const maxNodes = Math.max(1, Math.min(500, Math.trunc(input.maxNodes ?? 100)));
@@ -1043,6 +1078,7 @@ export class PgGraphStore implements GraphStore {
         "lint_graph",
         "refresh_embeddings",
       ]);
+      await this.enqueueReconcileJob(client, context, actorUuid, id);
       await client.query("commit");
 
       const node = await this.read({ nodeId: id }, undefined, { trackAccess: false });
@@ -1165,6 +1201,11 @@ export class PgGraphStore implements GraphStore {
         "lint_graph",
         "refresh_embeddings",
       ]);
+      // Reconcile only when content actually changed — a title/summary-only
+      // revise carries no new claims to judge.
+      if (revisionId !== currentRevisionId) {
+        await this.enqueueReconcileJob(client, context, actorUuid, input.nodeId);
+      }
       await client.query("commit");
 
       const updated = await this.read({ nodeId: input.nodeId }, undefined, { trackAccess: false });
@@ -1592,6 +1633,26 @@ export class PgGraphStore implements GraphStore {
     }
   }
 
+  /**
+   * Reconciliation runs per node, below the other maintenance jobs in priority
+   * (it is the expensive, LLM-judged pass). Dedupe is per node: a burst of
+   * revisions to the same node collapses into one run, which reads the current
+   * revision at claim time.
+   */
+  private async enqueueReconcileJob(
+    client: pg.PoolClient,
+    context: GraphOperationContext | undefined,
+    actorUuid: string | null,
+    nodeId: string,
+  ): Promise<void> {
+    await this.enqueueJobWithClient(client, {
+      kind: "reconcile_node",
+      payload: { reason: "graph_mutation", nodeId, ownerId: ownerScope(context).ownerId },
+      priority: 30,
+      dedupeKey: `reconcile:${nodeId}`,
+    }, context, actorUuid);
+  }
+
   private async enqueueJobWithClient(
     client: pg.PoolClient,
     input: EnqueueJobInput,
@@ -1715,6 +1776,14 @@ export class PgGraphStore implements GraphStore {
       return { lint: { ...report.summary, findings: report.findings.slice(0, 200) } };
     }
 
+    if (job.kind === "reconcile_node") {
+      const payload = asRecord(job.payload);
+      const nodeId = typeof payload.nodeId === "string" ? payload.nodeId : null;
+      if (!nodeId) throw new Error("reconcile_node: payload.nodeId is required");
+      const ownerId = typeof payload.ownerId === "string" ? payload.ownerId : null;
+      return await performReconcileNode(this, { nodeId, ownerId }, this.reconcileJudge);
+    }
+
     if (job.kind === "refresh_obsidian_projection") {
       const projection = buildObsidianVaultExport(
         await this.exportMarkdown(),
@@ -1729,6 +1798,13 @@ export class PgGraphStore implements GraphStore {
 
     const provider = createEmbeddingProviderFromEnv();
     const model = provider?.model ?? process.env.TROVE_EMBEDDING_MODEL ?? "unconfigured";
+    // payload.ownerId scopes the whole job to one tenant: a bulk importer can
+    // ask "is MY data indexed yet?" and drain just its own slice instead of
+    // waiting for the entire corpus. Absent means global (the background
+    // worker's mode). The count and the backfill must take the same filter or
+    // the drain math lies.
+    const payloadOwner = asRecord(job.payload).ownerId;
+    const ownerId = typeof payloadOwner === "string" ? payloadOwner : null;
     // Only the owner types the backfill actually embeds (and search actually
     // reads) are counted; whole-source vectors are a future feature, and
     // counting them here made every job report look permanently unfinished.
@@ -1738,6 +1814,7 @@ export class PgGraphStore implements GraphStore {
          from node n
          join node_revision nr on nr.id = n.current_revision_id
          where n.deleted_at is null
+           and ($2::uuid is null or n.owner_id = $2)
            and not exists (
              select 1 from embedding e
              where e.owner_table = 'node_revision'
@@ -1745,12 +1822,13 @@ export class PgGraphStore implements GraphStore {
                and e.model = $1
                and e.content_sha256 = nr.content_sha256
            )`,
-        [model],
+        [model, ownerId],
       ),
       this.pool.query(
         `select count(*)::int as count
          from text_unit tu
          where ${EMBEDDABLE_TEXT_UNIT}
+           and ($2::uuid is null or tu.owner_id = $2)
            and not exists (
              select 1 from embedding e
              where e.owner_table = 'text_unit'
@@ -1758,7 +1836,7 @@ export class PgGraphStore implements GraphStore {
                and e.model = $1
                and e.content_sha256 = tu.content_sha256
            )`,
-        [model],
+        [model, ownerId],
       ),
     ]);
 
@@ -1772,16 +1850,18 @@ export class PgGraphStore implements GraphStore {
         provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "none",
         model,
         status: "skipped_no_embedding_provider",
+        ownerId,
         missing,
       };
     }
 
-    const limit = Number(asRecord(job.payload).limit ?? process.env.TROVE_EMBEDDING_JOB_LIMIT ?? 24);
-    const embedded = await this.refreshMissingEmbeddings(provider, Number.isFinite(limit) ? limit : 24);
+    const limit = Number(asRecord(job.payload).limit ?? process.env.TROVE_EMBEDDING_JOB_LIMIT ?? 256);
+    const embedded = await this.refreshMissingEmbeddings(provider, Number.isFinite(limit) ? limit : 256, ownerId);
     return {
       provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "openai",
       model,
       status: "refreshed",
+      ownerId,
       missingBefore: missing,
       embedded,
     };
@@ -1790,13 +1870,17 @@ export class PgGraphStore implements GraphStore {
   private async refreshMissingEmbeddings(
     provider: EmbeddingProvider,
     limit: number,
+    ownerId: string | null,
   ): Promise<{ nodeRevisions: number; textUnits: number }> {
-    const boundedLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
+    // Provider-sized batches, not job-sized ones: the old 100-row clamp predates
+    // batched embed calls and made a 20k-row import take ~800 queue round trips.
+    const boundedLimit = Math.max(1, Math.min(1000, Math.trunc(limit)));
     const nodeRevisionRows = await this.pool.query(
       `select nr.id, nr.content_sha256, concat_ws(E'\n', n.title, n.summary, nr.content) as text
        from node n
        join node_revision nr on nr.id = n.current_revision_id
        where n.deleted_at is null
+         and ($3::uuid is null or n.owner_id = $3)
          and length(trim(concat_ws(E'\n', n.title, n.summary, nr.content))) > 0
          and not exists (
            select 1 from embedding e
@@ -1807,13 +1891,14 @@ export class PgGraphStore implements GraphStore {
          )
        order by n.updated_at desc
        limit $2`,
-      [provider.model, boundedLimit],
+      [provider.model, boundedLimit, ownerId],
     );
     const remaining = Math.max(0, boundedLimit - nodeRevisionRows.rows.length);
     const textUnitRows = remaining === 0 ? { rows: [] } : await this.pool.query(
       `select tu.id, tu.content_sha256, tu.text
        from text_unit tu
        where ${EMBEDDABLE_TEXT_UNIT}
+         and ($3::uuid is null or tu.owner_id = $3)
          and not exists (
            select 1 from embedding e
            where e.owner_table = 'text_unit'
@@ -1823,7 +1908,7 @@ export class PgGraphStore implements GraphStore {
          )
        order by tu.created_at desc
        limit $2`,
-      [provider.model, remaining],
+      [provider.model, remaining, ownerId],
     );
 
     await this.embedRows(provider, "node_revision", nodeRevisionRows.rows);
@@ -1841,7 +1926,17 @@ export class PgGraphStore implements GraphStore {
     rows: Array<Record<string, unknown>>,
   ): Promise<void> {
     if (rows.length === 0) return;
-    const embeddings = await provider.embed(rows.map((row) => String(row.text)));
+    // Provider-sized batches: OpenAI accepts far more than the old job clamp
+    // ever sent, but a whole 1000-row drain in one request risks payload and
+    // timeout limits; 128 texts keeps each call small and lets a job embed up
+    // to 1000 rows in a handful of round trips. Inserts stay one transaction —
+    // the job is the unit of retry and its inserts are conflict-idempotent.
+    const EMBED_BATCH = 128;
+    const embeddings: number[][] = [];
+    for (let start = 0; start < rows.length; start += EMBED_BATCH) {
+      const batch = rows.slice(start, start + EMBED_BATCH);
+      embeddings.push(...await provider.embed(batch.map((row) => String(row.text))));
+    }
     const client = await this.pool.connect();
     try {
       await client.query("begin");

@@ -84,6 +84,7 @@ Graph writes enqueue durable `graph_job` rows for:
 - `refresh_obsidian_projection`
 - `lint_graph`
 - `refresh_embeddings`
+- `reconcile_node` (write-time reconciliation; LLM-judged when `OPENAI_API_KEY` is configured, heuristic otherwise)
 
 Run a bounded worker pass:
 
