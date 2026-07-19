@@ -45,10 +45,10 @@ Visibility is tiered by credential scope: **core** tools are shown to every cred
 
 `recall`
 
-- Input: `query`, `tokenBudget` (default **8000**), optional `types`, `depth`, `asOf`, `includeEvidence`
+- Input: `query`, `tokenBudget` (default **8000**), optional `types`, `depth`, `asOf`, `includeEvidence`, `maxSemanticDistance` (cosine-distance ceiling 0–2 for semantic hits; server default 0.55, configurable via `TROVE_SEMANTIC_MAX_DISTANCE`)
 - Output: a token-budgeted context pack — packed atoms with scores, connecting edges, evidence text units, citations, `spentTokens`, and `truncated`
-- Open-ended questions only: hybrid search seeds a graph expansion, candidates are ranked by match plus ACT-R-style activation (recency, frequency) plus degree, and a greedy packer fills the budget. Packing a node counts as a read, so recalled memories strengthen.
-- The pack is a **brief**, not always a full note. Primary hits pack deeply; giant catalog notes are teaser-capped. Prefer one good `recall` for open questions; follow with `read` when you need the complete note.
+- Open-ended questions only: hybrid search seeds a graph expansion, candidates are ranked by match plus ACT-R-style activation (recency, frequency) plus degree, and a greedy packer fills the budget. The budget covers the whole serialized response: atoms carry the packed body slice (`contentTruncated` marks cut bodies — `read` the slug for the full note), `hops` is the true graph distance from the match, and per-node evidence is relevance-ranked to the query, capped at 5 units each.
+- The pack is a **brief**, not always a full note. Packing never counts as a read — only an explicit `read` strengthens activation. Primary hits pack deeply; giant catalog notes are teaser-capped. Prefer one good `recall` for open questions; follow with `read` when you need the complete note.
 
 `grep`
 
@@ -66,8 +66,8 @@ Visibility is tiered by credential scope: **core** tools are shown to every cred
 
 - Input: `title`, `type`, `summary`, optional `content`, `evidence`, `links`, and optional `nodeId`/`slug` to force a target
 - One write door. Exact title/slug match → new revision of that node (optimistic concurrency handled server-side); no match → new node.
-- Output: `action` (`created` | `updated`), the node, and `similar` — near-matches it did NOT merge into. Check it; re-call with `slug` if the dedupe missed.
-- Requires citations or an explicit agent-inference note in the summary.
+- Output: `action` (`created` | `updated`), the node, and `similar` — near-matches it did NOT merge into, scored by trigram title similarity. Check it; re-call with `slug` if the dedupe missed.
+- Cite evidence or say it is agent inference in the summary. This is enforced by the `missing_evidence` lint check (detective), not rejected at write time.
 
 `connect`
 
@@ -76,8 +76,8 @@ Visibility is tiered by credential scope: **core** tools are shown to every cred
 
 `forget`
 
-- Input: `edgeIds` and/or `query`, optional `dryRun`, `validUntil`
-- Retires beliefs on the record. Explicit `edgeIds` apply immediately; `query` mode defaults to a dry-run preview of active edges around matching nodes.
+- Input: `edgeIds`, `nodeIds`, `slugs`, and/or `query`, optional `dryRun`, `validUntil`
+- Retires beliefs on the record. Explicit `edgeIds` expire edges; explicit `nodeIds`/`slugs` tombstone whole nodes so they leave `recall`, `grep`, and `read` (unknown slugs are a hard error). Both apply immediately. `query` mode defaults to a dry-run preview of active edges around matching nodes.
 - Nothing is deleted; history remains queryable through `neighborhood` with `includeExpired` or `asOf`.
 
 ### Curator Tools
@@ -94,9 +94,9 @@ Visibility is tiered by credential scope: **core** tools are shown to every cred
 
 `neighborhood`
 
-- Input: `nodeId`, `depth`, optional edge predicates, optional `asOf` timestamp, optional `includeExpired`
-- Output: compact graph suitable for an agent context window or mind map
-- Default view is current belief: invalidated edges are excluded. `asOf` time-travels along transaction time, `includeExpired` returns full edge history.
+- Input: `nodeId`, `depth`, optional edge predicates, optional `asOf` timestamp, optional `includeExpired`, `maxNodes` (default 100, max 500), `validAt` (valid-time edge filter)
+- Output: compact graph suitable for an agent context window or mind map; each returned node carries its BFS `level` from the seed
+- Default view is current belief: invalidated edges are excluded. `asOf` time-travels along transaction time, `validAt` filters along world time (`valid_from <= t`, unexpired or `valid_until > t`), `includeExpired` returns full edge history.
 
 `project`
 

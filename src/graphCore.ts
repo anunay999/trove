@@ -133,6 +133,14 @@ export type SearchResult = {
   textUnits: TextUnit[];
 };
 
+/** A neighborhood node carries its true BFS depth from the seed (seed = 0). */
+export type NeighborhoodNode = GraphNode & { level: number };
+
+export type NeighborhoodResult = {
+  nodes: NeighborhoodNode[];
+  edges: GraphEdge[];
+};
+
 export type GrepMatch = {
   kind: "node" | "source";
   nodeId?: string;
@@ -205,6 +213,8 @@ export type RecallAtom = {
   score: number;
   hops: number;
   tokens: number;
+  /** True when atom.node.content is a packed slice of the note body, not the full body. */
+  contentTruncated: boolean;
 };
 
 export type RecallCitation = {
@@ -236,8 +246,29 @@ export type GraphStore = {
   readDocument(input: { uri: string }, context?: GraphOperationContext): MaybePromise<GraphDocument | null>;
   search(input: SearchInput, context?: GraphOperationContext): MaybePromise<SearchResult>;
   grep(input: GrepInput, context?: GraphOperationContext): MaybePromise<GrepResult>;
-  read(input: ReadInput, context?: GraphOperationContext): MaybePromise<ReadResult | null>;
-  neighborhood(input: NeighborhoodInput, context?: GraphOperationContext): MaybePromise<{ nodes: GraphNode[]; edges: GraphEdge[] }>;
+  /**
+   * Read a node with its evidence and annotations. By default bumps access
+   * activation (accessCount/lastAccessedAt); pass `{ trackAccess: false }` for
+   * internal reads (dedupe, recall packing) that must not perturb activation.
+   */
+  read(input: ReadInput, context?: GraphOperationContext, opts?: { trackAccess?: boolean }): MaybePromise<ReadResult | null>;
+  neighborhood(input: NeighborhoodInput, context?: GraphOperationContext): MaybePromise<NeighborhoodResult>;
+  /**
+   * Soft-delete nodes (set deleted_at), expire their incident edges, prune
+   * revision embeddings, and emit events. Idempotent and owner-scoped.
+   */
+  tombstoneNodes(ids: string[], context?: GraphOperationContext): MaybePromise<{ tombstoned: string[] }>;
+  /**
+   * Trigram/Jaccard title similarity over ACTIVE nodes. Scores are > 0.25;
+   * an exact normalized-title match scores 1.0.
+   */
+  findSimilarTitles(title: string, limit: number, context?: GraphOperationContext): MaybePromise<Array<{ node: GraphNode; score: number }>>;
+  /**
+   * Batched evidence fetch for many nodes in one query. When `query` is given,
+   * units are ranked by full-text relevance to it; at most `perNodeLimit`
+   * (default 5) units per node.
+   */
+  getEvidenceForNodes(nodeIds: string[], context?: GraphOperationContext, opts?: { query?: string; perNodeLimit?: number }): MaybePromise<Map<string, TextUnit[]>>;
   recall(input: RecallInput, context?: GraphOperationContext): MaybePromise<RecallResult>;
   link(input: LinkInput, context?: GraphOperationContext): MaybePromise<GraphEdge | null>;
   invalidateEdge(input: InvalidateEdgeInput, context?: GraphOperationContext): MaybePromise<GraphEdge | null>;
@@ -386,6 +417,12 @@ const GIANT_CONTENT_CHARS = 12_000;
 const GIANT_PACK_CHARS = 2_500;
 /** Soft cap for a single non-giant hop-0 page so one match doesn't exhaust the budget. */
 const PRIMARY_PACK_CHARS = 24_000;
+/** The serialized recall response must stay within ~this multiple of the token budget. */
+const WIRE_GUARD_RATIO = 1.5;
+/** Conservative pre-estimate of an atom's JSON overhead (everything but its content slice). */
+const ATOM_META_TOKENS = 140;
+/** Reserve for the recall result envelope (keys, budget counters, flags). */
+const ENVELOPE_RESERVE_TOKENS = 30;
 
 /**
  * Render a node for the recall pack.
@@ -393,13 +430,16 @@ const PRIMARY_PACK_CHARS = 24_000;
  *   so runbooks match Scribe depth.
  * - Giant pages (index, event log): summary + short opening only.
  * - Linked neighbors: short teaser.
+ *
+ * Returns the rendered context block plus the exact body slice the budgeter
+ * chose, so the wire atom can carry that slice (never the untruncated body).
  */
 function renderRecallAtom(
   node: GraphNode,
   hops: number,
   remainingTokens: number,
-  options: { primaryMatch?: boolean } = {},
-): { block: string; contentChars: number } {
+  options: { primaryMatch?: boolean; maxContentChars?: number } = {},
+): { block: string; body: string; contentTruncated: boolean } {
   const origin = hops === 0 ? "match" : "linked";
   const headerLines = [
     `## ${node.title} [${node.type}/${origin}] (${node.slug})`,
@@ -410,7 +450,6 @@ function renderRecallAtom(
   const budgetForContent = Math.max(0, remainingTokens - headerCost);
 
   let body = "";
-  let contentChars = 0;
   const raw = node.content ?? "";
   if (raw && !isPlaceholderContent(raw) && budgetForContent > 0) {
     const giant = raw.length > GIANT_CONTENT_CHARS;
@@ -426,13 +465,18 @@ function renderRecallAtom(
       // Other hop-0 hits: leave room for the primary page + neighbors.
       maxChars = Math.min(raw.length, 4_000, Math.floor(budgetForContent * 4 * 0.35));
     }
+    if (options.maxContentChars !== undefined) {
+      maxChars = Math.min(maxChars, Math.max(0, options.maxContentChars));
+    }
     body = raw.slice(0, Math.max(0, maxChars));
-    contentChars = body.length;
-    if (body.length < raw.length) body += "\n…";
   }
 
-  const block = body ? `${header}${body}\n` : header;
-  return { block, contentChars };
+  const hasRealContent = Boolean(raw) && !isPlaceholderContent(raw);
+  const contentTruncated = hasRealContent && body.length < raw.length;
+
+  const displayBody = contentTruncated && body ? `${body}\n…` : body;
+  const block = displayBody ? `${header}${displayBody}\n` : header;
+  return { block, body, contentTruncated };
 }
 
 function renderRecallEvidence(unit: TextUnit, maxChars = 1200): string {
@@ -448,6 +492,7 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     includeTextUnits: input.includeEvidence,
     mode: "hybrid",
     limit: 10,
+    ...(input.maxSemanticDistance !== undefined ? { maxSemanticDistance: input.maxSemanticDistance } : {}),
   }, context);
 
   const nowMs = Date.now();
@@ -469,7 +514,8 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
       for (const edge of expansion.edges) edgePool.set(edge.id, edge);
       for (const node of expansion.nodes) {
         if (!candidates.has(node.id)) {
-          candidates.set(node.id, { node, matchRank: null, hops: 1, degree: 0 });
+          // True BFS depth from the seed: depth-2 neighbors are hops 2.
+          candidates.set(node.id, { node, matchRank: null, hops: Math.max(1, node.level), degree: 0 });
         }
       }
     }
@@ -530,15 +576,25 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     evidence.push(unit);
   };
 
-  const tryPack = (block: string): boolean => {
-    const cost = estimateTokens(block);
-    if (spentTokens + cost > input.tokenBudget) {
-      truncated = true;
-      return false;
+  // The wire budget (~1.5× tokenBudget) covers the WHOLE serialized response,
+  // not just the rendered context. A packed body is carried twice on the wire
+  // — rendered inside context and structured inside the atom — so each packed
+  // content char costs double. Atoms degrade to header-only when the wire is
+  // nearly full; the backstop guard below handles edges/citations slack.
+  const wireLimit = Math.ceil(input.tokenBudget * WIRE_GUARD_RATIO);
+  // Response tokens beyond context: atom/evidence/edge JSON, plus a small
+  // reserve for the result envelope. Atoms are charged exactly (stringified);
+  // each packed atom also pays for the edges it newly closes in the result.
+  let wireExtras = ENVELOPE_RESERVE_TOKENS;
+
+  const marginalEdgeTokens = (nodeId: string): number => {
+    let tokens = 0;
+    for (const edge of edgePool.values()) {
+      const touches = edge.fromNodeId === nodeId || edge.toNodeId === nodeId;
+      const otherEnd = edge.fromNodeId === nodeId ? edge.toNodeId : edge.fromNodeId;
+      if (touches && packedNodeIds.has(otherEnd)) tokens += estimateTokens(JSON.stringify(edge));
     }
-    spentTokens += cost;
-    contextParts.push(block);
-    return true;
+    return tokens;
   };
 
   // Two-pass packing: first the best non-giant hop-0 match (full body), then the rest.
@@ -553,6 +609,9 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     ? [primary, ...scored.filter((candidate) => candidate.node.id !== primary.node.id)]
     : scored;
 
+  // Phase 1: pack atom bodies/teasers for every candidate in rank order. No
+  // per-node store.read — candidates from search/expansion already carry
+  // current content, and internal reads must not bump access activation.
   for (const candidate of ordered) {
     const remaining = input.tokenBudget - spentTokens;
     // Need room for at least a title + summary.
@@ -561,62 +620,91 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
       break;
     }
     const isPrimary = primary?.node.id === candidate.node.id;
-    const { block } = renderRecallAtom(candidate.node, candidate.hops, remaining, {
-      primaryMatch: isPrimary,
-    });
-    if (!tryPack(block)) continue;
+    const headerEstimate = estimateTokens(`${candidate.node.title}\n${candidate.node.summary ?? ""}`) + 4;
+    const contentRoomTokens = Math.max(0, Math.floor(
+      (wireLimit - spentTokens - wireExtras - headerEstimate - ATOM_META_TOKENS) / 2,
+    ));
+    const edgeTokens = marginalEdgeTokens(candidate.node.id);
 
-    packedNodeIds.add(candidate.node.id);
-    atoms.push({
-      node: candidate.node,
-      score: candidate.score,
-      hops: candidate.hops,
-      tokens: estimateTokens(block),
-    });
-
-    const detail = await store.read({ nodeId: candidate.node.id }, context);
-    if (!detail) continue;
-
-    for (const annotation of detail.annotations) {
-      addCitation({
-        nodeId: candidate.node.id,
-        sourceId: annotation.sourceId,
-        textUnitId: annotation.textUnitId,
+    let packed = false;
+    // First try the slice the wire room allows; on overflow degrade to
+    // header-only before skipping the candidate entirely.
+    for (const maxContentChars of [contentRoomTokens * 4, 0]) {
+      const rendered = renderRecallAtom(candidate.node, candidate.hops, remaining, {
+        primaryMatch: isPrimary,
+        maxContentChars,
       });
+      const atom: RecallAtom = {
+        // The wire atom carries the packed slice the budgeter chose, never the
+        // untruncated body; contentTruncated says whether more exists via read.
+        node: { ...candidate.node, content: rendered.body },
+        score: candidate.score,
+        hops: candidate.hops,
+        tokens: estimateTokens(rendered.block),
+        contentTruncated: rendered.contentTruncated,
+      };
+      const blockCost = estimateTokens(rendered.block);
+      const extra = estimateTokens(JSON.stringify(atom)) + edgeTokens;
+      if (spentTokens + blockCost <= input.tokenBudget && spentTokens + blockCost + wireExtras + extra <= wireLimit) {
+        spentTokens += blockCost;
+        wireExtras += extra;
+        contextParts.push(rendered.block);
+        packedNodeIds.add(candidate.node.id);
+        atoms.push(atom);
+        packed = true;
+        break;
+      }
     }
+    if (!packed) truncated = true;
+  }
 
-    // Pack this node's own evidence text (not only search-hit units) so vault
-    // pages surface body sections via annotations as well as atom content.
-    // Skip for giant pages — body already carried the useful opening.
-    if (
-      input.includeEvidence &&
-      candidate.hops === 0 &&
-      (candidate.node.content?.length ?? 0) <= GIANT_CONTENT_CHARS
-    ) {
-      for (const item of detail.evidence) {
-        if (!isTextUnit(item)) continue;
+  // Phase 2: evidence, only after every atom had its body/teaser allocation —
+  // one node's citations can no longer crowd out other atoms' bodies. A single
+  // batched evidence fetch covers all packed hop-0 nodes (query-ranked, ≤5
+  // units per node), followed by leftover search-hit units.
+  const tryPackEvidence = (unit: TextUnit, citation: RecallCitation, maxChars = 1200): boolean => {
+    const block = renderRecallEvidence(unit, maxChars);
+    const blockCost = estimateTokens(block);
+    const extra = estimateTokens(JSON.stringify(unit)) + estimateTokens(JSON.stringify(citation));
+    if (spentTokens + blockCost > input.tokenBudget || spentTokens + blockCost + wireExtras + extra > wireLimit) {
+      truncated = true;
+      return false;
+    }
+    spentTokens += blockCost;
+    wireExtras += extra;
+    contextParts.push(block);
+    packedEvidenceIds.add(unit.id);
+    pushEvidence(unit);
+    addCitation(citation);
+    return true;
+  };
+
+  if (input.includeEvidence) {
+    const evidenceNodeIds = ordered
+      .filter((candidate) =>
+        packedNodeIds.has(candidate.node.id) &&
+        candidate.hops === 0 &&
+        (candidate.node.content?.length ?? 0) <= GIANT_CONTENT_CHARS)
+      .map((candidate) => candidate.node.id);
+    const evidenceByNode = evidenceNodeIds.length > 0
+      ? await store.getEvidenceForNodes(evidenceNodeIds, context, { query: input.query, perNodeLimit: 5 })
+      : new Map<string, TextUnit[]>();
+
+    for (const candidate of ordered) {
+      if (!packedNodeIds.has(candidate.node.id)) continue;
+      for (const item of evidenceByNode.get(candidate.node.id) ?? []) {
         if (packedEvidenceIds.has(item.id)) continue;
         const text = item.text.trim();
         if (!text || text === "---") continue;
-        const evidenceBlock = renderRecallEvidence(item, 2000);
-        if (!tryPack(evidenceBlock)) break;
-        packedEvidenceIds.add(item.id);
-        pushEvidence(item);
-        addCitation({ nodeId: candidate.node.id, sourceId: item.sourceId, textUnitId: item.id });
+        if (!tryPackEvidence(item, { nodeId: candidate.node.id, sourceId: item.sourceId, textUnitId: item.id }, 2000)) break;
       }
     }
-  }
 
-  if (input.includeEvidence) {
     for (const unit of search.textUnits) {
       if (packedEvidenceIds.has(unit.id)) continue;
       const text = unit.text.trim();
       if (!text || text === "---") continue;
-      const block = renderRecallEvidence(unit);
-      if (!tryPack(block)) break;
-      packedEvidenceIds.add(unit.id);
-      pushEvidence(unit);
-      addCitation({ nodeId: null, sourceId: unit.sourceId, textUnitId: unit.id });
+      if (!tryPackEvidence(unit, { nodeId: null, sourceId: unit.sourceId, textUnitId: unit.id })) break;
     }
   }
 
@@ -624,7 +712,7 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     (edge) => packedNodeIds.has(edge.fromNodeId) && packedNodeIds.has(edge.toNodeId),
   );
 
-  return {
+  const result: RecallResult = {
     context: contextParts.join("\n").trimEnd(),
     atoms,
     edges,
@@ -634,6 +722,37 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     spentTokens,
     truncated,
   };
+  enforceRecallWireBudget(result);
+  return result;
+}
+
+/**
+ * Final wire guard: the token budget covers the whole serialized response,
+ * not just the rendered context. Keep the payload within ~1.5× the budget by
+ * shrinking neighbor teasers first, then dropping the least-relevant evidence
+ * (query-ranked order puts it at the tail). The primary match is never cut.
+ */
+function enforceRecallWireBudget(result: RecallResult): void {
+  const limit = Math.ceil(result.tokenBudget * WIRE_GUARD_RATIO);
+  if (estimateTokens(JSON.stringify(result)) <= limit) return;
+
+  result.truncated = true;
+  for (const atom of result.atoms) {
+    if (atom.hops === 0) continue;
+    const content = atom.node.content ?? "";
+    if (content.length > 240) {
+      atom.node.content = `${content.slice(0, 240)}\n…`;
+      atom.contentTruncated = true;
+    }
+  }
+  if (estimateTokens(JSON.stringify(result)) <= limit) return;
+
+  while (result.evidence.length > 0 && estimateTokens(JSON.stringify(result)) > limit) {
+    const dropped = result.evidence.pop();
+    if (dropped) {
+      result.citations = result.citations.filter((citation) => citation.textUnitId !== dropped.id);
+    }
+  }
 }
 
 export function splitTextUnits(sourceId: string, contentText: string): TextUnit[] {

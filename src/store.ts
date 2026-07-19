@@ -49,11 +49,14 @@ import {
   type GraphViewSnapshot,
   type GrepMatch,
   type GrepResult,
+  type NeighborhoodNode,
+  type NeighborhoodResult,
   type ProjectResult,
   type ReadResult,
   type RecallResult,
   type SearchResult,
 } from "./graphCore.js";
+import { cosineSimilarity, createEmbeddingProviderFromEnv, type EmbeddingProvider } from "./embeddings.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
 import { slugify } from "./slug.js";
 
@@ -63,6 +66,9 @@ type Revision = {
   content: string | null;
   createdAt: string;
 };
+
+/** Catalog/log-style pages are useful as pointers but starve search/recall. */
+const GIANT_CONTENT_CHARS = 12_000;
 
 export class InMemoryGraphStore implements GraphStore {
   private sourceRows = new Map<string, GraphSource & { contentText: string; metadata: Record<string, unknown> }>();
@@ -76,6 +82,10 @@ export class InMemoryGraphStore implements GraphStore {
   private graphJobs = new Map<string, GraphJob>();
   private graphViews = new Map<string, GraphView>();
   private viewSlugIndex = new Map<string, string>();
+  /** Tombstoned nodes stay in `nodes` (slugs stay taken) but every read path excludes them. */
+  private deletedNodeIds = new Set<string>();
+  /** Fake-provider vectors by content hash so semantic search stays cheap. */
+  private embeddingCache = new Map<string, number[]>();
 
   constructor() {
     this.seed();
@@ -117,7 +127,7 @@ export class InMemoryGraphStore implements GraphStore {
       this.textUnits.set(unit.id, unit);
     }
     this.recordEvent("ingest", source.id, context, now);
-    this.enqueueMaintenanceJobs(context, ["refresh_obsidian_projection", "lint_graph", "refresh_embeddings"]);
+    this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
 
     const { contentText: _contentText, metadata: _metadata, ...publicSource } = source;
     return { source: publicSource, textUnits: units };
@@ -154,16 +164,55 @@ export class InMemoryGraphStore implements GraphStore {
       : null;
   }
 
-  search(input: SearchInput): SearchResult {
-    const query = input.query.toLowerCase();
+  async search(input: SearchInput): Promise<SearchResult> {
+    const lexical = this.lexicalSearch(input);
+    if (input.mode === "lexical") return lexical;
+
+    const provider = createEmbeddingProviderFromEnv();
+    if (!provider) {
+      return input.mode === "semantic" ? { nodes: [], textUnits: [] } : lexical;
+    }
+
+    const semantic = await this.semanticSearch(input, provider);
+    if (input.mode === "semantic") return semantic;
+
+    return {
+      nodes: reciprocalRankFusion(lexical.nodes, semantic.nodes),
+      textUnits: reciprocalRankFusion(lexical.textUnits, semantic.textUnits),
+    };
+  }
+
+  private lexicalSearch(input: SearchInput): SearchResult {
+    const query = input.query.toLowerCase().trim();
+    // Mirror Postgres: a stop-word-only (or near-empty) query has no tsquery
+    // and must not fall back to substring matching — grep serves that need.
+    if (query.length < 3 || !hasLexicalSignal(query)) {
+      return { nodes: [], textUnits: [] };
+    }
     const types = new Set(input.types ?? []);
-    const nodes = [...this.nodes.values()]
-      .filter((node) => types.size === 0 || types.has(node.type))
-      .filter((node) => {
-        const text = `${node.title} ${node.summary ?? ""} ${node.content ?? ""}`.toLowerCase();
-        return text.includes(query);
-      })
-      .slice(0, input.limit);
+    const slugQuery = query.replace(/\s+/g, "-");
+    const scored: Array<{ node: GraphNode; score: number; sequence: number }> = [];
+    let sequence = 0;
+    for (const node of this.nodes.values()) {
+      sequence += 1;
+      if (this.deletedNodeIds.has(node.id)) continue;
+      if (types.size > 0 && !types.has(node.type)) continue;
+      const title = node.title.toLowerCase();
+      const summary = (node.summary ?? "").toLowerCase();
+      const content = (node.content ?? "").toLowerCase();
+      let score = 0;
+      if (node.slug === slugQuery) score += 8;
+      if (title.includes(query)) score += 4;
+      if (summary.includes(query)) score += 2;
+      if (content.includes(query)) score += 1;
+      if (score === 0) continue;
+      // Giant catalog/log pages only surface on a title or slug match.
+      if ((node.content?.length ?? 0) > GIANT_CONTENT_CHARS && !title.includes(query) && node.slug !== slugQuery) {
+        continue;
+      }
+      scored.push({ node, score, sequence });
+    }
+    scored.sort((left, right) => right.score - left.score || left.sequence - right.sequence);
 
     const textUnits = input.includeTextUnits
       ? [...this.textUnits.values()]
@@ -171,7 +220,58 @@ export class InMemoryGraphStore implements GraphStore {
         .slice(0, input.limit)
       : [];
 
-    return { nodes, textUnits };
+    return { nodes: scored.slice(0, input.limit).map((entry) => entry.node), textUnits };
+  }
+
+  private async semanticSearch(input: SearchInput, provider: EmbeddingProvider): Promise<SearchResult> {
+    const [queryVector] = await provider.embed([input.query]);
+    if (!queryVector) return { nodes: [], textUnits: [] };
+    const maxDistance = maxSemanticDistanceFor(input);
+    const query = input.query.toLowerCase().trim();
+    const slugQuery = query.replace(/\s+/g, "-");
+    const types = new Set(input.types ?? []);
+
+    const scoredNodes: Array<{ node: GraphNode; distance: number }> = [];
+    for (const node of this.nodes.values()) {
+      if (this.deletedNodeIds.has(node.id)) continue;
+      if (types.size > 0 && !types.has(node.type)) continue;
+      if (
+        (node.content?.length ?? 0) > GIANT_CONTENT_CHARS &&
+        !node.title.toLowerCase().includes(query) &&
+        node.slug !== slugQuery
+      ) {
+        continue;
+      }
+      const vector = await this.embeddingForText(provider, [node.title, node.summary ?? "", node.content ?? ""].filter(Boolean).join("\n"));
+      const distance = 1 - cosineSimilarity(queryVector, vector);
+      if (distance < maxDistance) scoredNodes.push({ node, distance });
+    }
+    scoredNodes.sort((left, right) => left.distance - right.distance || left.node.id.localeCompare(right.node.id));
+
+    const scoredUnits: Array<{ unit: TextUnit; distance: number }> = [];
+    if (input.includeTextUnits) {
+      for (const unit of this.textUnits.values()) {
+        const vector = await this.embeddingForText(provider, unit.text);
+        const distance = 1 - cosineSimilarity(queryVector, vector);
+        if (distance < maxDistance) scoredUnits.push({ unit, distance });
+      }
+      scoredUnits.sort((left, right) => left.distance - right.distance || left.unit.id.localeCompare(right.unit.id));
+    }
+
+    return {
+      nodes: scoredNodes.slice(0, input.limit).map((entry) => entry.node),
+      textUnits: scoredUnits.slice(0, input.limit).map((entry) => entry.unit),
+    };
+  }
+
+  private async embeddingForText(provider: EmbeddingProvider, text: string): Promise<number[]> {
+    const key = `${provider.model}:${sha256(text)}`;
+    const cached = this.embeddingCache.get(key);
+    if (cached) return cached;
+    const [vector] = await provider.embed([text]);
+    if (!vector) throw new Error("Embedding provider returned no vector.");
+    this.embeddingCache.set(key, vector);
+    return vector;
   }
 
   grep(input: GrepInput): GrepResult {
@@ -182,6 +282,7 @@ export class InMemoryGraphStore implements GraphStore {
 
     if (scope === "nodes" || scope === "all") {
       for (const node of this.nodes.values()) {
+        if (this.deletedNodeIds.has(node.id)) continue;
         const fields: Array<["title" | "summary" | "content", string | null]> = [
           ["title", node.title],
           ["summary", node.summary],
@@ -218,24 +319,31 @@ export class InMemoryGraphStore implements GraphStore {
     return { matches: matches.slice(0, limit), truncated: matches.length > limit };
   }
 
-  read(input: ReadInput): ReadResult | null {
+  read(input: ReadInput, context?: GraphOperationContext, opts?: { trackAccess?: boolean }): ReadResult | null {
     const nodeId = input.nodeId ?? this.slugIndex.get(input.slug ?? "");
     if (!nodeId) return null;
+    if (this.deletedNodeIds.has(nodeId)) return null;
     const stored = this.nodes.get(nodeId);
     if (!stored) return null;
 
-    const node: GraphNode = {
-      ...stored,
-      accessCount: stored.accessCount + 1,
-      lastAccessedAt: new Date().toISOString(),
-    };
-    this.nodes.set(node.id, node);
+    let node = stored;
+    if (opts?.trackAccess ?? true) {
+      node = {
+        ...stored,
+        accessCount: stored.accessCount + 1,
+        lastAccessedAt: new Date().toISOString(),
+      };
+      this.nodes.set(node.id, node);
+    }
 
     const annotations = [...this.annotations.values()].filter((annotation) => annotation.nodeId === node.id);
+    const unitsById = new Map(
+      (this.getEvidenceForNodes([node.id]).get(node.id) ?? []).map((unit) => [unit.id, unit] as const),
+    );
     const evidence: Array<TextUnit | GraphSource> = [];
     for (const annotation of annotations) {
       if (annotation.textUnitId) {
-        const textUnit = this.textUnits.get(annotation.textUnitId);
+        const textUnit = unitsById.get(annotation.textUnitId);
         if (textUnit) evidence.push(textUnit);
         continue;
       }
@@ -250,25 +358,95 @@ export class InMemoryGraphStore implements GraphStore {
     return { ...node, evidence, annotations };
   }
 
-  neighborhood(input: NeighborhoodInput): { nodes: GraphNode[]; edges: GraphEdge[] } {
+  getEvidenceForNodes(
+    nodeIds: string[],
+    _context?: GraphOperationContext,
+    opts?: { query?: string; perNodeLimit?: number },
+  ): Map<string, TextUnit[]> {
+    const evidence = new Map<string, TextUnit[]>(nodeIds.map((nodeId) => [nodeId, []]));
+    for (const nodeId of nodeIds) {
+      const annotations = [...this.annotations.values()]
+        .filter((annotation) => annotation.nodeId === nodeId && annotation.textUnitId !== null)
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      const units = annotations.flatMap((annotation) => {
+        const unit = annotation.textUnitId ? this.textUnits.get(annotation.textUnitId) : undefined;
+        return unit ? [unit] : [];
+      });
+      if (opts?.query) {
+        // Ranked mode: token-overlap relevance to the query, best units first,
+        // capped per node (default 5).
+        const queryTokens = tokenSet(opts.query);
+        const perNodeLimit = Math.max(1, Math.trunc(opts.perNodeLimit ?? 5));
+        const ranked = units
+          .map((unit, index) => ({ unit, index, score: tokenOverlap(queryTokens, tokenSet(unit.text)) }))
+          .sort((left, right) => right.score - left.score || left.index - right.index)
+          .slice(0, perNodeLimit);
+        evidence.set(nodeId, ranked.map((entry) => entry.unit));
+      } else {
+        evidence.set(nodeId, units);
+      }
+    }
+    return evidence;
+  }
+
+  findSimilarTitles(title: string, limit: number): Array<{ node: GraphNode; score: number }> {
+    const queryTokens = tokenSet(normalizeTitleForSimilarity(title));
+    const normalizedQuery = normalizeTitleForSimilarity(title);
+    const scored: Array<{ node: GraphNode; score: number }> = [];
+    for (const node of this.nodes.values()) {
+      if (this.deletedNodeIds.has(node.id)) continue;
+      const exact = normalizeTitleForSimilarity(node.title) === normalizedQuery;
+      const score = exact ? 1 : jaccardSimilarity(queryTokens, tokenSet(normalizeTitleForSimilarity(node.title)));
+      if (exact || score > 0.25) scored.push({ node, score });
+    }
+    scored.sort((left, right) => right.score - left.score || right.node.updatedAt.localeCompare(left.node.updatedAt));
+    return scored.slice(0, limit);
+  }
+
+  tombstoneNodes(ids: string[], context?: GraphOperationContext): { tombstoned: string[] } {
+    const tombstoned: string[] = [];
+    for (const id of ids) {
+      if (!this.nodes.has(id) || this.deletedNodeIds.has(id)) continue;
+      const now = new Date().toISOString();
+      this.deletedNodeIds.add(id);
+      for (const edge of this.edges.values()) {
+        if (edge.expiredAt !== null) continue;
+        if (edge.fromNodeId !== id && edge.toNodeId !== id) continue;
+        this.edges.set(edge.id, { ...edge, expiredAt: now });
+      }
+      this.recordEvent("tombstone", id, context, now);
+      this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
+      tombstoned.push(id);
+    }
+    return { tombstoned };
+  }
+
+  neighborhood(input: NeighborhoodInput): NeighborhoodResult {
     const allowedPredicates = new Set(input.predicates ?? []);
-    const visited = new Set<string>([input.nodeId]);
+    const maxNodes = Math.max(1, Math.min(500, Math.trunc(input.maxNodes ?? 100)));
+    const validAt = input.validAt;
+    if (this.deletedNodeIds.has(input.nodeId) || !this.nodes.has(input.nodeId)) {
+      return { nodes: [], edges: [] };
+    }
+    const levelByNode = new Map<string, number>([[input.nodeId, 0]]);
     const edgeResults = new Map<string, GraphEdge>();
     let frontier = new Set<string>([input.nodeId]);
     const maxDepth = input.depth ?? 1;
 
-    for (let currentDepth = 0; currentDepth < maxDepth; currentDepth += 1) {
+    for (let depth = 1; depth <= maxDepth; depth += 1) {
       const next = new Set<string>();
-      for (const edge of this.edges.values()) {
+      const sortedEdges = [...this.edges.values()].sort((left, right) => left.id.localeCompare(right.id));
+      for (const edge of sortedEdges) {
         if (!edgeVisible(edge, input.asOf, input.includeExpired ?? false)) continue;
+        if (validAt && !edgeValidAt(edge, validAt)) continue;
         if (allowedPredicates.size > 0 && !allowedPredicates.has(edge.predicate)) continue;
         const touchesFrontier = frontier.has(edge.fromNodeId) || frontier.has(edge.toNodeId);
         if (!touchesFrontier) continue;
 
         edgeResults.set(edge.id, edge);
         for (const nodeId of [edge.fromNodeId, edge.toNodeId]) {
-          if (!visited.has(nodeId)) {
-            visited.add(nodeId);
+          if (!levelByNode.has(nodeId) && !this.deletedNodeIds.has(nodeId) && this.nodes.has(nodeId)) {
+            levelByNode.set(nodeId, depth);
             next.add(nodeId);
           }
         }
@@ -277,18 +455,25 @@ export class InMemoryGraphStore implements GraphStore {
       if (frontier.size === 0) break;
     }
 
-    return {
-      nodes: [...visited].flatMap((nodeId) => {
+    // Deterministic cap: BFS level first, then id — matches the pg ordering.
+    const capped = [...levelByNode.entries()]
+      .flatMap(([nodeId, level]) => {
         const node = this.nodes.get(nodeId);
-        return node ? [node] : [];
-      }),
-      edges: [...edgeResults.values()],
+        return node ? [{ node, level }] : [];
+      })
+      .sort((left, right) => left.level - right.level || left.node.id.localeCompare(right.node.id))
+      .slice(0, maxNodes);
+    const kept = new Set(capped.map((entry) => entry.node.id));
+
+    return {
+      nodes: capped.map((entry): NeighborhoodNode => ({ ...entry.node, level: entry.level })),
+      edges: [...edgeResults.values()].filter((edge) => kept.has(edge.fromNodeId) && kept.has(edge.toNodeId)),
     };
   }
 
   link(input: LinkInput, context?: GraphOperationContext): GraphEdge | null {
-    const fromNodeId = input.fromNodeId ?? this.slugIndex.get(input.fromSlug ?? "");
-    const toNodeId = input.toNodeId ?? this.slugIndex.get(input.toSlug ?? "");
+    const fromNodeId = input.fromNodeId ?? this.nodeIdForSlug(input.fromSlug);
+    const toNodeId = input.toNodeId ?? this.nodeIdForSlug(input.toSlug);
     if (!fromNodeId || !toNodeId) return null;
 
     const now = new Date().toISOString();
@@ -314,7 +499,7 @@ export class InMemoryGraphStore implements GraphStore {
     if (!existing) {
       this.edges.set(edge.id, edge);
       this.recordEvent("link", edge.id, context, now);
-      this.enqueueMaintenanceJobs(context, ["refresh_obsidian_projection", "lint_graph"]);
+      this.enqueueMaintenanceJobs(context, ["lint_graph"]);
     }
 
     if (input.supersedesEdgeId && input.supersedesEdgeId !== edge.id) {
@@ -358,7 +543,7 @@ export class InMemoryGraphStore implements GraphStore {
     };
     this.edges.set(expired.id, expired);
     this.recordEvent("invalidate_edge", expired.id, context, patch.expiredAt);
-    this.enqueueMaintenanceJobs(context, ["refresh_obsidian_projection", "lint_graph"]);
+    this.enqueueMaintenanceJobs(context, ["lint_graph"]);
     return expired;
   }
 
@@ -385,7 +570,7 @@ export class InMemoryGraphStore implements GraphStore {
     this.slugIndex.set(slug, id);
     this.revisions.set(revisionId, { id: revisionId, nodeId: id, content: node.content, createdAt: now });
     this.recordEvent("capture", id, context, now);
-    this.enqueueMaintenanceJobs(context, ["refresh_obsidian_projection", "lint_graph", "refresh_embeddings"]);
+    this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
 
     for (const evidence of input.evidence) {
       const annotationInput: AnnotateInput = {
@@ -420,7 +605,7 @@ export class InMemoryGraphStore implements GraphStore {
     };
     this.annotations.set(annotation.id, annotation);
     this.recordEvent("annotate", annotation.id, context, now);
-    this.enqueueMaintenanceJobs(context, ["refresh_obsidian_projection", "lint_graph"]);
+    this.enqueueMaintenanceJobs(context, ["lint_graph"]);
     return annotation;
   }
 
@@ -429,7 +614,7 @@ export class InMemoryGraphStore implements GraphStore {
     context?: GraphOperationContext,
   ): GraphNode | { conflict: true; currentRevisionId: string } | null {
     const existing = this.nodes.get(input.nodeId);
-    if (!existing) return null;
+    if (!existing || this.deletedNodeIds.has(input.nodeId)) return null;
     if (existing.revisionId !== input.baseRevisionId) {
       return { conflict: true, currentRevisionId: existing.revisionId };
     }
@@ -461,15 +646,16 @@ export class InMemoryGraphStore implements GraphStore {
       this.revisions.set(revisionId, { id: revisionId, nodeId: updated.id, content: updated.content, createdAt: now });
     }
     this.recordEvent("update", updated.id, context, now);
-    this.enqueueMaintenanceJobs(context, ["refresh_obsidian_projection", "lint_graph", "refresh_embeddings"]);
+    this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
     return updated;
   }
 
   project(input: ProjectInput): ProjectResult | null {
     const node = this.nodes.get(input.nodeId);
-    if (!node) return null;
+    if (!node || this.deletedNodeIds.has(node.id)) return null;
     const neighborhood = this.neighborhood({ nodeId: node.id, depth: input.depth });
-    const evidence = this.read({ nodeId: node.id })?.evidence.filter(isTextUnit) ?? [];
+    // Projection is a system read; it must not inflate access activation.
+    const evidence = this.read({ nodeId: node.id }, undefined, { trackAccess: false })?.evidence.filter(isTextUnit) ?? [];
 
     if (input.format === "mind_map") {
       return { format: "mind_map", ...neighborhood };
@@ -579,6 +765,7 @@ export class InMemoryGraphStore implements GraphStore {
   exportMarkdown(): Record<string, string> {
     const files: Record<string, string> = {};
     for (const node of this.nodes.values()) {
+      if (this.deletedNodeIds.has(node.id)) continue;
       const projected = this.project({ nodeId: node.id, format: "markdown", depth: 1 });
       if (projected?.format === "markdown") {
         files[`${node.slug}.md`] = projected.content;
@@ -588,7 +775,9 @@ export class InMemoryGraphStore implements GraphStore {
   }
 
   exportGraph(): GraphSnapshot {
-    const nodes = [...this.nodes.values()].sort((left, right) => left.slug.localeCompare(right.slug));
+    const nodes = [...this.nodes.values()]
+      .filter((node) => !this.deletedNodeIds.has(node.id))
+      .sort((left, right) => left.slug.localeCompare(right.slug));
     const nodeIds = new Set(nodes.map((node) => node.id));
     const edges = [...this.edges.values()]
       .filter((edge) => edge.expiredAt === null)
@@ -619,7 +808,6 @@ export class InMemoryGraphStore implements GraphStore {
     this.graphViews.set(view.id, view);
     this.viewSlugIndex.set(view.slug, view.id);
     this.recordEvent("create_view", view.id, context, now);
-    this.enqueueMaintenanceJobs(context, ["refresh_obsidian_projection"]);
     return this.snapshotForView(view);
   }
 
@@ -649,7 +837,6 @@ export class InMemoryGraphStore implements GraphStore {
     this.graphViews.delete(view.id);
     this.viewSlugIndex.delete(view.slug);
     this.recordEvent("delete_view", view.id, context);
-    this.enqueueMaintenanceJobs(context, ["refresh_obsidian_projection"]);
     return { deleted: true, view };
   }
 
@@ -693,12 +880,22 @@ export class InMemoryGraphStore implements GraphStore {
   }
 
   runJob(input: RunJobInput = {}, context?: GraphOperationContext): GraphJob | null {
+    // Claimable: pending, or failed with retries left whose quadratic backoff
+    // (attempts^2 x 10s since last update) has elapsed. Dead jobs never run.
+    const claimable = (candidate: GraphJob): boolean => {
+      if (candidate.status === "pending") return true;
+      if (candidate.status === "failed" && candidate.attempts < 5) {
+        const backoffMs = Math.pow(candidate.attempts, 2) * 10_000;
+        return Date.parse(candidate.updatedAt) + backoffMs <= Date.now();
+      }
+      return false;
+    };
     const job = input.jobId
       ? this.graphJobs.get(input.jobId) ?? null
       : [...this.graphJobs.values()]
-        .filter((candidate) => candidate.status === "pending")
+        .filter(claimable)
         .sort((left, right) => right.priority - left.priority || left.createdAt.localeCompare(right.createdAt))[0] ?? null;
-    if (!job || job.status !== "pending") return job;
+    if (!job || !claimable(job)) return job;
 
     const startedAt = new Date().toISOString();
     const running: GraphJob = {
@@ -728,7 +925,8 @@ export class InMemoryGraphStore implements GraphStore {
       const finishedAt = new Date().toISOString();
       const failed: GraphJob = {
         ...running,
-        status: "failed",
+        // Out of retries: dead-letter, never reclaimed.
+        status: running.attempts >= 5 ? "dead" : "failed",
         error: error instanceof Error ? error.message : "Unknown job error",
         updatedAt: finishedAt,
         finishedAt,
@@ -745,7 +943,9 @@ export class InMemoryGraphStore implements GraphStore {
 
   private performJob(job: GraphJob): Record<string, unknown> {
     if (job.kind === "lint_graph") {
-      return { lint: this.lint().summary };
+      const report = this.lint();
+      // Carry the findings themselves (capped) — counts alone are not actionable.
+      return { lint: { ...report.summary, findings: report.findings.slice(0, 200) } };
     }
 
     if (job.kind === "refresh_obsidian_projection") {
@@ -801,14 +1001,19 @@ export class InMemoryGraphStore implements GraphStore {
     return slug;
   }
 
+  private nodeIdForSlug(slug: string | undefined): string | undefined {
+    const nodeId = slug ? this.slugIndex.get(slug) : undefined;
+    return nodeId && !this.deletedNodeIds.has(nodeId) ? nodeId : undefined;
+  }
+
   private resolveViewMembers(input: CreateViewInput): { rootNodeId: string | null; nodeIds: string[]; edgeIds: string[] } {
-    const rootNodeId = input.rootNodeId ?? this.slugIndex.get(input.rootSlug ?? "") ?? null;
-    if ((input.rootNodeId || input.rootSlug) && (!rootNodeId || !this.nodes.has(rootNodeId))) {
+    const rootNodeId = input.rootNodeId ?? this.nodeIdForSlug(input.rootSlug) ?? null;
+    if ((input.rootNodeId || input.rootSlug) && (!rootNodeId || !this.nodes.has(rootNodeId) || this.deletedNodeIds.has(rootNodeId))) {
       throw new Error("View root node could not be resolved.");
     }
 
     if (input.includedNodeIds?.length) {
-      const nodeIds = input.includedNodeIds.filter((nodeId) => this.nodes.has(nodeId));
+      const nodeIds = input.includedNodeIds.filter((nodeId) => this.nodes.has(nodeId) && !this.deletedNodeIds.has(nodeId));
       const nodeSet = new Set(nodeIds);
       const edgeIds = (input.includedEdgeIds?.length ? input.includedEdgeIds : [...this.edges.keys()])
         .filter((edgeId) => {
@@ -835,7 +1040,7 @@ export class InMemoryGraphStore implements GraphStore {
     }
 
     if (input.query) {
-      const search = this.search({ query: input.query, includeTextUnits: false, mode: "hybrid", limit: 50 });
+      const search = this.lexicalSearch({ query: input.query, includeTextUnits: false, mode: "hybrid", limit: 50 });
       const nodeIds = search.nodes.map((node) => node.id);
       const nodeSet = new Set(nodeIds);
       const edgeIds = [...this.edges.values()]
@@ -852,7 +1057,7 @@ export class InMemoryGraphStore implements GraphStore {
     const edgeSet = new Set(view.includedEdgeIds);
     const nodes = view.includedNodeIds.flatMap((nodeId) => {
       const node = this.nodes.get(nodeId);
-      return node ? [node] : [];
+      return node && !this.deletedNodeIds.has(nodeId) ? [node] : [];
     });
     const edges = [...this.edges.values()]
       .filter((edge) =>
@@ -921,6 +1126,94 @@ function edgeVisible(edge: GraphEdge, asOf: string | undefined, includeExpired: 
     return edge.recordedAt <= asOf && (edge.expiredAt === null || edge.expiredAt > asOf);
   }
   return edge.expiredAt === null;
+}
+
+/** Valid-time edge filter, mirroring `valid_from <= t and (valid_until is null or valid_until > t)`. */
+function edgeValidAt(edge: GraphEdge, validAt: string): boolean {
+  if (edge.validFrom === null || edge.validFrom > validAt) return false;
+  if (edge.validUntil !== null && edge.validUntil <= validAt) return false;
+  return true;
+}
+
+/**
+ * Minimal English stop-word set mirroring what the pg english dictionary
+ * drops; a query with no surviving token has no lexical signal (F6).
+ */
+const STOP_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
+  "how", "if", "in", "into", "is", "it", "no", "not", "of", "on", "or",
+  "so", "such", "that", "the", "their", "then", "there", "these", "they",
+  "this", "to", "was", "what", "when", "where", "which", "who", "will", "with",
+]);
+
+function hasLexicalSignal(query: string): boolean {
+  return tokenSet(query).size > 0;
+}
+
+function tokenSet(text: string): Set<string> {
+  return new Set(
+    text.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length > 0 && !STOP_WORDS.has(token)),
+  );
+}
+
+/** |query ∩ text| / |query| — coverage of the query terms. */
+function tokenOverlap(queryTokens: Set<string>, textTokens: Set<string>): number {
+  if (queryTokens.size === 0) return 0;
+  let shared = 0;
+  for (const token of queryTokens) {
+    if (textTokens.has(token)) shared += 1;
+  }
+  return shared / queryTokens.size;
+}
+
+function normalizeTitleForSimilarity(title: string): string {
+  return title.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function jaccardSimilarity(left: Set<string>, right: Set<string>): number {
+  if (left.size === 0 || right.size === 0) return 0;
+  let shared = 0;
+  for (const token of left) {
+    if (right.has(token)) shared += 1;
+  }
+  return shared / (left.size + right.size - shared);
+}
+
+/**
+ * Reciprocal Rank Fusion over the per-mode ranked lists: each item scores
+ * 1/(60 + rank) per list it appears in (1-based rank), ordered by fused score.
+ */
+function reciprocalRankFusion<T extends { id: string }>(...lists: T[][]): T[] {
+  const fused = new Map<string, { item: T; score: number; bestRank: number }>();
+  for (const list of lists) {
+    list.forEach((item, index) => {
+      const rank = index + 1;
+      const existing = fused.get(item.id);
+      if (existing) {
+        existing.score += 1 / (60 + rank);
+        existing.bestRank = Math.min(existing.bestRank, rank);
+      } else {
+        fused.set(item.id, { item, score: 1 / (60 + rank), bestRank: rank });
+      }
+    });
+  }
+  return [...fused.values()]
+    .sort((left, right) =>
+      right.score - left.score ||
+      left.bestRank - right.bestRank ||
+      left.item.id.localeCompare(right.item.id))
+    .map((entry) => entry.item);
+}
+
+// Semantic hits farther than this cosine distance are noise. Input wins, then
+// the env override, then the default.
+function maxSemanticDistanceFor(input: SearchInput): number {
+  if (typeof input.maxSemanticDistance === "number" && Number.isFinite(input.maxSemanticDistance)) {
+    return input.maxSemanticDistance;
+  }
+  const fromEnv = Number(process.env.TROVE_SEMANTIC_MAX_DISTANCE);
+  if (process.env.TROVE_SEMANTIC_MAX_DISTANCE && Number.isFinite(fromEnv)) return fromEnv;
+  return 0.55;
 }
 
 function entityTableForAction(action: string): string {

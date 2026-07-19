@@ -6,12 +6,13 @@ export type RememberResult = {
   action: "created" | "updated";
   node: GraphNode;
   /** Near-matches that were NOT merged into — surfaced so the agent can retarget with `slug` if the dedupe missed. */
-  similar: Array<{ nodeId: string; slug: string; title: string }>;
+  similar: Array<{ nodeId: string; slug: string; title: string; score: number }>;
 };
 
 export type ForgetResult = {
   dryRun: boolean;
   retired: number;
+  tombstoned: number;
   edges: Array<{
     edgeId: string;
     predicate: string | null;
@@ -20,6 +21,8 @@ export type ForgetResult = {
     fromTitle: string | null;
     toTitle: string | null;
   }>;
+  /** Nodes the forget targets (previews on dryRun, tombstoned on apply). */
+  nodes: Array<{ nodeId: string; slug: string; title: string }>;
 };
 
 export type ReadAnyResult =
@@ -34,7 +37,10 @@ function normalizeTitle(title: string): string {
  * One write door: revise the node when the title (or an explicit nodeId/slug)
  * identifies an existing atom, otherwise capture a new one. Dedupe is
  * exact-identity only (slug or normalized title) — near-matches are reported,
- * never silently merged.
+ * never silently merged. Title candidates come from trigram similarity so
+ * near-twins ("Airflow DAG ownership rules" vs "Airflow DAG ownership")
+ * surface in `similar` with scores. Internal reads never bump access
+ * activation ({ trackAccess: false }).
  */
 export async function remember(
   store: GraphStore,
@@ -43,24 +49,24 @@ export async function remember(
 ): Promise<RememberResult> {
   let target: ReadResult | null = null;
   if (input.nodeId) {
-    target = await store.read({ nodeId: input.nodeId }, context);
+    target = await store.read({ nodeId: input.nodeId }, context, { trackAccess: false });
     if (!target) throw new Error(`remember: no node with id ${input.nodeId}.`);
   } else if (input.slug) {
-    target = await store.read({ slug: input.slug }, context);
+    target = await store.read({ slug: input.slug }, context, { trackAccess: false });
     if (!target) throw new Error(`remember: no node with slug ${input.slug}.`);
   }
 
   let similar: RememberResult["similar"] = [];
   if (!target) {
-    const found = await store.search({ query: input.title, includeTextUnits: false, mode: "lexical", limit: 5 }, context);
+    const matches = await store.findSimilarTitles(input.title, 5, context);
     const wantedSlug = slugify(input.title);
     const wantedTitle = normalizeTitle(input.title);
-    const exact = found.nodes.find((node) => node.slug === wantedSlug || normalizeTitle(node.title) === wantedTitle);
-    if (exact) target = await store.read({ nodeId: exact.id }, context);
-    similar = found.nodes
-      .filter((node) => node.id !== exact?.id)
+    const exact = matches.find((match) => match.node.slug === wantedSlug || normalizeTitle(match.node.title) === wantedTitle);
+    if (exact) target = await store.read({ nodeId: exact.node.id }, context, { trackAccess: false });
+    similar = matches
+      .filter((match) => match.node.id !== exact?.node.id)
       .slice(0, 3)
-      .map((node) => ({ nodeId: node.id, slug: node.slug, title: node.title }));
+      .map((match) => ({ nodeId: match.node.id, slug: match.node.slug, title: match.node.title, score: match.score }));
   }
 
   if (!target) {
@@ -87,7 +93,7 @@ export async function remember(
   };
   let updated = await store.update({ ...updateFields, baseRevisionId: target.revisionId }, context);
   if (updated && "conflict" in updated) {
-    const fresh = await store.read({ nodeId: target.id }, context);
+    const fresh = await store.read({ nodeId: target.id }, context, { trackAccess: false });
     if (!fresh) throw new Error(`remember: node ${target.id} disappeared during update.`);
     updated = await store.update({ ...updateFields, baseRevisionId: fresh.revisionId }, context);
   }
@@ -126,20 +132,41 @@ export async function remember(
 }
 
 /**
- * Retire beliefs on the record. Explicit edgeIds apply immediately; query mode
+ * Retire beliefs on the record: edges (expire, bitemporal) and/or whole nodes
+ * (tombstone). Explicit edgeIds/nodeIds/slugs apply immediately; query mode
  * defaults to a dry-run preview of the active edges around matching nodes.
- * Edges are expired (bitemporal), never deleted.
+ * Slugs resolve exactly like remember — an unknown slug is a hard error.
+ * Nothing is hard-deleted: supersession history stays queryable via
+ * neighborhood includeExpired/asOf.
  */
 export async function forget(
   store: GraphStore,
   input: ForgetInput,
   context?: GraphOperationContext,
 ): Promise<ForgetResult> {
-  const dryRun = input.dryRun ?? Boolean(input.query && !input.edgeIds?.length);
+  const explicitEdges = (input.edgeIds?.length ?? 0) > 0;
+  const explicitNodes = (input.nodeIds?.length ?? 0) > 0 || (input.slugs?.length ?? 0) > 0;
+  const dryRun = input.dryRun ?? Boolean(input.query && !explicitEdges && !explicitNodes);
   const nodeTitles = new Map<string, string>();
   const candidates = new Map<string, GraphEdge | null>();
 
   for (const edgeId of input.edgeIds ?? []) candidates.set(edgeId, null);
+
+  // Resolve targeted nodes up front so unknown identifiers fail before any
+  // edge is touched. Reads are internal: no access-activation bumps.
+  const targeted = new Map<string, GraphNode>();
+  for (const slug of input.slugs ?? []) {
+    const node = await store.read({ slug }, context, { trackAccess: false });
+    if (!node) throw new Error(`forget: no node with slug ${slug}.`);
+    targeted.set(node.id, node);
+  }
+  for (const nodeId of input.nodeIds ?? []) {
+    if (targeted.has(nodeId)) continue;
+    const node = await store.read({ nodeId }, context, { trackAccess: false });
+    if (!node) throw new Error(`forget: no node with id ${nodeId}.`);
+    targeted.set(nodeId, node);
+  }
+  for (const node of targeted.values()) nodeTitles.set(node.id, node.title);
 
   if (input.query) {
     const found = await store.search({ query: input.query, includeTextUnits: false, mode: "lexical", limit: 5 }, context);
@@ -175,7 +202,14 @@ export async function forget(
     });
   }
 
-  return { dryRun, retired, edges };
+  const nodes = [...targeted.values()].map((node) => ({ nodeId: node.id, slug: node.slug, title: node.title }));
+  let tombstoned = 0;
+  if (!dryRun && targeted.size > 0) {
+    const result = await store.tombstoneNodes([...targeted.keys()], context);
+    tombstoned = result.tombstoned.length;
+  }
+
+  return { dryRun, retired, tombstoned, edges, nodes };
 }
 
 /** Read anything by id or slug: nodes first, then raw sources. */

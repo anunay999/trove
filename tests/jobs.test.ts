@@ -19,13 +19,13 @@ describe("jobs", () => {
       title: `Job smoke ${stamp}`,
       type: "claim",
       summary: "Graph writes should enqueue durable maintenance jobs.",
-      content: "This node verifies that Trove schedules projection, lint, and embedding refresh work after mutations.",
+      content: "This node verifies that Trove schedules lint and embedding refresh work after mutations.",
       evidence: [],
       links: [],
     }, context);
 
     const listed = await store.jobs({ limit: 200 });
-    for (const expected of ["refresh_obsidian_projection", "lint_graph", "refresh_embeddings"] as const) {
+    for (const expected of ["lint_graph", "refresh_embeddings"] as const) {
       const ofKind = listed.filter((job) => job.kind === expected);
       const active = ofKind.some(
         (job) => job.status === "pending" || job.status === "running",

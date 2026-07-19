@@ -71,12 +71,12 @@ WRITE (when something becomes true — during the session, not only at the end)
 - One fact or decision → remember with a clear title + summary + links.
   Example: "No production deploys after Friday noon" or "Customer success owns churn emails".
 - Prefer several small linked notes over one giant "notes from today" blob.
-- remember updates an existing note when the title/slug matches exactly. ALWAYS check the returned "similar" list; if it almost matched the right note, call again with that slug.
+- remember updates an existing note when the title/slug matches exactly. ALWAYS check the returned "similar" list (scored by title similarity); if it almost matched the right note, call again with that slug.
 
 CORRECTIONS
 - Wrong note text → remember with the same slug (new revision).
 - Wrong link between notes → connect with supersedesEdgeId.
-- No longer true → forget (query mode previews first). Never delete.
+- No longer true → forget (query mode previews first): edgeIds expire links, nodeIds/slugs retire whole notes out of recall/grep/read. Never delete — history stays queryable via neighborhood includeExpired/asOf.
 
 SESSION LOOP
 Start: load what you already know → do the work → save truths as they land → link them → fix outdated beliefs → finish with a handful of solid notes, not one mega dump.
@@ -90,14 +90,14 @@ export const troveTools = [
     name: "remember",
     tier: "core",
     description:
-      "Save a short distilled note (a fact, decision, or how-to) — not a raw dump. Same title/slug revises; otherwise creates. Prefer several small linked notes while you work (e.g. 'refunds within 14 days', 'CS owns churn email') over one 'notes from today' blob. Always check returned `similar` and re-call with slug if the right note almost matched. Cite textUnitIds from ingest, or say it's agent inference in the summary. Link each note to a project or topic hub.",
+      "Save a short distilled note (a fact, decision, or how-to) — not a raw dump. Same title/slug revises; otherwise creates. Prefer several small linked notes while you work (e.g. 'refunds within 14 days', 'CS owns churn email') over one 'notes from today' blob. Always check returned `similar` (title-similarity scored) and re-call with slug if the right note almost matched. Cite textUnitIds from ingest, or say it's agent inference in the summary. Link each note to a project or topic hub.",
     inputSchema: rememberInputSchema,
   },
   {
     name: "recall",
     tier: "core",
     description:
-      "Open questions only — e.g. 'how do we handle refunds?' — returns a short ranked brief with citations. Not for exact ids or error strings (use grep) or when you already know the note name (use read). Default tokenBudget 8000. The brief is a digest; if the right note is on top but incomplete, follow with read on that slug.",
+      "Open questions only — e.g. 'how do we handle refunds?' — returns a short ranked brief with citations. Not for exact ids or error strings (use grep) or when you already know the note name (use read). Default tokenBudget 8000 covers the whole response. Atoms carry the packed body slice — contentTruncated marks cut bodies, hops is the true graph distance from the match — and evidence is relevance-ranked to the query. The brief is a digest; if the right note is on top but incomplete, follow with read on that slug.",
     inputSchema: recallInputSchema,
   },
   {
@@ -125,7 +125,7 @@ export const troveTools = [
     name: "forget",
     tier: "core",
     description:
-      "Mark a belief as no longer true. Pass edge ids to retire now, or a query to preview first (dryRun defaults true). Nothing is hard-deleted — history stays queryable.",
+      "Retire a belief that is no longer true. Pass nodeIds/slugs to tombstone whole notes (they leave recall, grep, and read), edgeIds to expire links, or a query to preview first (dryRun defaults true in query mode). Nothing is hard-deleted — supersession history stays queryable via neighborhood includeExpired/asOf.",
     inputSchema: forgetInputSchema,
   },
   // ---- curator ---------------------------------------------------------------
@@ -146,7 +146,7 @@ export const troveTools = [
   {
     name: "neighborhood",
     tier: "curator",
-    description: "Return a bounded graph neighborhood around a node, optionally as of a past time or including expired edges.",
+    description: "Return a bounded graph neighborhood around a node — each node carries its BFS level from the seed. Bound with maxNodes, filter valid-time with validAt, or pass asOf/includeExpired for recorded-time history.",
     inputSchema: neighborhoodInputSchema,
   },
   {

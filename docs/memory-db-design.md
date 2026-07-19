@@ -75,6 +75,13 @@ Ordered by leverage; the schema is already ~70% of the way there.
 > the `bitemporal` and `recall` suites (`npm test`) on both drivers. Reconciliation in
 > the write path (2) and claim embeddings (5) remain open.
 
+> Shipped vs designed (2026-07-19): hybrid retrieval fuses lexical and semantic rankings
+> with RRF. Activation ranking is a simplified ACT-R-style heuristic (recency + frequency
+> + degree — no semantic-alignment or noise terms); explicit `read` bumps the counters,
+> recall packing deliberately does not. Contradiction detection is not implemented, and
+> neither is decay/archive — low-activation atoms rank lower but are never archived or
+> deleted. Tombstoned nodes (via `forget`) are soft-deleted, not archived.
+
 1. **Bitemporalize edges and finish claims.** `claim` already has `valid_from`/`valid_until`/`status`; add `expired_at` + `invalidated_by`, and add the four temporal columns to `edge`. Default all reads to current-belief. (Small migration, unlocks #2, #5, time-travel.)
 2. **Reconciliation in the write path.** On `capture`/`ingest` extraction: candidate-match against existing nodes/claims (slug, FTS, embedding), auto-link or flag, and generate contradiction candidates for temporally overlapping claims on the same node. Wire the invalidation primitive into `graph.lint`'s contradiction pass.
 3. **`graph.recall` with `token_budget`.** Compose the pieces that already exist (hybrid search, `neighborhood`, claims, annotations) into one budgeted context-pack operator. This replaces "agent calls search then read then neighborhood" with one call — and it is the single biggest agent-UX win.

@@ -3,6 +3,7 @@
 
 create extension if not exists pgcrypto;
 create extension if not exists vector;
+create extension if not exists pg_trgm;
 
 create type node_type as enum (
   'entity',
@@ -17,14 +18,6 @@ create type node_type as enum (
   'question',
   'community',
   'view'
-);
-
-create type claim_status as enum (
-  'active',
-  'stale',
-  'contradicted',
-  'superseded',
-  'retracted'
 );
 
 create type source_kind as enum (
@@ -133,34 +126,18 @@ create unique index edge_active_unique_idx
   on edge(from_node_id, to_node_id, predicate)
   where deleted_at is null and expired_at is null;
 
-create table claim (
-  id uuid primary key default gen_random_uuid(),
-  node_id uuid not null references node(id),
-  statement text not null,
-  status claim_status not null default 'active',
-  confidence double precision check (confidence is null or confidence between 0 and 1),
-  source_id uuid references source(id),
-  valid_from timestamptz,
-  valid_until timestamptz,
-  metadata jsonb not null default '{}'::jsonb,
-  created_by uuid references actor(id),
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
-
 create table annotation (
   id uuid primary key default gen_random_uuid(),
   source_id uuid references source(id),
   text_unit_id uuid references text_unit(id),
   node_id uuid references node(id),
-  claim_id uuid references claim(id),
   motivation text not null,
   body jsonb not null default '{}'::jsonb,
   selector jsonb not null default '{}'::jsonb,
   created_by uuid references actor(id),
   created_at timestamptz not null default now(),
   check (source_id is not null or text_unit_id is not null),
-  check (node_id is not null or claim_id is not null or body <> '{}'::jsonb)
+  constraint annotation_target_check check (node_id is not null or body <> '{}'::jsonb)
 );
 
 create table graph_event (
@@ -194,7 +171,7 @@ create table graph_view (
 create table graph_job (
   id uuid primary key default gen_random_uuid(),
   kind text not null check (kind in ('refresh_obsidian_projection', 'lint_graph', 'refresh_embeddings')),
-  status text not null default 'pending' check (status in ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+  status text not null default 'pending' check (status in ('pending', 'running', 'succeeded', 'failed', 'cancelled', 'dead')),
   priority integer not null default 50 check (priority between 0 and 100),
   payload jsonb not null default '{}'::jsonb,
   result jsonb,
@@ -233,9 +210,7 @@ create index text_unit_section_path_gin_idx on text_unit using gin(section_path)
 create index edge_from_idx on edge(from_node_id) where deleted_at is null;
 create index edge_to_idx on edge(to_node_id) where deleted_at is null;
 create index edge_predicate_idx on edge(predicate) where deleted_at is null;
-create index claim_node_status_idx on claim(node_id, status);
 create index annotation_text_unit_idx on annotation(text_unit_id);
-create index annotation_claim_idx on annotation(claim_id);
 create index graph_event_entity_idx on graph_event(entity_table, entity_id, created_at desc);
 create index graph_job_status_idx on graph_job(status, priority desc, created_at);
 create index graph_job_kind_idx on graph_job(kind, created_at desc);
@@ -252,5 +227,6 @@ create index text_unit_search_idx on text_unit using gin(
   to_tsvector('english', text)
 );
 
--- Add an HNSW index after the embedding volume and dimensions are stable.
--- create index embedding_hnsw_idx on embedding using hnsw (embedding vector_cosine_ops);
+create index node_title_trgm_idx on node using gin (title gin_trgm_ops);
+
+create index embedding_hnsw_idx on embedding using hnsw (embedding vector_cosine_ops);

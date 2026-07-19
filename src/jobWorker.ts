@@ -48,6 +48,11 @@ export function startJobWorker(store: GraphStore, options: JobWorkerOptions = {}
       const job = await store.runJob({}, WORKER_CONTEXT);
       if (!job) break;
       ran += 1;
+      // 'dead' is not in graphJobStatusSchema yet; compare via string.
+      if ((job.status as string) === "dead") {
+        log(`job ${job.kind} (${job.id}) dead after ${job.attempts} attempts: ${job.error ?? "unknown error"}`);
+        continue;
+      }
       if (job.status === "failed") {
         log(`job ${job.kind} (${job.id}) failed: ${job.error ?? "unknown error"}`);
         continue;

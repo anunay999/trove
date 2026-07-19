@@ -101,6 +101,9 @@ export const searchInputSchema = z.object({
   includeTextUnits: z.boolean().default(true),
   mode: z.enum(["lexical", "semantic", "hybrid"]).default("hybrid"),
   limit: z.number().int().min(1).max(50).default(10),
+  // Cosine-distance ceiling for semantic hits (0..2). Default effective 0.55,
+  // overridable via TROVE_SEMANTIC_MAX_DISTANCE on the server.
+  maxSemanticDistance: z.number().min(0).max(2).optional(),
 });
 
 export const readInputSchema = z.object({
@@ -116,6 +119,9 @@ export const neighborhoodInputSchema = z.object({
   predicates: z.array(z.string().min(1)).optional(),
   asOf: z.string().optional(),
   includeExpired: z.boolean().default(false),
+  maxNodes: z.number().int().min(1).max(500).default(100),
+  // Valid-time filter: edges qualify when valid_from <= t and (valid_until is null or valid_until > t).
+  validAt: z.iso.datetime().optional(),
 });
 
 export const linkInputSchema = z.object({
@@ -162,6 +168,8 @@ export const recallInputSchema = z.object({
   depth: z.number().int().min(0).max(2).default(1),
   asOf: z.string().optional(),
   includeEvidence: z.boolean().default(true),
+  // Cosine-distance ceiling for semantic seed hits (0..2). See searchInputSchema.
+  maxSemanticDistance: z.number().min(0).max(2).optional(),
 });
 
 export const ingestInputSchema = z.object({
@@ -208,12 +216,21 @@ export const rememberInputSchema = z.object({
 
 export const forgetInputSchema = z.object({
   edgeIds: z.array(z.string().uuid()).optional(),
+  nodeIds: z.array(z.string().uuid()).optional(),
+  slugs: z.array(z.string().min(1)).optional(),
   query: z.string().min(1).optional(),
   dryRun: z.boolean().optional(),
   validUntil: z.string().optional(),
-}).refine((value) => (value.edgeIds && value.edgeIds.length > 0) || value.query, {
-  message: "Provide edgeIds or a query.",
-});
+}).refine(
+  (value) =>
+    (value.edgeIds && value.edgeIds.length > 0) ||
+    (value.nodeIds && value.nodeIds.length > 0) ||
+    (value.slugs && value.slugs.length > 0) ||
+    value.query,
+  {
+    message: "Provide edgeIds, nodeIds, slugs, or a query.",
+  },
+);
 
 export const readAnyInputSchema = z.object({
   id: z.string().uuid().optional(),
@@ -310,6 +327,7 @@ export const graphJobStatusSchema = z.enum([
   "running",
   "succeeded",
   "failed",
+  "dead",
   "cancelled",
 ]);
 
