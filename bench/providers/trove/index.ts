@@ -75,6 +75,14 @@ export class TroveProvider {
 
     process.env.DATABASE_URL = databaseUrl;
     process.env.TROVE_STORE = "postgres";
+    // Reconciliation is not under measurement here, and awaitIndexing drains
+    // EVERY job kind — so the LLM judge would fire on all ~3k ingested atoms
+    // (up to 5 candidate pairs each) purely as a side effect of needing
+    // OPENAI_API_KEY for embeddings. Worse, it would be judging a corpus this
+    // adapter deliberately distorts: titles are session-suffixed (see ingest),
+    // so its verdicts would be noise. Force the heuristic; benchmark
+    // reconciliation explicitly if it ever becomes the thing being measured.
+    process.env.TROVE_RECONCILE_JUDGE = "0";
     const { createGraphStore } = await import("../../../src/createStore.js");
     const { store, driver } = createGraphStore();
     if (driver !== "postgres") throw new Error(`expected postgres driver, got ${driver}`);
