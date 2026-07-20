@@ -1,4 +1,5 @@
 import type { EmbeddingCounts, GraphJob, GraphOperationContext, GraphStore } from "./graphCore.js";
+import { jobResultAs } from "./jobResults.js";
 
 const WORKER_CONTEXT: GraphOperationContext = {
   actorId: "job-worker",
@@ -9,20 +10,16 @@ const WORKER_CONTEXT: GraphOperationContext = {
 // run. When the finished job reports more missing rows than it embedded, the
 // drain is not done and the worker must queue a follow-up batch.
 export function embeddingDrainRemaining(job: GraphJob | null): number {
-  if (!job || job.kind !== "refresh_embeddings" || job.status !== "succeeded") return 0;
-  const result = job.result ?? {};
-  if (result.status !== "refreshed") return 0;
-  // Both halves are EmbeddingCounts (see RefreshEmbeddingsResult). Summing them
-  // through one helper keeps the two sides from drifting apart again — reading
-  // `embedded` as a bare number is what produced NaN and stalled the drain.
-  const sum = (counts: unknown): number => {
-    const value = (counts ?? {}) as Partial<EmbeddingCounts>;
-    return Number(value.nodeRevisions ?? 0) + Number(value.textUnits ?? 0);
-  };
-  const before = sum(result.missingBefore);
-  const embedded = sum(result.embedded);
-  if (!Number.isFinite(before) || !Number.isFinite(embedded)) return 0;
-  return Math.max(0, before - embedded);
+  if (!job) return 0;
+  // Narrow through the typed envelope (jobResults.ts) — reading `embedded` as
+  // a bare number off the untyped record is what produced NaN and stalled the
+  // drain. Both halves are EmbeddingCounts; summing them through one helper
+  // keeps the two sides from drifting apart again.
+  const result = jobResultAs(job, "refresh_embeddings");
+  if (!result || result.status !== "refreshed") return 0;
+  const sum = (counts: EmbeddingCounts): number =>
+    Number(counts.nodeRevisions ?? 0) + Number(counts.textUnits ?? 0);
+  return Math.max(0, sum(result.missingBefore) - sum(result.embedded));
 }
 
 export interface JobWorkerOptions {

@@ -37,11 +37,14 @@ import {
   type OwnerScope,
   decodeEventCursor,
   encodeEventCursor,
+  evidenceSupportScore,
   performRecall,
   renderAgentContext,
   renderMarkdownProjection,
   sha256,
   splitTextUnits,
+  UnknownEvidenceReferenceError,
+  WEAK_EVIDENCE_FLOOR,
   type GraphEvent,
   type GraphEventFeed,
   type GraphJob,
@@ -66,6 +69,7 @@ import {
   performReconcileNode,
   type ReconcileJudge,
 } from "./reconcile.js";
+import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
 
 const { Pool } = pg;
@@ -1289,7 +1293,7 @@ export class PgGraphStore implements GraphStore {
   async lint(context?: GraphOperationContext): Promise<GraphLintReport> {
     const scope = ownerScope(context);
     const p: [boolean, string | null] = [!scope.scoped, scope.ownerId];
-    const [nodeCount, edgeCount, orphanNodes, missingEvidence, duplicateTitles, danglingEdges] = await Promise.all([
+    const [nodeCount, edgeCount, orphanNodes, missingEvidence, duplicateTitles, danglingEdges, evidenceRows] = await Promise.all([
       this.pool.query("select count(*)::int as count from node where deleted_at is null and ($1 or owner_id = $2)", p),
       this.pool.query("select count(*)::int as count from edge where deleted_at is null and expired_at is null and ($1 or owner_id = $2)", p),
       this.pool.query(
@@ -1334,6 +1338,19 @@ export class PgGraphStore implements GraphStore {
          limit 50`,
         p,
       ),
+      // weak_evidence: nodes WITH citations, scored for whether the cited span
+      // actually supports the atom. Content is capped per node — the score
+      // uses the same leading slice reconcile judges on.
+      this.pool.query(
+        `select n.id, n.title, coalesce(n.summary, '') as summary, left(coalesce(nr.content, ''), 2000) as content,
+                tu.text as unit_text
+         from node n
+         join annotation a on a.node_id = n.id and a.text_unit_id is not null
+         join text_unit tu on tu.id = a.text_unit_id
+         left join node_revision nr on nr.id = n.current_revision_id
+         where n.deleted_at is null and ($1 or n.owner_id = $2)`,
+        p,
+      ),
     ]);
 
     const findings: GraphLintFinding[] = [];
@@ -1375,6 +1392,36 @@ export class PgGraphStore implements GraphStore {
         entityId: String(row.id),
         message: "Edge points at a missing or deleted node.",
       });
+    }
+
+    // weak_evidence: a citation that is present but probably wrong. Group the
+    // joined rows per node, score against the best cited unit, flag under the
+    // floor — capped so a bulk mis-ingest cannot flood the report.
+    const evidenceByNode = new Map<string, { title: string; nodeText: string; units: string[] }>();
+    for (const row of evidenceRows.rows) {
+      const id = String(row.id);
+      const entry = evidenceByNode.get(id) ?? {
+        title: String(row.title),
+        nodeText: `${row.title}\n${row.summary}\n${row.content}`,
+        units: [] as string[],
+      };
+      entry.units.push(String(row.unit_text));
+      evidenceByNode.set(id, entry);
+    }
+    let weakEvidenceCount = 0;
+    for (const [id, entry] of evidenceByNode) {
+      if (weakEvidenceCount >= 50) break;
+      const score = evidenceSupportScore(entry.nodeText, entry.units);
+      if (score < WEAK_EVIDENCE_FLOOR) {
+        findings.push({
+          severity: "warning",
+          code: "weak_evidence",
+          entityTable: "node",
+          entityId: id,
+          message: `Cited evidence supports ${(score * 100).toFixed(0)}% of the node's content terms (floor ${WEAK_EVIDENCE_FLOOR * 100}%): ${entry.title}`,
+        });
+        weakEvidenceCount += 1;
+      }
     }
 
     const errors = findings.filter((finding) => finding.severity === "error").length;
@@ -1638,6 +1685,12 @@ export class PgGraphStore implements GraphStore {
    * (it is the expensive, LLM-judged pass). Dedupe is per node: a burst of
    * revisions to the same node collapses into one run, which reads the current
    * revision at claim time.
+   *
+   * Note the contrast with `maintenance:<kind>` keys above: lint and global
+   * embedding refresh are genuinely global work, so concurrent writers sharing
+   * one pending row is CORRECT there (the job covers everyone's data), while
+   * reconciliation is per-node work and must never absorb across nodes. The
+   * `dedupeJoined` return marker lets a caller observe either absorption.
    */
   private async enqueueReconcileJob(
     client: pg.PoolClient,
@@ -1671,7 +1724,7 @@ export class PgGraphStore implements GraphStore {
          limit 1`,
         [input.kind, input.dedupeKey],
       );
-      if ((existing.rowCount ?? 0) > 0) return mapJob(existing.rows[0]);
+      if ((existing.rowCount ?? 0) > 0) return { ...mapJob(existing.rows[0]), dedupeJoined: true };
     }
 
     const jobId = randomUUID();
@@ -1695,7 +1748,7 @@ export class PgGraphStore implements GraphStore {
          limit 1`,
         [input.kind, input.dedupeKey],
       );
-      if ((existing.rowCount ?? 0) > 0) return mapJob(existing.rows[0]);
+      if ((existing.rowCount ?? 0) > 0) return { ...mapJob(existing.rows[0]), dedupeJoined: true };
     }
     const job = mapJob(result.rows[0]);
     await this.recordEvent(
@@ -1769,11 +1822,12 @@ export class PgGraphStore implements GraphStore {
     }
   }
 
-  private async performJob(job: GraphJob): Promise<Record<string, unknown>> {
+  private async performJob(job: GraphJob): Promise<GraphJobResult> {
     if (job.kind === "lint_graph") {
       const report = await this.lint();
       // Carry the findings themselves (capped) — counts alone are not actionable.
-      return { lint: { ...report.summary, findings: report.findings.slice(0, 200) } };
+      const result: GraphJobResultMap["lint_graph"] = { lint: { ...report.summary, findings: report.findings.slice(0, 200) } };
+      return result;
     }
 
     if (job.kind === "reconcile_node") {
@@ -1781,7 +1835,8 @@ export class PgGraphStore implements GraphStore {
       const nodeId = typeof payload.nodeId === "string" ? payload.nodeId : null;
       if (!nodeId) throw new Error("reconcile_node: payload.nodeId is required");
       const ownerId = typeof payload.ownerId === "string" ? payload.ownerId : null;
-      return await performReconcileNode(this, { nodeId, ownerId }, this.reconcileJudge);
+      const result: GraphJobResultMap["reconcile_node"] = await performReconcileNode(this, { nodeId, ownerId }, this.reconcileJudge);
+      return result;
     }
 
     if (job.kind === "refresh_obsidian_projection") {
@@ -1790,10 +1845,11 @@ export class PgGraphStore implements GraphStore {
         await this.timeline(),
         await this.exportGraph(),
       );
-      return {
+      const result: GraphJobResultMap["refresh_obsidian_projection"] = {
         manifest: projection.manifest,
         fileCount: Object.keys(projection.files).length,
       };
+      return result;
     }
 
     const provider = createEmbeddingProviderFromEnv();
@@ -1846,18 +1902,19 @@ export class PgGraphStore implements GraphStore {
     };
 
     if (!provider) {
-      return {
+      const result: GraphJobResultMap["refresh_embeddings"] = {
         provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "none",
         model,
         status: "skipped_no_embedding_provider",
         ownerId,
         missing,
       };
+      return result;
     }
 
     const limit = Number(asRecord(job.payload).limit ?? process.env.TROVE_EMBEDDING_JOB_LIMIT ?? 256);
     const embedded = await this.refreshMissingEmbeddings(provider, Number.isFinite(limit) ? limit : 256, ownerId);
-    return {
+    const result: GraphJobResultMap["refresh_embeddings"] = {
       provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "openai",
       model,
       status: "refreshed",
@@ -1865,6 +1922,7 @@ export class PgGraphStore implements GraphStore {
       missingBefore: missing,
       embedded,
     };
+    return result;
   }
 
   private async refreshMissingEmbeddings(
@@ -2021,24 +2079,37 @@ export class PgGraphStore implements GraphStore {
     actorUuid?: string | null,
   ): Promise<GraphAnnotation> {
     const resolvedActorUuid = actorUuid === undefined ? await this.actorUuidForContext(client, context) : actorUuid;
-    const result = await client.query(
-      `insert into annotation (
-         id, motivation, source_id, text_unit_id, node_id, body, selector, created_by, owner_id
-       )
-       values ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9)
-       returning id, motivation, source_id, text_unit_id, node_id, body, selector, created_at`,
-      [
-        randomUUID(),
-        input.motivation,
-        input.sourceId ?? null,
-        input.textUnitId ?? null,
-        input.nodeId ?? null,
-        JSON.stringify(input.body),
-        JSON.stringify(input.selector),
-        resolvedActorUuid,
-        ownerScope(context).ownerId,
-      ],
-    );
+    let result: pg.QueryResult;
+    try {
+      result = await client.query(
+        `insert into annotation (
+           id, motivation, source_id, text_unit_id, node_id, body, selector, created_by, owner_id
+         )
+         values ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9)
+         returning id, motivation, source_id, text_unit_id, node_id, body, selector, created_at`,
+        [
+          randomUUID(),
+          input.motivation,
+          input.sourceId ?? null,
+          input.textUnitId ?? null,
+          input.nodeId ?? null,
+          JSON.stringify(input.body),
+          JSON.stringify(input.selector),
+          resolvedActorUuid,
+          ownerScope(context).ownerId,
+        ],
+      );
+    } catch (error) {
+      // FK violation (23503): a source/text-unit/node ref does not resolve.
+      // Surface it as the named error so callers can distinguish a bogus
+      // citation from a real failure without parsing pg error codes.
+      if ((error as { code?: string }).code === "23503") {
+        throw new UnknownEvidenceReferenceError(
+          `annotation references an unknown source/text-unit/node: sourceId=${input.sourceId ?? "null"} textUnitId=${input.textUnitId ?? "null"} nodeId=${input.nodeId ?? "null"}`,
+        );
+      }
+      throw error;
+    }
     const annotation = mapAnnotation(result.rows[0]);
     await this.recordEvent(
       client,

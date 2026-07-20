@@ -74,14 +74,19 @@ const probe = new pg.Client({ connectionString: process.env.DATABASE_URL });
 await probe.connect();
 
 const results: string[] = [];
-let passCount = 0;
-let failCount = 0;
+// Verdicts are tracked per R-id, not per report() call: R9 legitimately reports
+// twice (a + b), and counting calls is what printed "18/17 PASS". A second
+// report for the same id ANDs into its verdict — a fail can never be upgraded
+// back to a pass by a later call.
+const verdicts = new Map<string, boolean>();
 function report(id: string, pass: boolean, evidence: string): void {
   const line = `${id}: ${pass ? "PASS" : "FAIL"} — ${evidence.replace(/\s+/g, " ").trim()}`;
   results.push(line);
-  if (id.startsWith("R")) pass ? passCount++ : failCount++;
+  if (id.startsWith("R")) verdicts.set(id, (verdicts.get(id) ?? true) && pass);
   console.log(line);
 }
+const passCount = (): number => [...verdicts.values()].filter(Boolean).length;
+const failCount = (): number => [...verdicts.values()].filter((pass) => !pass).length;
 async function section(id: string, fn: () => Promise<void>): Promise<void> {
   console.log(`\n=== ${id} ===`);
   try {
@@ -963,12 +968,12 @@ report(
 await drainPending().catch(() => {});
 const wallSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
 console.log("\n=== run summary ===");
-console.log(`R-items: ${passCount}/17 PASS (${failCount} FAIL)`);
+console.log(`R-items: ${passCount()}/${verdicts.size} PASS (${failCount()} FAIL)`);
 console.log(`wall time: ${wallSeconds}s; embedding API calls: ${embeddingApiCalls} (texts embedded incl. queries: ${embeddingApiTexts}); R15 single-recall SQL statements: ${r15Total}`);
 console.log(`scratch database trove_repro kept (tables hold this run's fixtures).`);
 console.log("\n--- verdict table ---");
 for (const line of results) console.log(line);
-console.log(`\n${passCount}/17 PASS`);
+console.log(`\n${passCount()}/${verdicts.size} PASS`);
 
 await probe.end();
 if ("close" in store && typeof store.close === "function") await store.close();

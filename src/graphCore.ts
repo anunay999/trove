@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { recallInputSchema } from "./contracts.js";
+import { contentTerms } from "./queryNormalize.js";
 import type {
   AnnotateInput,
   CaptureInput,
@@ -32,6 +33,44 @@ import type {
 } from "./contracts.js";
 
 export type MaybePromise<T> = T | Promise<T>;
+
+/**
+ * Thrown by both store drivers when an annotation references a source, text
+ * unit, or node that does not exist (Postgres surfaces it as FK violation
+ * 23503; the in-memory driver checks explicitly). Callers — remember above
+ * all — must be able to tell "this citation is bogus" apart from real
+ * failures, so the distinction is a named error, never a swallowed catch.
+ */
+export class UnknownEvidenceReferenceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnknownEvidenceReferenceError";
+  }
+}
+
+/**
+ * Provenance quality (backlog #17): does the cited span actually support the
+ * atom? Scored as containment — the share of the node's content terms that
+ * appear in its best-matching cited unit. An atom is a distillation of its
+ * evidence, so most of its terms should come from the source text; a best
+ * score below WEAK_EVIDENCE_FLOOR means the citation is present but probably
+ * wrong. Heuristic, not entailment: paraphrases can score low honestly, which
+ * is why the lint finding is a warning for review, never an error.
+ */
+export const WEAK_EVIDENCE_FLOOR = 0.15;
+
+export function evidenceSupportScore(nodeText: string, unitTexts: string[]): number {
+  const nodeTerms = new Set(contentTerms(nodeText));
+  if (nodeTerms.size === 0) return 1; // nothing to support — don't flag
+  let best = 0;
+  for (const text of unitTexts) {
+    const unitTerms = new Set(contentTerms(text));
+    let shared = 0;
+    for (const term of nodeTerms) if (unitTerms.has(term)) shared += 1;
+    best = Math.max(best, shared / nodeTerms.size);
+  }
+  return best;
+}
 
 export type GraphEvent = {
   id: string;
@@ -75,6 +114,14 @@ export type GraphJob = {
   result: Record<string, unknown> | null;
   error: string | null;
   dedupeKey: string | null;
+  /**
+   * Set only on the job returned by an enqueue that JOINED an existing
+   * pending/running row with the same dedupe key — never stored, never set on
+   * a freshly created row. Callers can therefore tell "my enqueue created
+   * work" from "my enqueue was absorbed" (backlog #7: absorption is correct
+   * for genuinely global maintenance, but it must be observable).
+   */
+  dedupeJoined?: boolean;
   attempts: number;
   createdAt: string;
   updatedAt: string;

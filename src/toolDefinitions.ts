@@ -90,7 +90,7 @@ export const troveTools = [
     name: "remember",
     tier: "core",
     description:
-      "Save a short distilled note (a fact, decision, or how-to) — not a raw dump. Same title/slug revises; otherwise creates. Prefer several small linked notes while you work (e.g. 'refunds within 14 days', 'CS owns churn email') over one 'notes from today' blob. Always check returned `similar` (title-similarity scored) and re-call with slug if the right note almost matched. Cite textUnitIds from ingest, or say it's agent inference in the summary. Link each note to a project or topic hub.",
+      "Save a short distilled note (a fact, decision, or how-to) — not a raw dump. Same title/slug revises; otherwise creates. Prefer several small linked notes while you work (e.g. 'refunds within 14 days', 'CS owns churn email') over one 'notes from today' blob. Always check returned `similar` (title-similarity scored) and re-call with slug if the right note almost matched. Cite textUnitIds from ingest, or say it's agent inference in the summary. Citations that don't resolve come back in `evidenceRejected` with reasons — they are never silently dropped; re-ingest the source or fix the ref and remember again. Link each note to a project or topic hub.",
     inputSchema: rememberInputSchema,
   },
   {

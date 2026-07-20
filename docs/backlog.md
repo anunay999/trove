@@ -134,7 +134,7 @@ a first-class metric rather than a benchmark-only diagnostic.
 
 ## P1 — correctness and structural risk
 
-### 5. `GraphJob.result` is an untyped envelope ✅
+### 5. `GraphJob.result` is an untyped envelope ✅ **fixed 2026-07-19**
 
 **Evidence** — `src/graphCore.ts:60`: `result: Record<string, unknown> | null`.
 This is why `Number({nodeRevisions, textUnits})` → `NaN` compiled silently and
@@ -147,9 +147,18 @@ unprotected, and the same failure can recur in any of them.
 **Action** — a discriminated union of result types keyed by `GraphJobKind`, with
 producers annotated and consumers narrowing through it.
 
+**Done** — `src/jobResults.ts` defines `GraphJobResultMap` (one entry per kind:
+lint, embeddings, projection, reconcile) and `jobResultAs(job, kind)`, the only
+sanctioned way to read a result. Every performJob branch on both drivers is
+annotated with its kind's type (a branch returning the wrong shape fails to
+compile), and `embeddingDrainRemaining` narrows through the helper. The wire
+shape stays `Record<string, unknown>` — the contract lives at the
+producer/consumer boundary, and adding a job kind without a map entry now
+fails to compile.
+
 ---
 
-### 6. The two store drivers have drifted ✅
+### 6. The two store drivers have drifted ✅ **decision made + sharpest gaps closed 2026-07-19**
 
 **Evidence** — same commit, same stated policy, different implementations:
 
@@ -167,9 +176,20 @@ behaviour, and the code reads as though the two are equivalent.
 (a stemmer + token-boundary matching in-memory), or declare the in-memory store a
 test double in its module doc and accept the asymmetry explicitly.
 
+**Done — the second option, with the sharpest divergences closed anyway:**
+`store.ts`'s module doc now declares it the test double and lists the residual
+asymmetries. On top of that declaration: lexical term matching is tokenized +
+lightly singularized (`tokenizeForMatch`) so "weddings" finds "wedding" and
+"all" no longer finds "call"; the semantic arm dual-embeds raw + normalized and
+takes min distance like pg; and the stop-word gate gained the pg-dictionary
+words whose absence made memory-only probes ("all/any/some/most/just/after/
+before/because/during/while/until/each/both" — this is the #24 extension
+landing). `tests/driver-parity.test.ts` locks the boundary, including the
+declared residual (run/running/ran is NOT approximated).
+
 ---
 
-### 7. Maintenance jobs use global dedupe keys ✅
+### 7. Maintenance jobs use global dedupe keys ✅ **fixed 2026-07-19**
 
 **Evidence** — `src/pgStore.ts:1558`: `dedupeKey: \`maintenance:${kind}\``.
 Reproduced deterministically: after one capture, a second capture 1.2s later
@@ -182,6 +202,17 @@ distinct CI flakes at ~20% (worked around in tests via per-file databases in
 
 **Action** — scope dedupe keys by owner, or make enqueue return whether it
 created or joined so callers can reason about it.
+
+**Done — the second option, after scoping analysis showed the first was wrong
+here.** Absorption is only harmful when the work is scoped: lint and global
+embedding refresh are genuinely global (one pending row covers everyone's data),
+so per-owner keys would only multiply identical work. Reconciliation was the
+scoped case and already dedupes per node (`reconcile:<nodeId>`); owner-scoped
+embedding drains dedupe per owner (#1). What was missing was observability:
+`enqueueJob` now marks the returned job `dedupeJoined: true` when it joined an
+existing pending/running row (never stored, never set on a fresh row), on both
+drivers, with the rationale recorded at the enqueue sites. Covered by
+`tests/jobs.test.ts`.
 
 ---
 
@@ -199,17 +230,22 @@ result set rather than switching wholesale between them.
 
 ---
 
-### 9. `remember` may accept and silently discard evidence ⚠️
+### 9. `remember` may accept and silently discard evidence ✅→**fixed 2026-07-19**
 
-**Reported** — `src/agentOps.ts:116`: `remember` accepts nodes with no evidence
-and silently ignores invalid evidence references. **Not independently verified.**
+**Verified 2026-07-19** — true, with one refinement: on the update path every
+evidence ref was annotated inside a catch-all, so invalid refs vanished
+silently (`agentOps.ts:126`); on the create path an invalid ref actually failed
+the whole write loudly (FK constraint). Zero-evidence nodes are accepted on
+both paths, which is the doctrine-sanctioned "agent inference" route — the
+README overstatement is a #22 matter.
 
-**Impact if true** — directly contradicts the README's "nothing is a
-free-floating fact", and means `missing_evidence` lint findings are the only
-signal that provenance broke.
-
-**Action** — verify first. If confirmed, reject or loudly warn on invalid
-references rather than dropping them.
+**Done** — both store drivers now throw a named `UnknownEvidenceReferenceError`
+for refs that don't resolve (pg maps FK 23503; the in-memory driver checks
+explicitly — previously it stored anything). `remember` attaches evidence
+uniformly on create and revise: each ref is attempted individually, bogus refs
+come back in the result as `evidenceRejected` with reasons, and any other
+failure still throws (no more swallow-all). The remember tool description
+teaches the field. Covered in `tests/agent-ops.test.ts` on both drivers.
 
 ---
 
@@ -282,11 +318,21 @@ extraction (the bench-side distillation), and decay/archive (#11). The
 superseded-mark is annotation, not a ranking change — whether superseded atoms
 should rank lower is a #8/#10 question to answer with the ranking work.
 
-### 17. Provenance quality measurement ✅
+### 17. Provenance quality measurement ✅ **first-class signal added 2026-07-19**
 
 Nothing scores whether an answer traces to a genuinely supporting span. The core
 thesis is currently an unverified claim, and there is no guard against citations
 that are present but wrong.
+
+**Done** — a `weak_evidence` lint finding on both drivers: for every node with
+citations, containment of the node's content terms in its best-matching cited
+unit (`evidenceSupportScore`, floor 15%), capped at 50 findings. It is a
+reviewable warning, not a gate — paraphrases can score low honestly, and
+LLM-judged entailment is the future upgrade (the reconcile judge
+infrastructure now exists for exactly that). First real-data result: the
+scribe-vault import produces a flood of 0%-containment findings, i.e. the
+signal immediately found suspicious citations in production data. Covered by
+`tests/lint.test.ts`.
 
 ### 18. Node-level time travel ⚠️
 
@@ -325,11 +371,16 @@ job cadence.
 - `README.md` advertises fact-level bitemporal history. ⚠️ reported (see #18).
 - `README.md` says "nothing is a free-floating fact". ⚠️ reported (see #9).
 
-### 23. `repro-eval` reports `18/17 PASS` ✅
+### 23. `repro-eval` reports `18/17 PASS` ✅ **fixed 2026-07-19**
 
 `R9` calls `report()` twice under one id, incrementing `passCount` twice against
 a hardcoded denominator. A harness that reports more passes than it has tests
 undermines confidence in its own output.
+
+**Done** — verdicts are tracked per R-id in a map and AND-combined across calls
+(a second report for the same id can never upgrade a fail back to a pass), and
+the denominator is the map's size instead of a hardcoded 17. The summary now
+reads `17/17`.
 
 ### 24. The `queryNormalize` stop-word list as a concept ✅
 

@@ -1,5 +1,6 @@
 import type { ForgetInput, GraphEdge, GraphNode, ReadAnyInput, RememberInput } from "./contracts.js";
 import type { GraphOperationContext, GraphSourceDocument, GraphStore, ReadResult } from "./graphCore.js";
+import { UnknownEvidenceReferenceError } from "./graphCore.js";
 import { slugify } from "./slug.js";
 
 export type RememberResult = {
@@ -7,6 +8,13 @@ export type RememberResult = {
   node: GraphNode;
   /** Near-matches that were NOT merged into — surfaced so the agent can retarget with `slug` if the dedupe missed. */
   similar: Array<{ nodeId: string; slug: string; title: string; score: number }>;
+  /**
+   * Evidence refs that did not resolve (unknown source/text unit), with the
+   * reason. They are reported here instead of silently dropped — nothing is a
+   * free-floating fact unless the caller can SEE that its citation failed.
+   * Present only when at least one ref failed.
+   */
+  evidenceRejected?: Array<{ sourceId: string | null; textUnitId: string | null; reason: string }>;
 };
 
 export type ForgetResult = {
@@ -69,20 +77,49 @@ export async function remember(
       .map((match) => ({ nodeId: match.node.id, slug: match.node.slug, title: match.node.title, score: match.score }));
   }
 
+  // Evidence attaches the same way on create and revise: each ref is attempted
+  // individually, refs that don't resolve come back in `evidenceRejected`
+  // (loud, actionable), and any other failure still throws — the old catch-all
+  // made a bogus citation indistinguishable from a database on fire.
+  const evidenceRejected: NonNullable<RememberResult["evidenceRejected"]> = [];
+  const attachEvidence = async (nodeId: string): Promise<void> => {
+    for (const evidence of input.evidence ?? []) {
+      try {
+        await store.annotate({
+          motivation: "supports",
+          sourceId: evidence.sourceId,
+          textUnitId: evidence.textUnitId,
+          nodeId,
+          body: {},
+          selector: evidence.selector ?? {},
+        }, context);
+      } catch (error) {
+        if (error instanceof UnknownEvidenceReferenceError) {
+          evidenceRejected.push({
+            sourceId: evidence.sourceId ?? null,
+            textUnitId: evidence.textUnitId ?? null,
+            reason: error.message,
+          });
+          continue;
+        }
+        throw error;
+      }
+    }
+  };
+  const finish = (result: RememberResult): RememberResult =>
+    evidenceRejected.length > 0 ? { ...result, evidenceRejected } : result;
+
   if (!target) {
     const node = await store.capture({
       title: input.title,
       type: input.type ?? "claim",
       summary: input.summary,
       content: input.content,
-      evidence: (input.evidence ?? []).map((ref) => ({
-        sourceId: ref.sourceId,
-        textUnitId: ref.textUnitId,
-        selector: ref.selector ?? {},
-      })),
+      evidence: [],
       links: (input.links ?? []).map((link) => ({ toSlug: link.toSlug, predicate: link.predicate ?? "relates_to" })),
     }, context);
-    return { action: "created", node, similar };
+    await attachEvidence(node.id);
+    return finish({ action: "created", node, similar });
   }
 
   const updateFields = {
@@ -113,22 +150,9 @@ export async function remember(
       // Missing link targets are non-fatal; the belief update already landed.
     }
   }
-  for (const evidence of input.evidence ?? []) {
-    try {
-      await store.annotate({
-        motivation: "supports",
-        sourceId: evidence.sourceId,
-        textUnitId: evidence.textUnitId,
-        nodeId: target.id,
-        body: {},
-        selector: evidence.selector ?? {},
-      }, context);
-    } catch {
-      // Evidence refs that fail to resolve are non-fatal.
-    }
-  }
+  await attachEvidence(target.id);
 
-  return { action: "updated", node: updated, similar };
+  return finish({ action: "updated", node: updated, similar });
 }
 
 /**
