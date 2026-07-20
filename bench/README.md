@@ -97,9 +97,22 @@ Writes a corpus, so it refuses non-local databases unless
 
 ## Reporting a number
 
-The multi-hop set (n=33, 51 items total) clears the runner's own verdict gate
-(n≥30 multi-hop). Whatever gets reported carries the sample size, both systems'
-scores per shape, the models, and the Trove SHA — the absence of exactly that
-is what makes the rest of the ecosystem's numbers uncitable (`FINDINGS.md`).
-The first verdict-grade run (2026-07-20) and its reading are recorded in
+The multi-hop set (n=33, 51 items total) clears the runner's own **sample-size**
+gate (n≥30 multi-hop). It does **not** yet clear the corpus-size bar:
+
+> ⚠️ **The 2026-07-20 run is not a valid measurement.** Those 51 items produce
+> only **100 text units**, and the flat baseline uses `TOP_K = 8` — it retrieves
+> **8% of the entire corpus** for every question, so retrieval barely filters
+> and its 92-97% coverage is an artifact of scale. See `docs/backlog.md` #31.
+> Pad the corpus to 5-10k units of distractor material (keeping these same
+> items) before reading any number this harness prints.
+
+A graph exists to beat similarity search *when the corpus is large enough that
+similarity search misses things*. Removing that condition and then reporting
+that the graph did not help measures the fixture, not the system.
+
+Whatever eventually gets reported carries the sample size, **the corpus size**,
+both systems' scores per shape, the models, and the Trove SHA — the absence of
+exactly that is what makes the rest of the ecosystem's numbers uncitable
+(`FINDINGS.md`). The retracted run and its diagnostics are kept in
 `docs/backlog.md` #25.

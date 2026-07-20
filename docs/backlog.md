@@ -33,11 +33,27 @@ that owns it — this is an index, not a second copy of the list.
 
 | | | |
 |---|---|---|
-| ✅ | **The graph loses multi-hop by 18 pts** at n=33 (59-63% vs 76-100%), controls level at 100%. The architectural bet does not pay off on the only adequately-powered instrument that exists | #25 |
-| ✅ | **The cause is unresolved.** Distillation loss and traversal-stopping both fit the data and point at completely different work | **#26** |
+| ⚠️ | **The thesis harness ran on a 100-text-unit corpus with `TOP_K=8`** — the flat baseline retrieves **8% of everything that exists** on every question. Retrieval is barely a filter at that scale | **#31** |
+| ❌ | **The "-18 pts multi-hop" number is therefore NOT a finding about Trove.** It is far more likely a fixture artifact. Do not plan from it | #25, **#31** |
+| ✅ | **The instrument itself is sound in design** — controls tie at 100%, `validateDataset` enforces the bridge property mechanically, and the shapes separate cleanly. It is the *corpus scale* that is wrong, not the experiment | #25 |
+| ⚠️ | **Cause of any real gap is unresolved** — distillation loss vs traversal-stopping. Cannot be answered until the corpus is realistic | **#26** after **#31** |
 
-Nothing below #26 should be funded before #26 answers it. #3 is the standing
-reminder: that fix was obvious, wrong, and cheap to falsify.
+**Nothing in Track 2 should be funded before #31.** #26 and #30 are both
+well-designed measurements of a regime that does not resemble production, and
+running them first buys precision about an artifact.
+
+This is the **third** instance of the same error in this repository, and the
+lesson was already written down twice before it recurred:
+
+- The 222× HNSW regression was invisible at 245 rows — recorded at the top of
+  this document as "verify performance claims at realistic scale".
+- Semantic-search behaviour was verified on `trove_repro` (245 rows) and
+  returned a false negative — recorded in `bench/FINDINGS.md`.
+- The thesis harness then drew an **architectural** conclusion from 100 rows.
+
+A small fixture does not merely add noise; it changes which system wins. Any
+future claim about retrieval, ranking or the graph must state its corpus size
+next to the number, and be disbelieved if it does not.
 
 ### Retrieval and ranking
 
@@ -547,11 +563,21 @@ been told what it means: teaching it in the answer prompt (as `recall`'s tool
 description already teaches every real MCP client) moved supersede from 50% to
 100% with the edges unchanged.
 
-**Grown dataset + full run (2026-07-20, n=51, 33 multi-hop — the first
-verdict-grade number):** the dataset grew to 17 bridge / 8 chain / 8 supersede
-+ 18 controls (35.3%), `validateDataset` clean, each new item designed so no
-single span suffices (the answer-bearing span carries multiple candidate
-values; only the join selects). Result, verbatim:
+**Grown dataset + full run (2026-07-20, n=51, 33 multi-hop):**
+
+> ❌ **RETRACTED AS A FINDING — see #31.** This run used a **100-text-unit
+> corpus** against `TOP_K = 8`, so the flat baseline retrieved 8% of everything
+> in existence per question. That accounts for its 92-97% coverage and makes
+> the comparison meaningless. The number below is kept for the record and
+> because its per-item diagnostics are still useful, but **it is not evidence
+> about the graph.** The thesis is *unmeasured*, not disproved. Everything in
+> the reading that follows is conditional on a fixture that should have been
+> questioned first.
+
+The dataset grew to 17 bridge / 8 chain / 8 supersede + 18 controls (35.3%),
+`validateDataset` clean, each new item designed so no single span suffices (the
+answer-bearing span carries multiple candidate values; only the join selects).
+Result, verbatim:
 
 ```
 shape       n   trove   flat    trove-cov  flat-cov
@@ -565,6 +591,13 @@ multi-hop gap (trove - flat): -18 pts  (n=33, one item = 3 pts)
 control gap   (trove - flat): 0 pts  (n=18)
 DOES NOT support the thesis: no multi-hop advantage at adequate n.
 ```
+
+The reading below was written before #31 was noticed. Its claim to be "a real
+negative result" is exactly the sentence #31 retracts — the corpus, not the
+dataset, was the rigged variable, and controls tying at 100% does not rescue it
+because both arms were operating where retrieval is nearly free. The per-item
+diagnostics (the exactly-50% coverage signature, the abstentions at 100%
+coverage) remain worth keeping as leads. Original text follows:
 
 This is a real negative result, not a rigged-corpus artifact: controls tie at
 100% (distillation costs nothing on single-span answers), and the deficit is
@@ -724,6 +757,46 @@ Then re-read #25 before funding #26's outcome.
 **Note** — this is the fifth 2026-07-20 harness defect, and like the other four
 it made Trove look worse than it is. See the methodology note at the top.
 
+### 31. The thesis corpus is too small to measure retrieval ❌ **invalidates #25's number**
+
+**Evidence** — the n=51 run ingested **100 text units** and the flat baseline
+uses `TOP_K = 8`. It retrieves **8% of the entire corpus** for every question.
+Trove meanwhile holds 331 nodes behind a token budget and selects far more
+aggressively.
+
+**Impact** — at 8% recall-by-default, retrieval is close to handing the model
+the whole dataset, which fully accounts for `flat-cov` of 92-97% and makes the
+comparison meaningless. The regime does not resemble production by orders of
+magnitude:
+
+| corpus | top-8 is | |
+|---|---|---|
+| thesis harness | **8%** | retrieval barely filters |
+| LongMemEval container (~11.6k rows) | 0.07% | |
+| a real vault (10^4-10^6 units) | 0.008% or less | where structure should pay |
+
+A graph exists to beat similarity search *when the corpus is large enough that
+similarity search misses things*. The harness removed that condition and then
+reported that the graph did not help.
+
+**This does not mean Trove wins at scale** — it means the experiment has not
+been run. The honest status of the thesis is **unmeasured**, not disproved.
+
+**Action** — pad the corpus to 5-10k text units of distractor material while
+keeping the same 51 items and their sessions. The items stay the instrument;
+only the haystack changes. Re-run, and only then read #30's triple and #26's
+ablation, both of which currently measure the artifact rather than the system.
+
+**Cost note** — reconciliation (#27) makes this expensive: 335 nodes already
+cost ~25 min and ~1,675 judge calls, and distractor material will multiply the
+node count. **#27 is now a prerequisite for #31**, not a follow-up.
+
+**Provenance of the error** — flagged during the 2026-07-20 review, after the
+number had been recorded, analysed in detail, and used to re-sequence this
+document. The analysis in #25 is careful and entirely conditional on a fixture
+that was never questioned. Being thorough downstream of an unchecked assumption
+produces confident, well-documented, wrong conclusions.
+
 ---
 
 ## Suggested order
@@ -750,26 +823,42 @@ unblocked by #25 — which promptly returned a negative result.
    multi-hop (17 bridge / 8 chain / 8 supersede) + 18 controls (35.3%),
    `validateDataset` clean. Result recorded in #25: **−18 pts multi-hop at
    n=33, controls level — the graph currently does NOT earn its complexity.**
-4. **#30 report the triple** — **STEP ZERO.** ~20 lines. The two systems are not
-   spending the same budget, and `spentTokens` is already on the pack and being
-   thrown away. Re-read #25 after this and before funding anything below it.
-5. **#26 the ablation** — **THE GATE.** Distillation loss and traversal-stopping
-   both explain the −18 pts and imply different work. The items below are a coin
-   flip until this resolves which. ~1 hour; `pack.citations` already carries
-   what variant B needs.
-6. **#8 + #10 ranking** — *if #26 says traversal.* Measured target: six misses
-   at exactly 50% coverage, recall reaching the join hub and stopping.
-7. **#4 extraction loss** — *if #26 says distillation.* flat-cov 92-97% vs
-   trove-cov 71-88% bounds how much the distill stage can be costing.
-8. **#27 reconciliation cost** — has crossed from optimisation into
-   infrastructure: ~25 min and ~1,675 judge calls per 335-node corpus now
-   bounds how fast every item above can be iterated. Do it as soon as #26
-   answers, before the ranking or extraction work starts looping.
+4. **#27 gate the reconcile judge** — moved up from step 8. It is a prerequisite
+   for #31: padding the corpus multiplies the node count, and 335 nodes already
+   cost ~25 min and ~1,675 judge calls. Also **decide this before merging PR
+   #26** — unconditional reconciliation should not reach a hosted deployment.
+5. **#31 scale the corpus to 5-10k text units** — **STEP ZERO.** At 100 units
+   with `TOP_K=8` the flat baseline sees 8% of everything and #25's number is an
+   artifact. Keep the 51 items; change only the haystack. Every measurement
+   below is meaningless until this lands.
+6. **#30 report the triple** — accuracy / latency / tokens. ~20 lines,
+   `spentTokens` is already on the pack. Run it *after* #31, since at 100 units
+   Trove's selectivity is pure downside with nothing to select away from.
+7. **#26 the ablation** — **THE GATE**, once the instrument is real.
+   Distillation loss and traversal-stopping both explain a multi-hop gap and
+   imply different work. ~1 hour; `pack.citations` already carries what variant
+   B needs.
+8. **#8 + #10 ranking** — *if #26 says traversal.* The exactly-50% coverage
+   signature is a lead, not yet a measured target: it was observed in the
+   invalid regime and must be reconfirmed at scale.
+9. **#4 extraction loss** — *if #26 says distillation.* Independently supported
+   by `extraction-recall.ts` (85.4% → 75.6%), which does **not** depend on the
+   thesis corpus, so this one lead survives #31 intact.
 
-**Track 3 — competitive comparison.** Deliberately last. No baseline has ever
-completed (`FINDINGS.md`), and a number here is meaningless while tracks 1 and 2
-are open. Rebuilding a MemoryBench provider is ~a day against FINDINGS.md's
-notes on the harness's quirks.
+**Track 3 — competitive comparison.** Still last for *publishing*, but its
+sanity-check value was underrated when the MemoryBench provider was deleted on
+2026-07-20. That deletion left the flat baseline as the **sole comparator**, and
+nothing tells us whether it is unusually strong — #31 says it very likely was.
+Had a second system been runnable, "everything loses to raw-span retrieval at
+100 units" would have surfaced immediately instead of being written up as a
+finding about Trove.
+
+**Revised guidance:** once #31 lands, rebuild **one** provider (~a day against
+`FINDINGS.md`'s notes on the harness's quirks) and run it as an instrument check,
+not for a number. A comparator that shares Trove's distillation-shaped
+disadvantage is the cheapest available guard against another single-system
+artifact. The reasoning for deleting it — LongMemEval is the wrong *shape* —
+still holds for publication; it did not hold for calibration.
 
 **Track 4 — the question none of this answers.** #29: every number here grades
 question-answering over a fixed corpus, while Trove's actual job is being the
@@ -791,22 +880,32 @@ list is long enough that "do the next item" stops being a strategy.
 
 ### Step zero, before anything else
 
-**#30** — measure the triple. It is ~20 lines and it may change what the problem
-even is. Acting on #25's accuracy-only number before this risks optimising the
-one axis Trove was built not to compete on.
+**#31** — make the corpus realistic. Everything downstream currently measures a
+regime where the flat baseline sees 8% of the world per query. #30 and #26 are
+both well-designed instruments pointed at an artifact; running them first buys
+precision about nothing.
 
-### Phase 1 — stop losing (weeks)
+### Phase 1 — find out whether we are losing at all (weeks)
 
-1. #30 report accuracy / latency / tokens
-2. #26 ablation — distillation or traversal
-3. Fix whichever it names — #4 **or** #8/#10, not both on spec
-4. #27 reconciliation cost — currently throttles every iteration above it
+1. **#27** gate the reconcile judge — prerequisite, since #31 multiplies node
+   count and reconciliation already costs ~25 min per 335 nodes. Decide it
+   before merging PR #26 either way.
+2. **#31** pad the corpus to 5-10k units, same 51 items
+3. **#30** report accuracy / latency / tokens
+4. **Re-run** — this produces the first number that means anything
+5. **#26** ablation, *if a gap survives* — distillation or traversal
+6. Fix whichever it names — #4 **or** #8/#10, not both on spec
+
+Note the change of title. The earlier version of this section was called "stop
+losing", which presumed the loss was real. It has not been established.
 
 A prior worth recording so it can be falsified: the **exactly-50%** signature on
 six two-hop items points at traversal, since distillation loss would degrade
 both hops rather than precisely one. But controls tying at 100% while multi-hop
 collapses is equally what distillation-that-only-hurts-composition looks like.
-Genuinely 50/50 — which is the whole reason #26 exists rather than a fix.
+**Both readings are now additionally suspect** — they describe behaviour in a
+regime where the baseline was near-oracle, so the signature itself may not
+survive #31. Treat as a lead to reconfirm, not a diagnosis.
 
 ### Phase 2 — find the edge that is actually defensible
 
@@ -817,13 +916,15 @@ Ranked by evidence, not by how good the story sounds:
 | **Search latency** | ✅ **4× verified** (109 ms vs 437 ms). Defensible today |
 | **Token efficiency** | Architecturally real, **unmeasured** — #30 closes this |
 | **Provenance / audit** | Genuinely unique. Currently *failing*: `weak_evidence` found 0%-containment citations in live vault data |
-| **Multi-hop reasoning** | Currently **behind an untuned RAG baseline** |
+| **Multi-hop reasoning** | ⚠️ **Unmeasured.** The one run that looked like a loss was invalid (#31); the honest status is unknown, not behind |
 
-The honest read: **QA accuracy is not a lane Trove leads soon.** It is crowded,
-Trove is currently behind an *untuned* baseline in it, and every competitor is
-optimising the same metric. Latency + token cost + auditable provenance is a
-lane nobody is seriously contesting, and two of those three are properties the
-architecture already has.
+The honest read: **QA accuracy is a crowded lane and a hard one**, and it is the
+axis every competitor already optimises. Latency + token cost + auditable
+provenance is a lane nobody is seriously contesting, and two of those three are
+properties the architecture already has. That argument stands on its own merits
+and never needed the multi-hop number — which is fortunate, because an earlier
+version of this section leaned on "Trove is behind an untuned baseline" as though
+it were established. It was not.
 
 ### Phase 3 — make it undeniable
 
@@ -833,13 +934,32 @@ architecture already has.
   absence of exactly that is what makes the rest of the ecosystem's numbers
   uncitable; matching it is a positioning advantage available for free
 
-### The decision to take early, on evidence
+### The decision to take on evidence — but not yet
 
-If #26 says traversal and fixing it does not close 18 points, the defensible
-position becomes: **Trove is auditable, token-efficient, low-latency memory**,
-and the graph is *how it works* rather than *why anyone buys it*.
+If a real multi-hop gap survives #31, and #26 says traversal, and fixing
+traversal does not close it, then the defensible position becomes: **Trove is
+auditable, token-efficient, low-latency memory**, and the graph is *how it
+works* rather than *why anyone buys it*.
 
 That is not failure — it is the same product with a claim that survives
-scrutiny. The failure mode is spending six months chasing a benchmark Trove is
-not structurally built to win, while the two axes it already leads on stay
-unmeasured.
+scrutiny. But note the three conditionals. An earlier version of this section
+presented that repositioning as a live decision on the strength of a number
+that has since been retracted. **Do not reposition on #25.** The failure mode
+cuts both ways: chasing a benchmark Trove is not built to win wastes months,
+and abandoning the graph on an artifact throws away the thing that might
+actually differentiate it.
+
+---
+
+## Standing rule, earned three times
+
+**State the corpus size next to every retrieval, ranking or performance
+number in this repository, and disbelieve any that does not.**
+
+Three instances, each after the lesson was already written down:
+
+1. 222× HNSW regression — invisible at 245 rows
+2. Semantic-search verification on `trove_repro` — false negative at 245 rows
+3. The thesis harness — an *architectural* conclusion from 100 rows
+
+A small fixture does not add noise. It changes which system wins.
