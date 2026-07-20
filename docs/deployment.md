@@ -84,6 +84,7 @@ Graph writes enqueue durable `graph_job` rows for:
 - `refresh_obsidian_projection`
 - `lint_graph`
 - `refresh_embeddings`
+- `reconcile_node` (write-time reconciliation; conservative heuristic by default — the LLM judge is opt-in via `TROVE_RECONCILE_JUDGE=1` and costs up to 5 calls per write, unbounded and proportional to write volume, until backlog #27 gates it on embedding distance)
 
 Run a bounded worker pass:
 

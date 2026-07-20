@@ -78,9 +78,20 @@ Ordered by leverage; the schema is already ~70% of the way there.
 > Shipped vs designed (2026-07-19): hybrid retrieval fuses lexical and semantic rankings
 > with RRF. Activation ranking is a simplified ACT-R-style heuristic (recency + frequency
 > + degree — no semantic-alignment or noise terms); explicit `read` bumps the counters,
-> recall packing deliberately does not. Contradiction detection is not implemented, and
-> neither is decay/archive — low-activation atoms rank lower but are never archived or
-> deleted. Tombstoned nodes (via `forget`) are soft-deleted, not archived.
+> recall packing deliberately does not. Decay/archive are not implemented — low-activation
+> atoms rank lower but are never archived or deleted. Tombstoned nodes (via `forget`) are
+> soft-deleted, not archived.
+
+> Status (2026-07-19, reconciliation shipped): write-time reconciliation is now live as
+> `reconcile_node` graph jobs — capture and content-changing updates enqueue a per-node
+> pass that candidate-matches against existing nodes (lexical + semantic search) and
+> judges each pair. An LLM judge (OpenAI, `TROVE_RECONCILE_JUDGE_MODEL`, heuristic
+> fallback without a key) classifies supersedes / duplicate / contradicts / related /
+> distinct. A confident `supersedes` verdict writes a non-destructive `supersedes`
+> edge and recall marks the replaced atom `SUPERSEDED by <title>`; contradictions and
+> duplicates are flagged in the job result for an agent to resolve — auto-invalidation
+> of genuine contradictions is deliberately not automated. See `src/reconcile.ts` and
+> `tests/reconcile.test.ts` (both drivers). Claim embeddings (5) remain open.
 
 1. **Bitemporalize edges and finish claims.** `claim` already has `valid_from`/`valid_until`/`status`; add `expired_at` + `invalidated_by`, and add the four temporal columns to `edge`. Default all reads to current-belief. (Small migration, unlocks #2, #5, time-travel.)
 2. **Reconciliation in the write path.** On `capture`/`ingest` extraction: candidate-match against existing nodes/claims (slug, FTS, embedding), auto-link or flag, and generate contradiction candidates for temporally overlapping claims on the same node. Wire the invalidation primitive into `graph.lint`'s contradiction pass.

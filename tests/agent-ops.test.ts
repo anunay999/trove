@@ -152,4 +152,47 @@ describe("agent ops", () => {
     const readMissing = await readAny(store, { id: "00000000-0000-0000-0000-000000000000" });
     assert.equal(readMissing, null, "readAny must return null for unknown ids");
   });
+
+  it("remember reports unresolvable evidence refs in evidenceRejected instead of dropping them silently", async () => {
+    const ingested = await store.ingest({
+      kind: "agent_note",
+      title: `Agent ops evidence source ${stamp}`,
+      contentText: "A source with one real text unit for citation.",
+      metadata: {},
+    }, context);
+    const realUnit = ingested.textUnits[0];
+    assert.ok(realUnit, "ingest must produce at least one text unit");
+
+    const bogusUnitId = "00000000-0000-0000-0000-000000000000";
+    const created = await remember(store, {
+      title: `Agent ops evidence-loud fact ${stamp}`,
+      type: "claim",
+      summary: "One valid citation, one dangling citation.",
+      evidence: [
+        { sourceId: ingested.source.id, textUnitId: realUnit.id },
+        { sourceId: ingested.source.id, textUnitId: bogusUnitId },
+      ],
+      links: [],
+    }, context);
+    assert.equal(created.action, "created", "the write must still land when one citation is bogus");
+    assert.equal(created.evidenceRejected?.length, 1, "exactly the bogus ref must be reported");
+    assert.equal(created.evidenceRejected?.[0]?.textUnitId, bogusUnitId);
+    assert.ok(created.evidenceRejected?.[0]?.reason.includes("unknown"), "the reason must say what failed");
+
+    // The valid ref attached and is visible through read.
+    const read = await store.read({ nodeId: created.node.id }, context, { trackAccess: false });
+    assert.ok(read?.evidence.some((unit) => unit.id === realUnit.id), "the valid citation must annotate the node");
+
+    // Revise path: same loud behavior.
+    const revised = await remember(store, {
+      title: `Agent ops evidence-loud fact ${stamp}`,
+      type: "claim",
+      summary: "Revised with a dangling citation.",
+      evidence: [{ textUnitId: bogusUnitId }],
+      links: [],
+    }, context);
+    assert.equal(revised.action, "updated");
+    assert.equal(revised.evidenceRejected?.length, 1);
+    assert.equal(revised.evidenceRejected?.[0]?.textUnitId, bogusUnitId);
+  });
 });

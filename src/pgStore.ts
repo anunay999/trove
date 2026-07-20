@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
-import { normalizeRetrievalQuery } from "./queryNormalize.js";
+import { contentTerms, normalizeRetrievalQuery } from "./queryNormalize.js";
 import type {
   AnnotateInput,
   CaptureInput,
@@ -37,11 +37,16 @@ import {
   type OwnerScope,
   decodeEventCursor,
   encodeEventCursor,
+  evidenceSupportScore,
   performRecall,
   renderAgentContext,
   renderMarkdownProjection,
   sha256,
   splitTextUnits,
+  ServedUnitLog,
+  FUZZY_QUOTE_CANDIDATE_FLOOR,
+  UnknownEvidenceReferenceError,
+  WEAK_EVIDENCE_FLOOR,
   type GraphEvent,
   type GraphEventFeed,
   type GraphJob,
@@ -58,9 +63,16 @@ import {
   type ReadResult,
   type RecallResult,
   type SearchResult,
+  type TextQuoteMatch,
 } from "./graphCore.js";
 import { createEmbeddingProviderFromEnv, vectorLiteral, type EmbeddingProvider } from "./embeddings.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
+import {
+  createReconcileJudgeFromEnv,
+  performReconcileNode,
+  type ReconcileJudge,
+} from "./reconcile.js";
+import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
 
 const { Pool } = pg;
@@ -75,13 +87,26 @@ const EMBEDDABLE_TEXT_UNIT = `
 
 type PgStoreOptions = {
   connectionString: string;
+  /**
+   * Override the reconciliation judge (tests inject a fake; production defaults
+   * to the OpenAI judge from env, falling back to the heuristic when
+   * unconfigured). Pass `null` explicitly to force the heuristic.
+   */
+  reconcileJudge?: ReconcileJudge | null;
 };
 
 export class PgGraphStore implements GraphStore {
   private pool: pg.Pool;
+  private reconcileJudge: ReconcileJudge | null;
+  /**
+   * Session-served provenance log (backlog #9b). In-process by design — the
+   * server is one process, and this backs a warning, not a security boundary.
+   */
+  private servedUnits = new ServedUnitLog();
 
   constructor(options: PgStoreOptions) {
     this.pool = new Pool({ connectionString: options.connectionString, keepAlive: true });
+    this.reconcileJudge = options.reconcileJudge === undefined ? createReconcileJudgeFromEnv() : options.reconcileJudge;
     // Idle clients dropped by the pooler (e.g. Supabase) emit 'error'; without
     // a listener that unhandled event kills the whole process.
     this.pool.on("error", (error) => {
@@ -157,6 +182,7 @@ export class PgGraphStore implements GraphStore {
       await client.query("commit");
 
       const textUnits = await this.textUnitsForSource(source.id);
+      this.servedUnits.mark(textUnits.map((unit) => unit.id), context);
       return { source, textUnits };
     } catch (error) {
       await client.query("rollback");
@@ -309,26 +335,42 @@ export class PgGraphStore implements GraphStore {
       }
     }
 
-    return { matches: matches.slice(0, limit), truncated: matches.length > limit };
+    const served = matches.slice(0, limit);
+    this.servedUnits.mark(
+      served.flatMap((match) => (match.textUnitId ? [match.textUnitId] : [])),
+      context,
+    );
+    return { matches: served, truncated: matches.length > limit };
   }
 
   async search(input: SearchInput, context?: GraphOperationContext): Promise<SearchResult> {
     const scope = ownerScope(context);
-    const lexical = await this.lexicalSearch(input, scope);
-    if (input.mode === "lexical") return lexical;
+    const provider = input.mode === "lexical" ? null : createEmbeddingProviderFromEnv();
 
-    const provider = createEmbeddingProviderFromEnv();
-    if (!provider) {
-      return input.mode === "semantic" ? { nodes: [], textUnits: [] } : lexical;
+    let result: SearchResult;
+    // Semantic-only searches used to run a full lexical search first and throw
+    // the result away; they now do no lexical work at all.
+    if (input.mode === "semantic") {
+      result = provider ? await this.semanticSearch(input, provider, scope) : { nodes: [], textUnits: [] };
+    } else if (input.mode === "lexical" || !provider) {
+      // Lexical-only, or hybrid with no embedding provider configured.
+      result = await this.lexicalSearch(input, scope);
+    } else {
+      // The two arms are independent, and the semantic one blocks on an embedding
+      // API round trip. Running them concurrently hides the lexical SQL entirely
+      // behind that call rather than adding to it — recall (the hot path) calls
+      // this with limit 50.
+      const [lexical, semantic] = await Promise.all([
+        this.lexicalSearch(input, scope),
+        this.semanticSearch(input, provider, scope),
+      ]);
+      result = {
+        nodes: reciprocalRankFusion(lexical.nodes, semantic.nodes),
+        textUnits: reciprocalRankFusion(lexical.textUnits, semantic.textUnits),
+      };
     }
-
-    const semantic = await this.semanticSearch(input, provider, scope);
-    if (input.mode === "semantic") return semantic;
-
-    return {
-      nodes: reciprocalRankFusion(lexical.nodes, semantic.nodes),
-      textUnits: reciprocalRankFusion(lexical.textUnits, semantic.textUnits),
-    };
+    this.servedUnits.mark(result.textUnits.map((unit) => unit.id), context);
+    return result;
   }
 
   private async lexicalSearch(input: SearchInput, scope: OwnerScope): Promise<SearchResult> {
@@ -446,37 +488,60 @@ export class PgGraphStore implements GraphStore {
       .filter((vector): vector is number[] => Array.isArray(vector))
       .map(vectorLiteral);
     if (vectors.length === 0) return { nodes: [], textUnits: [] };
-    const distExpr = vectors.length > 1
-      ? `least(${vectors.map((_, index) => `e.embedding <=> $${index + 1}::vector`).join(", ")})`
-      : "e.embedding <=> $1::vector";
+    // Vectors occupy $1..$N; everything else is numbered after them.
     const p = (offset: number): string => `$${vectors.length + offset}`;
     const typeFilter = input.types && input.types.length > 0 ? input.types : null;
     const maxDistance = maxSemanticDistanceFor(input);
 
-    // Only current revisions carry embeddings (superseded ones are pruned on
-    // update/tombstone and by migration 010); the join + distance floor keep
-    // stale text and irrelevant neighbors out. distinct on collapses any
-    // duplicate embedding rows per node, then we re-order by distance.
+    // Probe the HNSW index FIRST, then join and filter — never filter-then-sort.
+    //
+    // The previous shape selected from embedding JOIN node_revision JOIN node
+    // with `distinct on (n.id) ... order by n.id, <distance>`. Ordering by n.id
+    // is something the vector index cannot provide, so Postgres read and sorted
+    // EVERY embedding row on every semantic search: measured at 50k rows, three
+    // sequential scans and 60.8ms. Probing the index for a bounded candidate set
+    // and joining afterwards plans as index scans throughout: 0.99ms, ~61x.
+    //
+    // Each per-vector branch is `order by embedding <=> $n limit K`, the only
+    // shape pgvector can serve from embedding_hnsw_idx (migration 009). Their
+    // union is deduped by min() rather than `distinct on`, which also removes
+    // the need for the n.id ordering that caused the problem — a revision can
+    // hold several embedding rows (the unique key includes content_sha256), and
+    // min() collapses them correctly.
+    //
+    // OVERFETCH exists because the index probe happens BEFORE owner scoping,
+    // type filters and the giant-content rule, so a heavily filtered query can
+    // otherwise come back short. It trades a larger candidate set for recall;
+    // pgvector 0.8's hnsw.iterative_scan would remove the guess entirely.
+    const OVERFETCH = 10;
+    const candidateLimit = Math.max(200, input.limit * OVERFETCH);
+    const candidateBranches = vectors
+      .map((_, index) => `(
+           select e.owner_id, e.embedding <=> $${index + 1}::vector as distance
+           from embedding e
+           where e.owner_table = 'node_revision' and e.model = ${p(1)}
+           order by e.embedding <=> $${index + 1}::vector
+           limit ${p(9)}
+         )`)
+      .join(" union all ");
+
     const nodeResult = await this.pool.query(
-      `select * from (
-         select distinct on (n.id)
-                n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id, n.updated_at, n.access_count, n.last_accessed_at,
-                ${distExpr} as distance
-         from embedding e
-         join node_revision nr on nr.id = e.owner_id and e.owner_table = 'node_revision'
-         join node n on n.id = nr.node_id and n.deleted_at is null and nr.id = n.current_revision_id
-         where e.model = ${p(1)}
-           and ${distExpr} < ${p(6)}
-           and (${p(4)} or n.owner_id = ${p(5)})
-           and (${p(2)}::node_type[] is null or n.type = any(${p(2)}::node_type[]))
-           and (
-             coalesce(length(nr.content), 0) <= 12000
-             or n.title ilike ${p(7)}
-             or n.slug = lower(replace(${p(8)}, ' ', '-'))
-           )
-         order by n.id, ${distExpr}
-       ) node_matches
-       order by distance
+      `with candidates as (${candidateBranches}),
+            best as (select owner_id, min(distance) as distance from candidates group by owner_id)
+       select n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id,
+              n.updated_at, n.access_count, n.last_accessed_at, best.distance
+       from best
+       join node_revision nr on nr.id = best.owner_id
+       join node n on n.id = nr.node_id and n.deleted_at is null and nr.id = n.current_revision_id
+       where best.distance < ${p(6)}
+         and (${p(4)} or n.owner_id = ${p(5)})
+         and (${p(2)}::node_type[] is null or n.type = any(${p(2)}::node_type[]))
+         and (
+           coalesce(length(nr.content), 0) <= 12000
+           or n.title ilike ${p(7)}
+           or n.slug = lower(replace(${p(8)}, ' ', '-'))
+         )
+       order by best.distance
        limit ${p(3)}`,
       [
         ...vectors,
@@ -488,6 +553,7 @@ export class PgGraphStore implements GraphStore {
         maxDistance,
         `%${input.query}%`,
         input.query,
+        candidateLimit,
       ],
     );
 
@@ -593,6 +659,11 @@ export class PgGraphStore implements GraphStore {
       }
     }
 
+    // A tracked read is an agent-facing one — its evidence was actually shown,
+    // so it counts as served. Internal reads (trackAccess: false) show nothing.
+    if (opts?.trackAccess ?? true) {
+      this.servedUnits.mark(evidence.filter(isTextUnit).map((unit) => unit.id), context);
+    }
     return { ...node, evidence, annotations };
   }
 
@@ -653,6 +724,94 @@ export class PgGraphStore implements GraphStore {
       evidence.get(String(row.node_id))?.push(mapTextUnit(row));
     }
     return evidence;
+  }
+
+  async resolveTextQuote(
+    input: { quote: string; sourceId?: string; textUnitId?: string; limit?: number },
+    context?: GraphOperationContext,
+  ): Promise<TextQuoteMatch[]> {
+    const scope = ownerScope(context);
+    const limit = Math.max(1, Math.min(25, Math.trunc(input.limit ?? 8)));
+    // Exact: verbatim containment, case-insensitive. position() sidesteps
+    // ILIKE's %/_ escaping entirely.
+    const exact = await this.pool.query(
+      `select id, source_id, ordinal, section_path, char_start, char_end, text, content_sha256
+       from text_unit
+       where ($2 or owner_id = $3)
+         and ($4::uuid is null or source_id = $4)
+         and ($5::uuid is null or id = $5)
+         and position(lower($1) in lower(text)) > 0
+       order by created_at desc, ordinal
+       limit $6`,
+      [input.quote, !scope.scoped, scope.ownerId, input.sourceId ?? null, input.textUnitId ?? null, limit],
+    );
+    if (exact.rows.length > 0) {
+      return exact.rows.map((row): TextQuoteMatch => ({ unit: mapTextUnit(row), match: "exact", score: 1 }));
+    }
+
+    // Fuzzy: units holding any of the quote's content terms (the same OR form
+    // as lexical search's fallback), then containment-scored in JS with the
+    // helper the weak-evidence lint uses — one scoring rule, two call sites.
+    if (contentTerms(input.quote).length === 0) return [];
+    const fuzzy = await this.pool.query(
+      `with q as (
+         select coalesce(
+           (select (string_agg(lexeme, ' | '))::tsquery
+            from unnest(tsvector_to_array(to_tsvector('english', $1))) as terms(lexeme)),
+           ''::tsquery
+         ) as query
+       )
+       select id, source_id, ordinal, section_path, char_start, char_end, text, content_sha256,
+              ts_rank_cd(to_tsvector('english', text), q.query) as rank
+       from text_unit
+       cross join q
+       where ($2 or owner_id = $3)
+         and ($4::uuid is null or source_id = $4)
+         and ($5::uuid is null or id = $5)
+         and to_tsvector('english', text) @@ q.query
+       order by rank desc
+       limit 25`,
+      [input.quote, !scope.scoped, scope.ownerId, input.sourceId ?? null, input.textUnitId ?? null],
+    );
+    return fuzzy.rows
+      .map((row): TextQuoteMatch => ({
+        unit: mapTextUnit(row),
+        match: "fuzzy",
+        score: evidenceSupportScore(input.quote, [String(row.text ?? "")]),
+      }))
+      .filter((match) => match.score >= FUZZY_QUOTE_CANDIDATE_FLOOR)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, limit);
+  }
+
+  markTextUnitsServed(textUnitIds: string[], context?: GraphOperationContext): void {
+    this.servedUnits.mark(textUnitIds, context);
+  }
+
+  textUnitWasServed(input: { textUnitId: string }, context?: GraphOperationContext): boolean {
+    return this.servedUnits.wasServed(input.textUnitId, context);
+  }
+
+  async supersededBy(nodeIds: string[], context?: GraphOperationContext): Promise<Map<string, { byNodeId: string; byTitle: string }>> {
+    const map = new Map<string, { byNodeId: string; byTitle: string }>();
+    if (nodeIds.length === 0) return map;
+    const scope = ownerScope(context);
+    // Only ACTIVE supersedes edges count: an expired/invalidated one is history,
+    // not a reason to distrust the atom today.
+    const result = await this.pool.query(
+      `select e.to_node_id, e.from_node_id, n.title
+       from edge e
+       join node n on n.id = e.from_node_id and n.deleted_at is null
+       where e.predicate = 'supersedes'
+         and e.to_node_id = any($1::uuid[])
+         and e.deleted_at is null and e.expired_at is null
+         and ($2 or e.owner_id = $3)`,
+      [nodeIds, !scope.scoped, scope.ownerId],
+    );
+    for (const row of result.rows) {
+      map.set(String(row.to_node_id), { byNodeId: String(row.from_node_id), byTitle: String(row.title) });
+    }
+    return map;
   }
 
   async neighborhood(input: NeighborhoodInput, context?: GraphOperationContext): Promise<NeighborhoodResult> {
@@ -1011,6 +1170,7 @@ export class PgGraphStore implements GraphStore {
         "lint_graph",
         "refresh_embeddings",
       ]);
+      await this.enqueueReconcileJob(client, context, actorUuid, id);
       await client.query("commit");
 
       const node = await this.read({ nodeId: id }, undefined, { trackAccess: false });
@@ -1133,6 +1293,11 @@ export class PgGraphStore implements GraphStore {
         "lint_graph",
         "refresh_embeddings",
       ]);
+      // Reconcile only when content actually changed — a title/summary-only
+      // revise carries no new claims to judge.
+      if (revisionId !== currentRevisionId) {
+        await this.enqueueReconcileJob(client, context, actorUuid, input.nodeId);
+      }
       await client.query("commit");
 
       const updated = await this.read({ nodeId: input.nodeId }, undefined, { trackAccess: false });
@@ -1157,6 +1322,9 @@ export class PgGraphStore implements GraphStore {
     if (input.format === "mind_map") {
       return { format: "mind_map", ...neighborhood };
     }
+
+    // markdown and agent_context both carry the evidence text — that is a serve.
+    this.servedUnits.mark(evidence.map((unit) => unit.id), context);
 
     if (input.format === "agent_context") {
       return {
@@ -1216,7 +1384,7 @@ export class PgGraphStore implements GraphStore {
   async lint(context?: GraphOperationContext): Promise<GraphLintReport> {
     const scope = ownerScope(context);
     const p: [boolean, string | null] = [!scope.scoped, scope.ownerId];
-    const [nodeCount, edgeCount, orphanNodes, missingEvidence, duplicateTitles, danglingEdges] = await Promise.all([
+    const [nodeCount, edgeCount, orphanNodes, missingEvidence, duplicateTitles, danglingEdges, evidenceRows] = await Promise.all([
       this.pool.query("select count(*)::int as count from node where deleted_at is null and ($1 or owner_id = $2)", p),
       this.pool.query("select count(*)::int as count from edge where deleted_at is null and expired_at is null and ($1 or owner_id = $2)", p),
       this.pool.query(
@@ -1261,6 +1429,19 @@ export class PgGraphStore implements GraphStore {
          limit 50`,
         p,
       ),
+      // weak_evidence: nodes WITH citations, scored for whether the cited span
+      // actually supports the atom. Content is capped per node — the score
+      // uses the same leading slice reconcile judges on.
+      this.pool.query(
+        `select n.id, n.title, coalesce(n.summary, '') as summary, left(coalesce(nr.content, ''), 2000) as content,
+                tu.text as unit_text
+         from node n
+         join annotation a on a.node_id = n.id and a.text_unit_id is not null
+         join text_unit tu on tu.id = a.text_unit_id
+         left join node_revision nr on nr.id = n.current_revision_id
+         where n.deleted_at is null and ($1 or n.owner_id = $2)`,
+        p,
+      ),
     ]);
 
     const findings: GraphLintFinding[] = [];
@@ -1302,6 +1483,36 @@ export class PgGraphStore implements GraphStore {
         entityId: String(row.id),
         message: "Edge points at a missing or deleted node.",
       });
+    }
+
+    // weak_evidence: a citation that is present but probably wrong. Group the
+    // joined rows per node, score against the best cited unit, flag under the
+    // floor — capped so a bulk mis-ingest cannot flood the report.
+    const evidenceByNode = new Map<string, { title: string; nodeText: string; units: string[] }>();
+    for (const row of evidenceRows.rows) {
+      const id = String(row.id);
+      const entry = evidenceByNode.get(id) ?? {
+        title: String(row.title),
+        nodeText: `${row.title}\n${row.summary}\n${row.content}`,
+        units: [] as string[],
+      };
+      entry.units.push(String(row.unit_text));
+      evidenceByNode.set(id, entry);
+    }
+    let weakEvidenceCount = 0;
+    for (const [id, entry] of evidenceByNode) {
+      if (weakEvidenceCount >= 50) break;
+      const score = evidenceSupportScore(entry.nodeText, entry.units);
+      if (score < WEAK_EVIDENCE_FLOOR) {
+        findings.push({
+          severity: "warning",
+          code: "weak_evidence",
+          entityTable: "node",
+          entityId: id,
+          message: `Cited evidence supports ${(score * 100).toFixed(0)}% of the node's content terms (floor ${WEAK_EVIDENCE_FLOOR * 100}%): ${entry.title}`,
+        });
+        weakEvidenceCount += 1;
+      }
     }
 
     const errors = findings.filter((finding) => finding.severity === "error").length;
@@ -1560,6 +1771,32 @@ export class PgGraphStore implements GraphStore {
     }
   }
 
+  /**
+   * Reconciliation runs per node, below the other maintenance jobs in priority
+   * (it is the expensive, LLM-judged pass). Dedupe is per node: a burst of
+   * revisions to the same node collapses into one run, which reads the current
+   * revision at claim time.
+   *
+   * Note the contrast with `maintenance:<kind>` keys above: lint and global
+   * embedding refresh are genuinely global work, so concurrent writers sharing
+   * one pending row is CORRECT there (the job covers everyone's data), while
+   * reconciliation is per-node work and must never absorb across nodes. The
+   * `dedupeJoined` return marker lets a caller observe either absorption.
+   */
+  private async enqueueReconcileJob(
+    client: pg.PoolClient,
+    context: GraphOperationContext | undefined,
+    actorUuid: string | null,
+    nodeId: string,
+  ): Promise<void> {
+    await this.enqueueJobWithClient(client, {
+      kind: "reconcile_node",
+      payload: { reason: "graph_mutation", nodeId, ownerId: ownerScope(context).ownerId },
+      priority: 30,
+      dedupeKey: `reconcile:${nodeId}`,
+    }, context, actorUuid);
+  }
+
   private async enqueueJobWithClient(
     client: pg.PoolClient,
     input: EnqueueJobInput,
@@ -1578,7 +1815,7 @@ export class PgGraphStore implements GraphStore {
          limit 1`,
         [input.kind, input.dedupeKey],
       );
-      if ((existing.rowCount ?? 0) > 0) return mapJob(existing.rows[0]);
+      if ((existing.rowCount ?? 0) > 0) return { ...mapJob(existing.rows[0]), dedupeJoined: true };
     }
 
     const jobId = randomUUID();
@@ -1602,7 +1839,7 @@ export class PgGraphStore implements GraphStore {
          limit 1`,
         [input.kind, input.dedupeKey],
       );
-      if ((existing.rowCount ?? 0) > 0) return mapJob(existing.rows[0]);
+      if ((existing.rowCount ?? 0) > 0) return { ...mapJob(existing.rows[0]), dedupeJoined: true };
     }
     const job = mapJob(result.rows[0]);
     await this.recordEvent(
@@ -1676,11 +1913,21 @@ export class PgGraphStore implements GraphStore {
     }
   }
 
-  private async performJob(job: GraphJob): Promise<Record<string, unknown>> {
+  private async performJob(job: GraphJob): Promise<GraphJobResult> {
     if (job.kind === "lint_graph") {
       const report = await this.lint();
       // Carry the findings themselves (capped) — counts alone are not actionable.
-      return { lint: { ...report.summary, findings: report.findings.slice(0, 200) } };
+      const result: GraphJobResultMap["lint_graph"] = { lint: { ...report.summary, findings: report.findings.slice(0, 200) } };
+      return result;
+    }
+
+    if (job.kind === "reconcile_node") {
+      const payload = asRecord(job.payload);
+      const nodeId = typeof payload.nodeId === "string" ? payload.nodeId : null;
+      if (!nodeId) throw new Error("reconcile_node: payload.nodeId is required");
+      const ownerId = typeof payload.ownerId === "string" ? payload.ownerId : null;
+      const result: GraphJobResultMap["reconcile_node"] = await performReconcileNode(this, { nodeId, ownerId }, this.reconcileJudge);
+      return result;
     }
 
     if (job.kind === "refresh_obsidian_projection") {
@@ -1689,14 +1936,22 @@ export class PgGraphStore implements GraphStore {
         await this.timeline(),
         await this.exportGraph(),
       );
-      return {
+      const result: GraphJobResultMap["refresh_obsidian_projection"] = {
         manifest: projection.manifest,
         fileCount: Object.keys(projection.files).length,
       };
+      return result;
     }
 
     const provider = createEmbeddingProviderFromEnv();
     const model = provider?.model ?? process.env.TROVE_EMBEDDING_MODEL ?? "unconfigured";
+    // payload.ownerId scopes the whole job to one tenant: a bulk importer can
+    // ask "is MY data indexed yet?" and drain just its own slice instead of
+    // waiting for the entire corpus. Absent means global (the background
+    // worker's mode). The count and the backfill must take the same filter or
+    // the drain math lies.
+    const payloadOwner = asRecord(job.payload).ownerId;
+    const ownerId = typeof payloadOwner === "string" ? payloadOwner : null;
     // Only the owner types the backfill actually embeds (and search actually
     // reads) are counted; whole-source vectors are a future feature, and
     // counting them here made every job report look permanently unfinished.
@@ -1706,6 +1961,7 @@ export class PgGraphStore implements GraphStore {
          from node n
          join node_revision nr on nr.id = n.current_revision_id
          where n.deleted_at is null
+           and ($2::uuid is null or n.owner_id = $2)
            and not exists (
              select 1 from embedding e
              where e.owner_table = 'node_revision'
@@ -1713,12 +1969,13 @@ export class PgGraphStore implements GraphStore {
                and e.model = $1
                and e.content_sha256 = nr.content_sha256
            )`,
-        [model],
+        [model, ownerId],
       ),
       this.pool.query(
         `select count(*)::int as count
          from text_unit tu
          where ${EMBEDDABLE_TEXT_UNIT}
+           and ($2::uuid is null or tu.owner_id = $2)
            and not exists (
              select 1 from embedding e
              where e.owner_table = 'text_unit'
@@ -1726,7 +1983,7 @@ export class PgGraphStore implements GraphStore {
                and e.model = $1
                and e.content_sha256 = tu.content_sha256
            )`,
-        [model],
+        [model, ownerId],
       ),
     ]);
 
@@ -1736,35 +1993,43 @@ export class PgGraphStore implements GraphStore {
     };
 
     if (!provider) {
-      return {
+      const result: GraphJobResultMap["refresh_embeddings"] = {
         provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "none",
         model,
         status: "skipped_no_embedding_provider",
+        ownerId,
         missing,
       };
+      return result;
     }
 
-    const limit = Number(asRecord(job.payload).limit ?? process.env.TROVE_EMBEDDING_JOB_LIMIT ?? 24);
-    const embedded = await this.refreshMissingEmbeddings(provider, Number.isFinite(limit) ? limit : 24);
-    return {
+    const limit = Number(asRecord(job.payload).limit ?? process.env.TROVE_EMBEDDING_JOB_LIMIT ?? 256);
+    const embedded = await this.refreshMissingEmbeddings(provider, Number.isFinite(limit) ? limit : 256, ownerId);
+    const result: GraphJobResultMap["refresh_embeddings"] = {
       provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "openai",
       model,
       status: "refreshed",
+      ownerId,
       missingBefore: missing,
       embedded,
     };
+    return result;
   }
 
   private async refreshMissingEmbeddings(
     provider: EmbeddingProvider,
     limit: number,
+    ownerId: string | null,
   ): Promise<{ nodeRevisions: number; textUnits: number }> {
-    const boundedLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
+    // Provider-sized batches, not job-sized ones: the old 100-row clamp predates
+    // batched embed calls and made a 20k-row import take ~800 queue round trips.
+    const boundedLimit = Math.max(1, Math.min(1000, Math.trunc(limit)));
     const nodeRevisionRows = await this.pool.query(
       `select nr.id, nr.content_sha256, concat_ws(E'\n', n.title, n.summary, nr.content) as text
        from node n
        join node_revision nr on nr.id = n.current_revision_id
        where n.deleted_at is null
+         and ($3::uuid is null or n.owner_id = $3)
          and length(trim(concat_ws(E'\n', n.title, n.summary, nr.content))) > 0
          and not exists (
            select 1 from embedding e
@@ -1775,13 +2040,14 @@ export class PgGraphStore implements GraphStore {
          )
        order by n.updated_at desc
        limit $2`,
-      [provider.model, boundedLimit],
+      [provider.model, boundedLimit, ownerId],
     );
     const remaining = Math.max(0, boundedLimit - nodeRevisionRows.rows.length);
     const textUnitRows = remaining === 0 ? { rows: [] } : await this.pool.query(
       `select tu.id, tu.content_sha256, tu.text
        from text_unit tu
        where ${EMBEDDABLE_TEXT_UNIT}
+         and ($3::uuid is null or tu.owner_id = $3)
          and not exists (
            select 1 from embedding e
            where e.owner_table = 'text_unit'
@@ -1791,7 +2057,7 @@ export class PgGraphStore implements GraphStore {
          )
        order by tu.created_at desc
        limit $2`,
-      [provider.model, remaining],
+      [provider.model, remaining, ownerId],
     );
 
     await this.embedRows(provider, "node_revision", nodeRevisionRows.rows);
@@ -1809,7 +2075,17 @@ export class PgGraphStore implements GraphStore {
     rows: Array<Record<string, unknown>>,
   ): Promise<void> {
     if (rows.length === 0) return;
-    const embeddings = await provider.embed(rows.map((row) => String(row.text)));
+    // Provider-sized batches: OpenAI accepts far more than the old job clamp
+    // ever sent, but a whole 1000-row drain in one request risks payload and
+    // timeout limits; 128 texts keeps each call small and lets a job embed up
+    // to 1000 rows in a handful of round trips. Inserts stay one transaction —
+    // the job is the unit of retry and its inserts are conflict-idempotent.
+    const EMBED_BATCH = 128;
+    const embeddings: number[][] = [];
+    for (let start = 0; start < rows.length; start += EMBED_BATCH) {
+      const batch = rows.slice(start, start + EMBED_BATCH);
+      embeddings.push(...await provider.embed(batch.map((row) => String(row.text))));
+    }
     const client = await this.pool.connect();
     try {
       await client.query("begin");
@@ -1894,24 +2170,37 @@ export class PgGraphStore implements GraphStore {
     actorUuid?: string | null,
   ): Promise<GraphAnnotation> {
     const resolvedActorUuid = actorUuid === undefined ? await this.actorUuidForContext(client, context) : actorUuid;
-    const result = await client.query(
-      `insert into annotation (
-         id, motivation, source_id, text_unit_id, node_id, body, selector, created_by, owner_id
-       )
-       values ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9)
-       returning id, motivation, source_id, text_unit_id, node_id, body, selector, created_at`,
-      [
-        randomUUID(),
-        input.motivation,
-        input.sourceId ?? null,
-        input.textUnitId ?? null,
-        input.nodeId ?? null,
-        JSON.stringify(input.body),
-        JSON.stringify(input.selector),
-        resolvedActorUuid,
-        ownerScope(context).ownerId,
-      ],
-    );
+    let result: pg.QueryResult;
+    try {
+      result = await client.query(
+        `insert into annotation (
+           id, motivation, source_id, text_unit_id, node_id, body, selector, created_by, owner_id
+         )
+         values ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9)
+         returning id, motivation, source_id, text_unit_id, node_id, body, selector, created_at`,
+        [
+          randomUUID(),
+          input.motivation,
+          input.sourceId ?? null,
+          input.textUnitId ?? null,
+          input.nodeId ?? null,
+          JSON.stringify(input.body),
+          JSON.stringify(input.selector),
+          resolvedActorUuid,
+          ownerScope(context).ownerId,
+        ],
+      );
+    } catch (error) {
+      // FK violation (23503): a source/text-unit/node ref does not resolve.
+      // Surface it as the named error so callers can distinguish a bogus
+      // citation from a real failure without parsing pg error codes.
+      if ((error as { code?: string }).code === "23503") {
+        throw new UnknownEvidenceReferenceError(
+          `annotation references an unknown source/text-unit/node: sourceId=${input.sourceId ?? "null"} textUnitId=${input.textUnitId ?? "null"} nodeId=${input.nodeId ?? "null"}`,
+        );
+      }
+      throw error;
+    }
     const annotation = mapAnnotation(result.rows[0]);
     await this.recordEvent(
       client,

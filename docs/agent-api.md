@@ -67,6 +67,7 @@ Visibility is tiered by credential scope: **core** tools are shown to every cred
 - Input: `title`, `type`, `summary`, optional `content`, `evidence`, `links`, and optional `nodeId`/`slug` to force a target
 - One write door. Exact title/slug match → new revision of that node (optimistic concurrency handled server-side); no match → new node.
 - Output: `action` (`created` | `updated`), the node, and `similar` — near-matches it did NOT merge into, scored by trigram title similarity. Check it; re-call with `slug` if the dedupe missed.
+- Evidence refs: prefer `{ quote: "the span's own words" }` — the server resolves it to a text unit (verbatim first, then term-containment fuzzy) and stores a W3C `TextQuoteSelector`. Raw `{ textUnitId }` / `{ sourceId }` from an ingest/recall/grep/read response still work. Refs that resolve nowhere (or match ambiguously) come back in `evidenceRejected` with repairable reasons; attached refs the session was never served come back in `evidenceUnserved`; nothing is silently dropped.
 - Cite evidence or say it is agent inference in the summary. This is enforced by the `missing_evidence` lint check (detective), not rejected at write time.
 
 `connect`

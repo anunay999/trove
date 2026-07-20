@@ -1,5 +1,6 @@
-import type { ForgetInput, GraphEdge, GraphNode, ReadAnyInput, RememberInput } from "./contracts.js";
-import type { GraphOperationContext, GraphSourceDocument, GraphStore, ReadResult } from "./graphCore.js";
+import type { ForgetInput, GraphEdge, GraphNode, QuoteEvidenceRef, ReadAnyInput, RememberInput } from "./contracts.js";
+import type { GraphOperationContext, GraphSourceDocument, GraphStore, ReadResult, TextQuoteMatch } from "./graphCore.js";
+import { UnknownEvidenceReferenceError } from "./graphCore.js";
 import { slugify } from "./slug.js";
 
 export type RememberResult = {
@@ -7,6 +8,24 @@ export type RememberResult = {
   node: GraphNode;
   /** Near-matches that were NOT merged into — surfaced so the agent can retarget with `slug` if the dedupe missed. */
   similar: Array<{ nodeId: string; slug: string; title: string; score: number }>;
+  /**
+   * Evidence refs that did not resolve (unknown source/text unit, or a quote
+   * that matched nothing/too much), with the reason. They are reported here
+   * instead of silently dropped — nothing is a free-floating fact unless the
+   * caller can SEE that its citation failed. Reasons are repairable: they say
+   * what would have worked, not just that it failed. Present only when at
+   * least one ref failed.
+   */
+  evidenceRejected?: Array<{ sourceId: string | null; textUnitId: string | null; quote?: string | null; reason: string }>;
+  /**
+   * Refs that ATTACHED but cite a unit this session was never served
+   * (backlog #9b): a ref the agent never received is a hallucination by
+   * definition. Additive and non-breaking — the citation lands, the warning
+   * tells the agent to re-cite as { quote } or fetch the span first.
+   * Quote-resolved citations are exempt: resolution grounds them by
+   * construction. Present only when at least one ref was unserved.
+   */
+  evidenceUnserved?: Array<{ sourceId: string | null; textUnitId: string | null; reason: string }>;
 };
 
 export type ForgetResult = {
@@ -31,6 +50,94 @@ export type ReadAnyResult =
 
 function normalizeTitle(title: string): string {
   return title.trim().toLowerCase();
+}
+
+/**
+ * Cite-by-quote acceptance (backlog #9a): a fuzzy match may be cited
+ * automatically only when it holds at least this share of the quote's content
+ * terms AND leads the runner-up by the margin — a near-tie is a guess, and a
+ * wrong auto-citation is worse than a repairable rejection. Exact (verbatim)
+ * matches need no margin: they either contain the words or they don't.
+ */
+const FUZZY_QUOTE_ACCEPT_FLOOR = 0.7;
+const FUZZY_QUOTE_ACCEPT_MARGIN = 0.15;
+
+type QuoteResolution =
+  | { ok: true; textUnitId: string; sourceId: string; match: "exact" | "fuzzy"; score: number }
+  | { ok: false; reason: string };
+
+function describeQuoteMatch(match: TextQuoteMatch): string {
+  const preview = match.unit.text.replace(/\s+/g, " ").trim().slice(0, 60);
+  return `unit ${match.unit.id} in source ${match.unit.sourceId} ("${preview}…")`;
+}
+
+/**
+ * Resolve a { quote } evidence ref to a concrete text unit. The quote form
+ * exists because echoing UUIDs is the one thing LLMs are structurally worst
+ * at, while quoting text they were served is what they do naturally
+ * (backlog #9). Resolution order: verbatim containment, then term-containment
+ * fuzzy. Every rejection names the repair — add sourceId, quote more text,
+ * ingest the source — because an error the agent cannot act on is noise.
+ */
+async function resolveQuoteRef(
+  store: GraphStore,
+  evidence: QuoteEvidenceRef,
+  context?: GraphOperationContext,
+): Promise<QuoteResolution> {
+  const quote = evidence.quote;
+  if (!quote) return { ok: false, reason: "empty quote" };
+
+  // quote + textUnitId is VERIFICATION mode: the cited unit must itself hold
+  // the quote. This is containment at write time — the composition with #17's
+  // weak-evidence lint, which can only measure the same thing after the fact.
+  if (evidence.textUnitId) {
+    const within = await store.resolveTextQuote({ quote, textUnitId: evidence.textUnitId, limit: 1 }, context);
+    const hit = within.find((match) => match.match === "exact")
+      ?? (within[0] && within[0].score >= FUZZY_QUOTE_ACCEPT_FLOOR ? within[0] : undefined);
+    if (hit) {
+      return { ok: true, textUnitId: hit.unit.id, sourceId: hit.unit.sourceId, match: hit.match, score: hit.score };
+    }
+    // Repair costs one extra lookup, on the failure path only: say where the
+    // quote DOES appear so the agent can retarget in one call.
+    const elsewhere = await store.resolveTextQuote({ quote, limit: 3 }, context);
+    const elsewhereNote = elsewhere.length > 0
+      ? ` It ${elsewhere[0]?.match === "exact" ? "appears verbatim" : "most closely matches"} in ${describeQuoteMatch(elsewhere[0] as TextQuoteMatch)} — cite that unit, or drop textUnitId and let the quote resolve.`
+      : "";
+    return { ok: false, reason: `The quote does not appear in cited text unit ${evidence.textUnitId}.${elsewhereNote}` };
+  }
+
+  const matches = await store.resolveTextQuote({
+    quote,
+    ...(evidence.sourceId ? { sourceId: evidence.sourceId } : {}),
+    limit: 8,
+  }, context);
+  const exact = matches.filter((match) => match.match === "exact");
+  if (exact.length === 1) {
+    const hit = exact[0] as TextQuoteMatch;
+    return { ok: true, textUnitId: hit.unit.id, sourceId: hit.unit.sourceId, match: "exact", score: 1 };
+  }
+  if (exact.length > 1) {
+    return {
+      ok: false,
+      reason: `The quote is ambiguous — it appears verbatim in ${exact.length} spans: ${exact.slice(0, 3).map(describeQuoteMatch).join("; ")}. Add sourceId, or quote a longer passage.`,
+    };
+  }
+
+  const best = matches[0];
+  if (!best) {
+    return {
+      ok: false,
+      reason: `The quote does not appear in any ingested span${evidence.sourceId ? ` of source ${evidence.sourceId}` : ""}. Ingest the source first, or quote a span you were served.`,
+    };
+  }
+  const marginOk = matches.length === 1 || best.score - (matches[1]?.score ?? 0) >= FUZZY_QUOTE_ACCEPT_MARGIN;
+  if (best.score >= FUZZY_QUOTE_ACCEPT_FLOOR && marginOk) {
+    return { ok: true, textUnitId: best.unit.id, sourceId: best.unit.sourceId, match: "fuzzy", score: best.score };
+  }
+  return {
+    ok: false,
+    reason: `No span contains the quote verbatim; closest: ${matches.slice(0, 3).map((match) => `${describeQuoteMatch(match)} (${Math.round(match.score * 100)}% of quote terms)`).join("; ")}. Quote the span verbatim, or add sourceId.`,
+  };
 }
 
 /**
@@ -69,20 +176,114 @@ export async function remember(
       .map((match) => ({ nodeId: match.node.id, slug: match.node.slug, title: match.node.title, score: match.score }));
   }
 
+  // Evidence attaches the same way on create and revise: each ref is attempted
+  // individually, refs that don't resolve come back in `evidenceRejected`
+  // (loud, actionable), and any other failure still throws — the old catch-all
+  // made a bogus citation indistinguishable from a database on fire.
+  // { quote } refs are resolved to units BEFORE attaching (cite-by-quote);
+  // UUID refs that attach but were never served this session come back in
+  // `evidenceUnserved` — attached (non-breaking), but visibly suspect.
+  const evidenceRejected: NonNullable<RememberResult["evidenceRejected"]> = [];
+  const evidenceUnserved: NonNullable<RememberResult["evidenceUnserved"]> = [];
+  const attachEvidence = async (nodeId: string): Promise<void> => {
+    for (const evidence of input.evidence ?? []) {
+      if (evidence.quote) {
+        const resolved = await resolveQuoteRef(store, evidence, context);
+        if (!resolved.ok) {
+          evidenceRejected.push({
+            sourceId: evidence.sourceId ?? null,
+            textUnitId: evidence.textUnitId ?? null,
+            quote: evidence.quote,
+            reason: resolved.reason,
+          });
+          continue;
+        }
+        try {
+          await store.annotate({
+            motivation: "supports",
+            sourceId: resolved.sourceId,
+            textUnitId: resolved.textUnitId,
+            nodeId,
+            body: {},
+            selector: {
+              ...evidence.selector,
+              // W3C TextQuoteSelector shape — the field was always meant for this.
+              type: "TextQuoteSelector",
+              exact: evidence.quote,
+              match: resolved.match,
+              ...(resolved.match === "fuzzy" ? { score: resolved.score } : {}),
+            },
+          }, context);
+        } catch (error) {
+          if (error instanceof UnknownEvidenceReferenceError) {
+            evidenceRejected.push({
+              sourceId: resolved.sourceId,
+              textUnitId: resolved.textUnitId,
+              quote: evidence.quote,
+              reason: error.message,
+            });
+            continue;
+          }
+          throw error;
+        }
+        continue;
+      }
+
+      try {
+        await store.annotate({
+          motivation: "supports",
+          sourceId: evidence.sourceId,
+          textUnitId: evidence.textUnitId,
+          nodeId,
+          body: {},
+          selector: evidence.selector ?? {},
+        }, context);
+      } catch (error) {
+        if (error instanceof UnknownEvidenceReferenceError) {
+          evidenceRejected.push({
+            sourceId: evidence.sourceId ?? null,
+            textUnitId: evidence.textUnitId ?? null,
+            reason: error.message,
+          });
+          continue;
+        }
+        throw error;
+      }
+
+      // (b) A UUID ref that attached but was never served to this session is a
+      // hallucination by definition — flag it (warning, not rejection).
+      if (evidence.textUnitId) {
+        const served = await store.textUnitWasServed({ textUnitId: evidence.textUnitId }, context);
+        if (!served) {
+          evidenceUnserved.push({
+            sourceId: evidence.sourceId ?? null,
+            textUnitId: evidence.textUnitId,
+            reason:
+              `text unit ${evidence.textUnitId} was never served to this session (ingest/recall/grep/read). ` +
+              "If you have the span's words, re-cite as { quote } so it resolves against the corpus; " +
+              "otherwise fetch the span first (grep/read the source) and cite again.",
+          });
+        }
+      }
+    }
+  };
+  const finish = (result: RememberResult): RememberResult => ({
+    ...result,
+    ...(evidenceRejected.length > 0 ? { evidenceRejected } : {}),
+    ...(evidenceUnserved.length > 0 ? { evidenceUnserved } : {}),
+  });
+
   if (!target) {
     const node = await store.capture({
       title: input.title,
       type: input.type ?? "claim",
       summary: input.summary,
       content: input.content,
-      evidence: (input.evidence ?? []).map((ref) => ({
-        sourceId: ref.sourceId,
-        textUnitId: ref.textUnitId,
-        selector: ref.selector ?? {},
-      })),
+      evidence: [],
       links: (input.links ?? []).map((link) => ({ toSlug: link.toSlug, predicate: link.predicate ?? "relates_to" })),
     }, context);
-    return { action: "created", node, similar };
+    await attachEvidence(node.id);
+    return finish({ action: "created", node, similar });
   }
 
   const updateFields = {
@@ -113,22 +314,9 @@ export async function remember(
       // Missing link targets are non-fatal; the belief update already landed.
     }
   }
-  for (const evidence of input.evidence ?? []) {
-    try {
-      await store.annotate({
-        motivation: "supports",
-        sourceId: evidence.sourceId,
-        textUnitId: evidence.textUnitId,
-        nodeId: target.id,
-        body: {},
-        selector: evidence.selector ?? {},
-      }, context);
-    } catch {
-      // Evidence refs that fail to resolve are non-fatal.
-    }
-  }
+  await attachEvidence(target.id);
 
-  return { action: "updated", node: updated, similar };
+  return finish({ action: "updated", node: updated, similar });
 }
 
 /**

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { recallInputSchema } from "./contracts.js";
+import { contentTerms } from "./queryNormalize.js";
 import type {
   AnnotateInput,
   CaptureInput,
@@ -33,6 +34,53 @@ import type {
 
 export type MaybePromise<T> = T | Promise<T>;
 
+/**
+ * Thrown by both store drivers when an annotation references a source, text
+ * unit, or node that does not exist (Postgres surfaces it as FK violation
+ * 23503; the in-memory driver checks explicitly). Callers — remember above
+ * all — must be able to tell "this citation is bogus" apart from real
+ * failures, so the distinction is a named error, never a swallowed catch.
+ */
+export class UnknownEvidenceReferenceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnknownEvidenceReferenceError";
+  }
+}
+
+/**
+ * Provenance quality (backlog #17): does the cited span actually support the
+ * atom? Scored as containment — the share of the node's content terms that
+ * appear in its best-matching cited unit. An atom is a distillation of its
+ * evidence, so most of its terms should come from the source text; a best
+ * score below WEAK_EVIDENCE_FLOOR means the citation is present but probably
+ * wrong. Heuristic, not entailment: paraphrases can score low honestly, which
+ * is why the lint finding is a warning for review, never an error.
+ */
+export const WEAK_EVIDENCE_FLOOR = 0.15;
+
+/**
+ * Minimum containment for a fuzzy quote match to be returned by the drivers
+ * at all (backlog #9a). Below this the "closest" span shares less than half
+ * the quote's terms — reporting it as a candidate would invite a wrong
+ * citation. The higher ACCEPT floor/margin lives in agentOps.remember, which
+ * decides whether a candidate may be cited automatically.
+ */
+export const FUZZY_QUOTE_CANDIDATE_FLOOR = 0.5;
+
+export function evidenceSupportScore(nodeText: string, unitTexts: string[]): number {
+  const nodeTerms = new Set(contentTerms(nodeText));
+  if (nodeTerms.size === 0) return 1; // nothing to support — don't flag
+  let best = 0;
+  for (const text of unitTexts) {
+    const unitTerms = new Set(contentTerms(text));
+    let shared = 0;
+    for (const term of nodeTerms) if (unitTerms.has(term)) shared += 1;
+    best = Math.max(best, shared / nodeTerms.size);
+  }
+  return best;
+}
+
 export type GraphEvent = {
   id: string;
   action: string;
@@ -63,8 +111,8 @@ export type GraphEventFeed = {
 export type EmbeddingCounts = { nodeRevisions: number; textUnits: number };
 
 export type RefreshEmbeddingsResult =
-  | { status: "refreshed"; missingBefore: EmbeddingCounts; embedded: EmbeddingCounts; provider: string; model: string }
-  | { status: "skipped_no_embedding_provider"; missing: EmbeddingCounts; provider: string; model: string };
+  | { status: "refreshed"; ownerId: string | null; missingBefore: EmbeddingCounts; embedded: EmbeddingCounts; provider: string; model: string }
+  | { status: "skipped_no_embedding_provider"; ownerId: string | null; missing: EmbeddingCounts; provider: string; model: string };
 
 export type GraphJob = {
   id: string;
@@ -75,6 +123,14 @@ export type GraphJob = {
   result: Record<string, unknown> | null;
   error: string | null;
   dedupeKey: string | null;
+  /**
+   * Set only on the job returned by an enqueue that JOINED an existing
+   * pending/running row with the same dedupe key — never stored, never set on
+   * a freshly created row. Callers can therefore tell "my enqueue created
+   * work" from "my enqueue was absorbed" (backlog #7: absorption is correct
+   * for genuinely global maintenance, but it must be observable).
+   */
+  dedupeJoined?: boolean;
   attempts: number;
   createdAt: string;
   updatedAt: string;
@@ -109,6 +165,74 @@ export function ownerScope(context?: GraphOperationContext): OwnerScope {
   if (!context || context.superuser || !context.ownerId) return { scoped: false, ownerId: null };
   return { scoped: true, ownerId: context.ownerId };
 }
+
+/**
+ * Session-served provenance log (backlog #9b). Records which text units a
+ * session was actually shown — ingest/search/recall/grep/read/project
+ * responses — so `remember` can flag a cited unit the caller never received:
+ * a ref the agent was never given is a hallucination by definition.
+ *
+ * In-process and per-owner BY DESIGN: it backs a warning, not a security
+ * boundary, one tenant's serves must never validate another's refs, and the
+ * cap + TTL keep it session-sized. Both drivers hold one instance each, so
+ * the check behaves identically on either driver.
+ */
+export class ServedUnitLog {
+  private buckets = new Map<string, Map<string, number>>();
+
+  constructor(
+    private readonly cap = 2000,
+    private readonly ttlMs = 6 * 60 * 60 * 1000,
+  ) {}
+
+  private keyFor(context?: GraphOperationContext): string {
+    const scope = ownerScope(context);
+    return scope.scoped ? `owner:${scope.ownerId}` : "global";
+  }
+
+  mark(unitIds: Iterable<string>, context?: GraphOperationContext): void {
+    const now = Date.now();
+    const key = this.keyFor(context);
+    let bucket = this.buckets.get(key);
+    if (!bucket) {
+      bucket = new Map();
+      this.buckets.set(key, bucket);
+    }
+    for (const [id, at] of bucket) {
+      if (now - at > this.ttlMs) bucket.delete(id);
+    }
+    for (const id of unitIds) {
+      // delete+set refreshes recency AND moves the entry to the young end.
+      bucket.delete(id);
+      bucket.set(id, now);
+    }
+    while (bucket.size > this.cap) {
+      const oldest = bucket.keys().next();
+      if (oldest.done) break;
+      bucket.delete(oldest.value);
+    }
+  }
+
+  wasServed(textUnitId: string, context?: GraphOperationContext): boolean {
+    const bucket = this.buckets.get(this.keyFor(context));
+    const at = bucket?.get(textUnitId);
+    if (at === undefined) return false;
+    if (Date.now() - at > this.ttlMs) {
+      bucket?.delete(textUnitId);
+      return false;
+    }
+    return true;
+  }
+}
+
+/** A text unit matching a quoted span (backlog #9a — cite by quote). */
+export type TextQuoteMatch = {
+  unit: TextUnit;
+  /** exact: the quote appears verbatim (case-insensitive); fuzzy: term containment only. */
+  match: "exact" | "fuzzy";
+  /** 1 for exact; for fuzzy, the share of the quote's content terms the unit contains (0..1). */
+  score: number;
+};
 
 export type GraphSourceOverview = GraphSource & {
   metadata: Record<string, unknown>;
@@ -284,6 +408,33 @@ export type GraphStore = {
    * (default 5) units per node.
    */
   getEvidenceForNodes(nodeIds: string[], context?: GraphOperationContext, opts?: { query?: string; perNodeLimit?: number }): MaybePromise<Map<string, TextUnit[]>>;
+  /**
+   * Resolve quoted span text to the text unit(s) containing it (backlog #9a —
+   * cite by quote). Exact matches contain the quote verbatim
+   * (case-insensitive); fuzzy matches come back only when nothing contains it,
+   * scored by containment of the quote's content terms. Owner-scoped, so an
+   * agent can never resolve a quote against another tenant's text.
+   */
+  resolveTextQuote(input: { quote: string; sourceId?: string; textUnitId?: string; limit?: number }, context?: GraphOperationContext): MaybePromise<TextQuoteMatch[]>;
+  /**
+   * Record units as served to this session. Internal plumbing — drivers call
+   * it from their own read paths (ingest/search/grep/read/project), and
+   * performRecall calls it for the evidence that actually made the pack.
+   */
+  markTextUnitsServed(textUnitIds: string[], context?: GraphOperationContext): MaybePromise<void>;
+  /**
+   * Was this unit served to the current session (backlog #9b)? `remember`
+   * flags cited units that were not — a ref the agent never received is a
+   * hallucination by definition. Heuristic (in-process, per-owner, capped):
+   * backs a warning, never a rejection.
+   */
+  textUnitWasServed(input: { textUnitId: string }, context?: GraphOperationContext): MaybePromise<boolean>;
+  /**
+   * Active `supersedes` edges pointing AT the given nodes — i.e. which of them
+   * a newer node has replaced. Recall uses it to mark superseded atoms so an
+   * agent prefers the successor instead of reading two co-equal "truths".
+   */
+  supersededBy(nodeIds: string[], context?: GraphOperationContext): MaybePromise<Map<string, { byNodeId: string; byTitle: string }>>;
   recall(input: RecallInput, context?: GraphOperationContext): MaybePromise<RecallResult>;
   link(input: LinkInput, context?: GraphOperationContext): MaybePromise<GraphEdge | null>;
   invalidateEdge(input: InvalidateEdgeInput, context?: GraphOperationContext): MaybePromise<GraphEdge | null>;
@@ -453,11 +604,15 @@ function renderRecallAtom(
   node: GraphNode,
   hops: number,
   remainingTokens: number,
-  options: { primaryMatch?: boolean; maxContentChars?: number } = {},
+  options: { primaryMatch?: boolean; maxContentChars?: number; supersededByTitle?: string } = {},
 ): { block: string; body: string; contentTruncated: boolean } {
   const origin = hops === 0 ? "match" : "linked";
+  const supersedeMark = options.supersededByTitle ? ` — SUPERSEDED by ${options.supersededByTitle}` : "";
   const headerLines = [
-    `## ${node.title} [${node.type}/${origin}] (${node.slug})`,
+    // The updated date anchors each atom in time: temporal questions ("what did
+    // I buy 10 days ago?") are unanswerable from a dateless pack (bench finding —
+    // the compare run's atoms carried no dates and temporal-reasoning scored 0%).
+    `## ${node.title} [${node.type}/${origin}] (${node.slug}) — updated ${node.updatedAt.slice(0, 10)}${supersedeMark}`,
     node.summary ?? "",
   ].filter(Boolean);
   const header = headerLines.join("\n") + "\n";
@@ -624,6 +779,10 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     ? [primary, ...scored.filter((candidate) => candidate.node.id !== primary.node.id)]
     : scored;
 
+  // A node a newer fact supersedes is marked in its header, so the reader
+  // prefers the successor instead of weighing two co-equal "truths".
+  const superseded = await store.supersededBy(ordered.map((candidate) => candidate.node.id), context);
+
   // Phase 1: pack atom bodies/teasers for every candidate in rank order. No
   // per-node store.read — candidates from search/expansion already carry
   // current content, and internal reads must not bump access activation.
@@ -645,9 +804,11 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     // First try the slice the wire room allows; on overflow degrade to
     // header-only before skipping the candidate entirely.
     for (const maxContentChars of [contentRoomTokens * 4, 0]) {
+      const supersededByTitle = superseded.get(candidate.node.id)?.byTitle;
       const rendered = renderRecallAtom(candidate.node, candidate.hops, remaining, {
         primaryMatch: isPrimary,
         maxContentChars,
+        ...(supersededByTitle ? { supersededByTitle } : {}),
       });
       const atom: RecallAtom = {
         // The wire atom carries the packed slice the budgeter chose, never the
@@ -738,6 +899,13 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     truncated,
   };
   enforceRecallWireBudget(result);
+  // Provenance guard (backlog #9b): only the evidence that survived EVERY cut
+  // counts as served — units fetched but dropped by the budget or the wire
+  // guard were never shown, and a later citation of them was never "given" to
+  // the agent. Marking runs after enforceRecallWireBudget for exactly that.
+  if (result.evidence.length > 0) {
+    await store.markTextUnitsServed(result.evidence.map((unit) => unit.id), context);
+  }
   return result;
 }
 
@@ -838,6 +1006,7 @@ export function renderAgentContext(
   const edges = neighborhood.edges.map((edge) => `${edge.fromNodeId} -[${edge.predicate}]-> ${edge.toNodeId}`);
   return [
     `Node: ${node.title} (${node.type})`,
+    `Updated: ${node.updatedAt}`,
     `Summary: ${node.summary ?? ""}`,
     node.content ? `Content: ${node.content}` : "",
     "Evidence:",

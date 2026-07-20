@@ -90,14 +90,14 @@ export const troveTools = [
     name: "remember",
     tier: "core",
     description:
-      "Save a short distilled note (a fact, decision, or how-to) — not a raw dump. Same title/slug revises; otherwise creates. Prefer several small linked notes while you work (e.g. 'refunds within 14 days', 'CS owns churn email') over one 'notes from today' blob. Always check returned `similar` (title-similarity scored) and re-call with slug if the right note almost matched. Cite textUnitIds from ingest, or say it's agent inference in the summary. Link each note to a project or topic hub.",
+      "Save a short distilled note (a fact, decision, or how-to) — not a raw dump. Same title/slug revises; otherwise creates. Prefer several small linked notes while you work (e.g. 'refunds within 14 days', 'CS owns churn email') over one 'notes from today' blob. Always check returned `similar` (title-similarity scored) and re-call with slug if the right note almost matched. Cite evidence as { quote: \"the span's own words, copied from what you were served\" } — Trove resolves it to the right text unit (exact first, then fuzzy) and stores a W3C TextQuoteSelector, so you never echo a UUID. Raw textUnitIds from an ingest/recall/grep/read response still work, but only ids you were actually served this session. Failed resolutions come back in `evidenceRejected` saying what would have matched; attached-but-never-served refs come back in `evidenceUnserved`; nothing is silently dropped. No source at all? Say it's agent inference in the summary. Link each note to a project or topic hub.",
     inputSchema: rememberInputSchema,
   },
   {
     name: "recall",
     tier: "core",
     description:
-      "Open questions only — e.g. 'how do we handle refunds?' — returns a short ranked brief with citations. Not for exact ids or error strings (use grep) or when you already know the note name (use read). Default tokenBudget 8000 covers the whole response. Atoms carry the packed body slice — contentTruncated marks cut bodies, hops is the true graph distance from the match — and evidence is relevance-ranked to the query. The brief is a digest; if the right note is on top but incomplete, follow with read on that slug.",
+      "Open questions only — e.g. 'how do we handle refunds?' — returns a short ranked brief with citations. Not for exact ids or error strings (use grep) or when you already know the note name (use read). Default tokenBudget 8000 covers the whole response. Atoms carry the packed body slice — contentTruncated marks cut bodies, hops is the true graph distance from the match — and evidence is relevance-ranked to the query. An atom marked SUPERSEDED has been replaced by a newer note (named in the header) — prefer the successor, cite the superseded one only for history. The brief is a digest; if the right note is on top but incomplete, follow with read on that slug.",
     inputSchema: recallInputSchema,
   },
   {

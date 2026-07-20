@@ -1,5 +1,28 @@
+/**
+ * In-memory graph store — the TEST DOUBLE driver (backlog #6, decision
+ * recorded 2026-07-19).
+ *
+ * Postgres is the product; this driver exists so the test suite runs without
+ * a database. The GraphStore interface is the contract and behavioral tests
+ * run against both drivers, but retrieval semantics are only APPROXIMATED:
+ *
+ * - Lexical matching uses tokenized, lightly singularized vocabularies
+ *   (queryNormalize's tokenizeForMatch), not pg's english-dictionary
+ *   `to_tsvector` stemming. "weddings" finds "wedding" and "all" no longer
+ *   finds "call" — the two divergences that bit — but deeper morphology
+ *   ("ran"/"run") and ts_rank_cd scoring are intentionally not reproduced.
+ * - Semantic search dual-embeds raw + normalized and takes the min distance,
+ *   like the pg driver; vectors come from the deterministic fake provider
+ *   unless a real one is configured.
+ * - No owner enforcement, no real embedding backfill, heuristic-only
+ *   reconciliation judge by default (tests must not make network calls).
+ *
+ * When a behavior matters, assert it against Postgres too — a green run on
+ * this driver alone says the logic works, not that the SQL does.
+ */
+
 import { randomUUID } from "node:crypto";
-import { contentTerms, normalizeRetrievalQuery, retrievalQueryTerms } from "./queryNormalize.js";
+import { contentTerms, normalizeMatchToken, normalizeRetrievalQuery, retrievalQueryTerms, tokenizeForMatch } from "./queryNormalize.js";
 import type {
   AnnotateInput,
   CaptureInput,
@@ -37,8 +60,12 @@ import {
   renderMarkdownProjection,
   decodeEventCursor,
   encodeEventCursor,
+  evidenceSupportScore,
   sha256,
   splitTextUnits,
+  ServedUnitLog,
+  FUZZY_QUOTE_CANDIDATE_FLOOR,
+  WEAK_EVIDENCE_FLOOR,
   type GraphEvent,
   type GraphEventFeed,
   type GraphJob,
@@ -56,9 +83,13 @@ import {
   type ReadResult,
   type RecallResult,
   type SearchResult,
+  type TextQuoteMatch,
 } from "./graphCore.js";
 import { cosineSimilarity, createEmbeddingProviderFromEnv, type EmbeddingProvider } from "./embeddings.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
+import { ownerScope, UnknownEvidenceReferenceError } from "./graphCore.js";
+import { performReconcileNode, type ReconcileJudge } from "./reconcile.js";
+import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
 
 type Revision = {
@@ -87,8 +118,18 @@ export class InMemoryGraphStore implements GraphStore {
   private deletedNodeIds = new Set<string>();
   /** Fake-provider vectors by content hash so semantic search stays cheap. */
   private embeddingCache = new Map<string, number[]>();
+  /** Session-served provenance log (backlog #9b) — same shape as the pg driver's. */
+  private servedUnits = new ServedUnitLog();
+  /**
+   * Reconciliation judge. The in-memory driver defaults to the heuristic
+   * (null) rather than the env OpenAI judge: it backs the test suite, and an
+   * ambient OPENAI_API_KEY must never turn a unit test into an LLM call.
+   * Inject one explicitly to test the judged path.
+   */
+  private reconcileJudge: ReconcileJudge | null;
 
-  constructor() {
+  constructor(options: { reconcileJudge?: ReconcileJudge | null } = {}) {
+    this.reconcileJudge = options.reconcileJudge ?? null;
     this.seed();
   }
 
@@ -107,6 +148,7 @@ export class InMemoryGraphStore implements GraphStore {
       const units = [...this.textUnits.values()]
         .filter((unit) => unit.sourceId === existing.id)
         .sort((left, right) => left.ordinal - right.ordinal);
+      this.servedUnits.mark(units.map((unit) => unit.id), context);
       return { source: publicSource, textUnits: units };
     }
 
@@ -131,6 +173,7 @@ export class InMemoryGraphStore implements GraphStore {
     this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
 
     const { contentText: _contentText, metadata: _metadata, ...publicSource } = source;
+    this.servedUnits.mark(units.map((unit) => unit.id), context);
     return { source: publicSource, textUnits: units };
   }
 
@@ -165,22 +208,27 @@ export class InMemoryGraphStore implements GraphStore {
       : null;
   }
 
-  async search(input: SearchInput): Promise<SearchResult> {
-    const lexical = this.lexicalSearch(input);
-    if (input.mode === "lexical") return lexical;
+  async search(input: SearchInput, context?: GraphOperationContext): Promise<SearchResult> {
+    const provider = input.mode === "lexical" ? null : createEmbeddingProviderFromEnv();
 
-    const provider = createEmbeddingProviderFromEnv();
-    if (!provider) {
-      return input.mode === "semantic" ? { nodes: [], textUnits: [] } : lexical;
+    let result: SearchResult;
+    // Mirrors PgGraphStore.search: a semantic-only search must not run (and
+    // discard) a lexical pass. No Promise.all here — this driver's lexical arm
+    // is synchronous, so there is nothing to overlap.
+    if (input.mode === "semantic") {
+      result = provider ? await this.semanticSearch(input, provider) : { nodes: [], textUnits: [] };
+    } else if (input.mode === "lexical" || !provider) {
+      result = this.lexicalSearch(input);
+    } else {
+      const lexical = this.lexicalSearch(input);
+      const semantic = await this.semanticSearch(input, provider);
+      result = {
+        nodes: reciprocalRankFusion(lexical.nodes, semantic.nodes),
+        textUnits: reciprocalRankFusion(lexical.textUnits, semantic.textUnits),
+      };
     }
-
-    const semantic = await this.semanticSearch(input, provider);
-    if (input.mode === "semantic") return semantic;
-
-    return {
-      nodes: reciprocalRankFusion(lexical.nodes, semantic.nodes),
-      textUnits: reciprocalRankFusion(lexical.textUnits, semantic.textUnits),
-    };
+    this.servedUnits.mark(result.textUnits.map((unit) => unit.id), context);
+    return result;
   }
 
   private lexicalSearch(input: SearchInput): SearchResult {
@@ -193,6 +241,8 @@ export class InMemoryGraphStore implements GraphStore {
     // Content terms of the normalized query drive the fallback below: phrase
     // matching fails for natural-language questions, so require every term
     // first (AND), then any term (OR) — mirroring the pg tsquery fallback.
+    // Terms are matched against the tokenized, singularized vocabulary (never
+    // raw substrings), the same approximation pg's stemmed tsvector provides.
     const terms = retrievalQueryTerms(input.query);
     const types = new Set(input.types ?? []);
     const slugQuery = query.replace(/\s+/g, "-");
@@ -211,8 +261,8 @@ export class InMemoryGraphStore implements GraphStore {
       if (summary.includes(query)) score += 2;
       if (content.includes(query)) score += 1;
       if (score === 0 && terms.length > 0) {
-        const combined = `${title} ${summary} ${content}`;
-        const hits = terms.filter((term) => combined.includes(term));
+        const vocabulary = tokenizeForMatch(`${title} ${summary} ${content}`);
+        const hits = terms.filter((term) => vocabulary.has(normalizeMatchToken(term)));
         if (hits.length === terms.length) score = 0.9;
         else if (hits.length > 0) score = 0.5 * (hits.length / terms.length);
       }
@@ -228,11 +278,10 @@ export class InMemoryGraphStore implements GraphStore {
     const textUnits = input.includeTextUnits
       ? [...this.textUnits.values()]
         .filter((unit) => {
-          // `text.includes(query)` is subsumed: every term is a substring of the
-          // lowercased query, and `terms` is never empty (normalizeRetrievalQuery
-          // falls back to the original), so the term test alone is equivalent.
-          const text = unit.text.toLowerCase();
-          return terms.some((term) => text.includes(term));
+          // Token matching (not substring): "weddings" must find stored
+          // "wedding", and "all" must not find "call" — see the node arm.
+          const vocabulary = tokenizeForMatch(unit.text);
+          return terms.some((term) => vocabulary.has(normalizeMatchToken(term)));
         })
         .slice(0, input.limit)
       : [];
@@ -241,8 +290,15 @@ export class InMemoryGraphStore implements GraphStore {
   }
 
   private async semanticSearch(input: SearchInput, provider: EmbeddingProvider): Promise<SearchResult> {
-    const [queryVector] = await provider.embed([normalizeRetrievalQuery(input.query)]);
-    if (!queryVector) return { nodes: [], textUnits: [] };
+    // Dual-embed like the pg driver: the raw query preserves question intent,
+    // the normalized query sharpens keyword overlap; distance is the min over
+    // both vectors.
+    const normalized = normalizeRetrievalQuery(input.query);
+    const queryTexts = normalized === input.query.trim() ? [input.query] : [input.query, normalized];
+    const queryVectors = await provider.embed(queryTexts);
+    if (queryVectors.length === 0) return { nodes: [], textUnits: [] };
+    const queryDistance = (vector: number[]): number =>
+      Math.min(...queryVectors.map((queryVector) => 1 - cosineSimilarity(queryVector, vector)));
     const maxDistance = maxSemanticDistanceFor(input);
     const query = input.query.toLowerCase().trim();
     const slugQuery = query.replace(/\s+/g, "-");
@@ -260,7 +316,7 @@ export class InMemoryGraphStore implements GraphStore {
         continue;
       }
       const vector = await this.embeddingForText(provider, [node.title, node.summary ?? "", node.content ?? ""].filter(Boolean).join("\n"));
-      const distance = 1 - cosineSimilarity(queryVector, vector);
+      const distance = queryDistance(vector);
       if (distance < maxDistance) scoredNodes.push({ node, distance });
     }
     scoredNodes.sort((left, right) => left.distance - right.distance || left.node.id.localeCompare(right.node.id));
@@ -269,7 +325,7 @@ export class InMemoryGraphStore implements GraphStore {
     if (input.includeTextUnits) {
       for (const unit of this.textUnits.values()) {
         const vector = await this.embeddingForText(provider, unit.text);
-        const distance = 1 - cosineSimilarity(queryVector, vector);
+        const distance = queryDistance(vector);
         if (distance < maxDistance) scoredUnits.push({ unit, distance });
       }
       scoredUnits.sort((left, right) => left.distance - right.distance || left.unit.id.localeCompare(right.unit.id));
@@ -291,7 +347,7 @@ export class InMemoryGraphStore implements GraphStore {
     return vector;
   }
 
-  grep(input: GrepInput): GrepResult {
+  grep(input: GrepInput, context?: GraphOperationContext): GrepResult {
     const scope = input.scope ?? "all";
     const limit = input.limit ?? 20;
     const regex = compileGrepPattern(input.pattern, input.caseSensitive ?? false);
@@ -333,7 +389,12 @@ export class InMemoryGraphStore implements GraphStore {
       }
     }
 
-    return { matches: matches.slice(0, limit), truncated: matches.length > limit };
+    const served = matches.slice(0, limit);
+    this.servedUnits.mark(
+      served.flatMap((match) => (match.textUnitId ? [match.textUnitId] : [])),
+      context,
+    );
+    return { matches: served, truncated: matches.length > limit };
   }
 
   read(input: ReadInput, context?: GraphOperationContext, opts?: { trackAccess?: boolean }): ReadResult | null {
@@ -372,6 +433,11 @@ export class InMemoryGraphStore implements GraphStore {
       }
     }
 
+    // A tracked read is an agent-facing one — its evidence was actually shown,
+    // so it counts as served. Internal reads (trackAccess: false) show nothing.
+    if (opts?.trackAccess ?? true) {
+      this.servedUnits.mark(evidence.filter(isTextUnit).map((unit) => unit.id), context);
+    }
     return { ...node, evidence, annotations };
   }
 
@@ -406,6 +472,35 @@ export class InMemoryGraphStore implements GraphStore {
     return evidence;
   }
 
+  resolveTextQuote(input: { quote: string; sourceId?: string; textUnitId?: string; limit?: number }): TextQuoteMatch[] {
+    const limit = Math.max(1, Math.min(25, Math.trunc(input.limit ?? 8)));
+    const needle = input.quote.toLowerCase();
+    const inScope = (unit: TextUnit): boolean =>
+      (!input.sourceId || unit.sourceId === input.sourceId) && (!input.textUnitId || unit.id === input.textUnitId);
+    const exact = [...this.textUnits.values()]
+      .filter((unit) => inScope(unit) && unit.text.toLowerCase().includes(needle))
+      .sort((left, right) => left.sourceId.localeCompare(right.sourceId) || left.ordinal - right.ordinal)
+      .slice(0, limit)
+      .map((unit): TextQuoteMatch => ({ unit, match: "exact", score: 1 }));
+    if (exact.length > 0) return exact;
+
+    if (contentTerms(input.quote).length === 0) return [];
+    return [...this.textUnits.values()]
+      .filter(inScope)
+      .map((unit): TextQuoteMatch => ({ unit, match: "fuzzy", score: evidenceSupportScore(input.quote, [unit.text]) }))
+      .filter((match) => match.score >= FUZZY_QUOTE_CANDIDATE_FLOOR)
+      .sort((left, right) => right.score - left.score || left.unit.id.localeCompare(right.unit.id))
+      .slice(0, limit);
+  }
+
+  markTextUnitsServed(textUnitIds: string[], context?: GraphOperationContext): void {
+    this.servedUnits.mark(textUnitIds, context);
+  }
+
+  textUnitWasServed(input: { textUnitId: string }, context?: GraphOperationContext): boolean {
+    return this.servedUnits.wasServed(input.textUnitId, context);
+  }
+
   findSimilarTitles(title: string, limit: number): Array<{ node: GraphNode; score: number }> {
     const queryTokens = tokenSet(normalizeTitleForSimilarity(title));
     const normalizedQuery = normalizeTitleForSimilarity(title);
@@ -436,6 +531,19 @@ export class InMemoryGraphStore implements GraphStore {
       tombstoned.push(id);
     }
     return { tombstoned };
+  }
+
+  supersededBy(nodeIds: string[], _context?: GraphOperationContext): Map<string, { byNodeId: string; byTitle: string }> {
+    const map = new Map<string, { byNodeId: string; byTitle: string }>();
+    const wanted = new Set(nodeIds);
+    for (const edge of this.edges.values()) {
+      if (edge.predicate !== "supersedes" || edge.expiredAt !== null) continue;
+      if (!wanted.has(edge.toNodeId)) continue;
+      const by = this.nodes.get(edge.fromNodeId);
+      if (!by || this.deletedNodeIds.has(by.id)) continue;
+      map.set(edge.toNodeId, { byNodeId: by.id, byTitle: by.title });
+    }
+    return map;
   }
 
   neighborhood(input: NeighborhoodInput): NeighborhoodResult {
@@ -588,6 +696,7 @@ export class InMemoryGraphStore implements GraphStore {
     this.revisions.set(revisionId, { id: revisionId, nodeId: id, content: node.content, createdAt: now });
     this.recordEvent("capture", id, context, now);
     this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
+    this.enqueueReconcileJob(context, id);
 
     for (const evidence of input.evidence) {
       const annotationInput: AnnotateInput = {
@@ -609,6 +718,17 @@ export class InMemoryGraphStore implements GraphStore {
   }
 
   annotate(input: AnnotateInput, context?: GraphOperationContext): GraphAnnotation {
+    // Parity with Postgres's FK constraints: annotations must point at real
+    // rows, and a bogus ref is the named error, not a silent store.
+    if (input.sourceId != null && !this.sourceRows.has(input.sourceId)) {
+      throw new UnknownEvidenceReferenceError(`annotation references an unknown source: ${input.sourceId}`);
+    }
+    if (input.textUnitId != null && !this.textUnits.has(input.textUnitId)) {
+      throw new UnknownEvidenceReferenceError(`annotation references an unknown text unit: ${input.textUnitId}`);
+    }
+    if (input.nodeId != null && (!this.nodes.has(input.nodeId) || this.deletedNodeIds.has(input.nodeId))) {
+      throw new UnknownEvidenceReferenceError(`annotation references an unknown node: ${input.nodeId}`);
+    }
     const now = new Date().toISOString();
     const annotation: GraphAnnotation = {
       id: randomUUID(),
@@ -664,10 +784,12 @@ export class InMemoryGraphStore implements GraphStore {
     }
     this.recordEvent("update", updated.id, context, now);
     this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
+    // Reconcile only when content actually changed — new claims, new judgement.
+    if (contentChanged) this.enqueueReconcileJob(context, updated.id);
     return updated;
   }
 
-  project(input: ProjectInput): ProjectResult | null {
+  project(input: ProjectInput, context?: GraphOperationContext): ProjectResult | null {
     const node = this.nodes.get(input.nodeId);
     if (!node || this.deletedNodeIds.has(node.id)) return null;
     const neighborhood = this.neighborhood({ nodeId: node.id, depth: input.depth });
@@ -677,6 +799,9 @@ export class InMemoryGraphStore implements GraphStore {
     if (input.format === "mind_map") {
       return { format: "mind_map", ...neighborhood };
     }
+
+    // markdown and agent_context both carry the evidence text — that is a serve.
+    this.servedUnits.mark(evidence.map((unit) => unit.id), context);
 
     if (input.format === "agent_context") {
       return {
@@ -745,6 +870,29 @@ export class InMemoryGraphStore implements GraphStore {
           entityId: node.id,
           message: `Node has no evidence annotation: ${node.title}`,
         });
+      }
+    }
+
+    // weak_evidence: citations that are present but probably wrong (see pg lint).
+    let weakEvidenceCount = 0;
+    for (const node of snapshot.nodes) {
+      if (weakEvidenceCount >= 50) break;
+      const units = [...this.annotations.values()]
+        .filter((annotation) => annotation.nodeId === node.id && annotation.textUnitId !== null)
+        .map((annotation) => this.textUnits.get(annotation.textUnitId as string)?.text)
+        .filter((text): text is string => typeof text === "string");
+      if (units.length === 0) continue;
+      const nodeText = `${node.title}\n${node.summary ?? ""}\n${(node.content ?? "").slice(0, 2000)}`;
+      const score = evidenceSupportScore(nodeText, units);
+      if (score < WEAK_EVIDENCE_FLOOR) {
+        findings.push({
+          severity: "warning",
+          code: "weak_evidence",
+          entityTable: "node",
+          entityId: node.id,
+          message: `Cited evidence supports ${(score * 100).toFixed(0)}% of the node's content terms (floor ${WEAK_EVIDENCE_FLOOR * 100}%): ${node.title}`,
+        });
+        weakEvidenceCount += 1;
       }
     }
 
@@ -864,7 +1012,7 @@ export class InMemoryGraphStore implements GraphStore {
         job.dedupeKey === input.dedupeKey &&
         (job.status === "pending" || job.status === "running")
       );
-      if (existing) return existing;
+      if (existing) return { ...existing, dedupeJoined: true };
     }
 
     const now = new Date().toISOString();
@@ -896,7 +1044,7 @@ export class InMemoryGraphStore implements GraphStore {
       .slice(0, input.limit ?? 25);
   }
 
-  runJob(input: RunJobInput = {}, context?: GraphOperationContext): GraphJob | null {
+  async runJob(input: RunJobInput = {}, context?: GraphOperationContext): Promise<GraphJob | null> {
     // Claimable: pending, or failed with retries left whose quadratic backoff
     // (attempts^2 x 10s since last update) has elapsed. Dead jobs never run.
     const claimable = (candidate: GraphJob): boolean => {
@@ -926,7 +1074,7 @@ export class InMemoryGraphStore implements GraphStore {
     this.graphJobs.set(running.id, running);
 
     try {
-      const result = this.performJob(running);
+      const result = await this.performJob(running);
       const finishedAt = new Date().toISOString();
       const succeeded: GraphJob = {
         ...running,
@@ -958,30 +1106,44 @@ export class InMemoryGraphStore implements GraphStore {
     return { ok: true };
   }
 
-  private performJob(job: GraphJob): Record<string, unknown> {
+  private async performJob(job: GraphJob): Promise<GraphJobResult> {
     if (job.kind === "lint_graph") {
       const report = this.lint();
       // Carry the findings themselves (capped) — counts alone are not actionable.
-      return { lint: { ...report.summary, findings: report.findings.slice(0, 200) } };
+      const result: GraphJobResultMap["lint_graph"] = { lint: { ...report.summary, findings: report.findings.slice(0, 200) } };
+      return result;
+    }
+
+    if (job.kind === "reconcile_node") {
+      const payload = job.payload as Record<string, unknown>;
+      const nodeId = typeof payload.nodeId === "string" ? payload.nodeId : null;
+      if (!nodeId) throw new Error("reconcile_node: payload.nodeId is required");
+      const ownerId = typeof payload.ownerId === "string" ? payload.ownerId : null;
+      const result: GraphJobResultMap["reconcile_node"] = await performReconcileNode(this, { nodeId, ownerId }, this.reconcileJudge);
+      return result;
     }
 
     if (job.kind === "refresh_obsidian_projection") {
       const projection = buildObsidianVaultExport(this.exportMarkdown(), this.timeline(), this.exportGraph());
-      return {
+      const result: GraphJobResultMap["refresh_obsidian_projection"] = {
         manifest: projection.manifest,
         fileCount: Object.keys(projection.files).length,
       };
+      return result;
     }
 
-    return {
+    // The in-memory driver has no embedding backfill; report the skipped shape.
+    const result: GraphJobResultMap["refresh_embeddings"] = {
       provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "none",
+      model: "unconfigured",
       status: "skipped_no_embedding_provider",
+      ownerId: null,
       missing: {
-        nodes: this.nodes.size,
+        nodeRevisions: this.nodes.size,
         textUnits: this.textUnits.size,
-        sources: this.sourceRows.size,
       },
     };
+    return result;
   }
 
   private enqueueMaintenanceJobs(
@@ -996,6 +1158,16 @@ export class InMemoryGraphStore implements GraphStore {
         dedupeKey: `maintenance:${kind}`,
       }, context);
     }
+  }
+
+  /** Per-node reconciliation enqueue; see pgStore for the rationale. */
+  private enqueueReconcileJob(context: GraphOperationContext | undefined, nodeId: string): void {
+    this.enqueueJob({
+      kind: "reconcile_node",
+      payload: { reason: "graph_mutation", nodeId, ownerId: ownerScope(context).ownerId },
+      priority: 30,
+      dedupeKey: `reconcile:${nodeId}`,
+    }, context);
   }
 
   private uniqueSlug(baseSlug: string): string {

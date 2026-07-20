@@ -126,11 +126,11 @@ The export writes `Trove Index.md`, `Trove Log.md`, `Trove Views.md`, `Trove.can
 
 ## Jobs and embeddings
 
-Graph mutations enqueue maintenance jobs (`refresh_embeddings`, `lint_graph`, `refresh_obsidian_projection`) into `graph_job`, deduped by a `maintenance:<kind>` key while pending.
+Graph mutations enqueue maintenance jobs (`refresh_embeddings`, `lint_graph`, `refresh_obsidian_projection`) into `graph_job`, deduped by a `maintenance:<kind>` key while pending. Writes also enqueue a per-node `reconcile_node` job (dedupe `reconcile:<nodeId>`) that candidate-matches the written node against existing ones and resolves duplicates/contradictions. The conservative heuristic (near-identical titles only, never mutates the graph) runs by default; the LLM judge is **opt-in** via `TROVE_RECONCILE_JUDGE=1`, because it costs up to 5 calls per write with no ceiling until backlog #27 gates it on embedding distance. With the judge on, a confident supersession writes a `supersedes` edge and recall marks the replaced atom.
 
 The API server runs a background worker (`src/jobWorker.ts`) that drains the queue every `TROVE_JOB_INTERVAL_MS` (default 30s). Each tick runs up to 20 jobs; when a `refresh_embeddings` batch reports more missing rows than it embedded, the worker re-enqueues a follow-up batch, so large imports catch up across ticks. Claiming uses `for update skip locked`, so multiple instances never double-run a job. Disable with `TROVE_AUTORUN_JOBS=0`; manual draining still works via `npm run jobs:run`, `POST /v1/jobs/run` (admin scope), or the `run_job` MCP tool.
 
-Embedding refresh is provider-gated (`TROVE_EMBEDDING_PROVIDER`) and embeds up to `TROVE_EMBEDDING_JOB_LIMIT` (default 24) missing rows per run. Search stays functional without embeddings via the lexical path.
+Embedding refresh is provider-gated (`TROVE_EMBEDDING_PROVIDER`) and embeds up to `TROVE_EMBEDDING_JOB_LIMIT` (default 256, clamped to 1000) missing rows per run, in provider-sized batches of 128 texts per embed call. A job can be scoped to one tenant by passing `ownerId` in the job payload — the missing-count and the backfill both honor it, and the worker's drain-follow-up preserves it. Search stays functional without embeddings via the lexical path.
 
 ## Test suites
 
