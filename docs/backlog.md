@@ -632,10 +632,15 @@ loss) are the measured follow-ups, in the Suggested-order tracks below. A
 re-run after those land is the same command; the dataset is the instrument
 they get evaluated against.
 
-### 26. Separate distillation loss from traversal failure ✅ **the gating experiment**
+### 26. Separate distillation loss from traversal failure ⚠️ **conditional on #31**
 
-The n=33 run says Trove loses multi-hop by 18 pts. Two causes fit the data
-equally well and imply completely different work:
+> **Do not run this yet.** It was written when the n=33 run's "−18 pts" looked
+> real. #31 retracted that: the corpus was 100 text units against `TOP_K=8`, so
+> there may be no gap to explain. Run #31 first; if a gap survives the rescaled
+> re-run, this becomes the gate again, unchanged.
+
+*If* a real multi-hop gap exists, two causes fit equally well and imply
+completely different work:
 
 - **Distillation loss (#4)** — Trove serves distilled atoms, flat serves raw
   spans. Controls tie at 100%, so distillation costs nothing when one span
@@ -658,8 +663,10 @@ C > A ⇒ traversal stops one hop short, a much smaller fix than either.
 B is nearly free: `pack.citations` already maps atom → text unit, so it also
 exercises provenance end-to-end and double-checks #17.
 
-**Why this is first:** funding #4 or #8/#10 before it is a coin flip, and #3 is
-what that costs — an obvious causal story, wrong, cheap to falsify.
+**Why this gates #4 and #8/#10:** funding either before it is a coin flip, and
+#3 is what that costs — an obvious causal story, wrong, cheap to falsify. Note
+this item was itself briefly labelled "first" on the strength of a number that
+did not survive review; #31 now precedes it.
 
 ### 27. Reconciliation is unconditional and expensive ✅
 
@@ -816,13 +823,16 @@ local. Largely closed 2026-07-19/20: ~~#9~~, ~~#17~~, ~~#5~~, ~~#6~~, ~~#7~~,
 2. **#9(c) strict rejection** — deliberately deferred until real clients have
    run with the quote form; the repair-shaped reasons are already in place.
 
-**Track 2 — does the graph earn its complexity.** Blocked on instrument, now
-unblocked by #25 — which promptly returned a negative result.
+**Track 2 — does the graph earn its complexity.** Still **blocked on
+instrument.** #25 built the dataset and #31 then found the corpus it runs
+against is too small to measure retrieval at all, so the question is exactly as
+open as it was before the harness existed — with better items to ask it with.
 
 3. ~~**Grow `bench/thesis` to ≥30 multi-hop items**~~ — done 2026-07-20: 33
    multi-hop (17 bridge / 8 chain / 8 supersede) + 18 controls (35.3%),
-   `validateDataset` clean. Result recorded in #25: **−18 pts multi-hop at
-   n=33, controls level — the graph currently does NOT earn its complexity.**
+   `validateDataset` clean. **The sample size is sufficient; the corpus is
+   not** — see #31. The run's "−18 pts" is retracted and must not be planned
+   from; its per-item diagnostics survive only as leads to reconfirm at scale.
 4. **#27 gate the reconcile judge** — moved up from step 8. It is a prerequisite
    for #31: padding the corpus multiplies the node count, and 335 nodes already
    cost ~25 min and ~1,675 judge calls. Also **decide this before merging PR
