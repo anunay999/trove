@@ -153,15 +153,21 @@ async function main(): Promise<void> {
 
   // The judge must be LIVE: `supersede` items test whether a newer belief
   // displaces an older one, and that only happens when reconciliation writes a
-  // supersedes edge. Forcing the heuristic here (as the deleted MemoryBench
-  // provider correctly did, for a corpus it deliberately distorted) silently
-  // turns those items into a plain retrieval test that reads as a tie.
-  const judgeDisabled = process.env.TROVE_RECONCILE_JUDGE === "0";
+  // supersedes edge. Without it those items silently degrade into a plain
+  // retrieval test that reads as a tie — which is exactly what happened on the
+  // first run here.
+  //
+  // The judge is opt-IN as of the PR #26 merge (see createReconcileJudgeFromEnv:
+  // opt-out meant every deployment with an embedding key paid up to 5 LLM calls
+  // per write). So this harness must now ask for it explicitly rather than
+  // merely refrain from disabling it.
+  const judgeEnabled = process.env.TROVE_RECONCILE_JUDGE === "1";
   const hasSupersedeItems = THESIS_ITEMS.some((item) => item.shape === "supersede");
-  if (judgeDisabled && hasSupersedeItems) {
+  if (!judgeEnabled && hasSupersedeItems) {
     throw new Error(
-      "TROVE_RECONCILE_JUDGE=0 disables the supersedes edges the `supersede` items exist to test. " +
-        "Unset it, or drop those items and say so when reporting.",
+      "Set TROVE_RECONCILE_JUDGE=1 — the judge is opt-in, and without it no supersedes edges are " +
+        "written, so the `supersede` items measure nothing. Or drop those items and say so when reporting. " +
+        "Note this makes the run expensive: reconciliation is not yet distance-gated (backlog #27).",
     );
   }
   const store = new PgGraphStore({ connectionString: DATABASE_URL });

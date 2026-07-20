@@ -428,9 +428,12 @@ Shipped as the `reconcile_node` graph job (migration `011`):
 - **Candidate-match** — lexical + semantic search against the node's own owner
   scope (the semantic arm contributes when an embedding provider is configured).
 - **Judge** — pluggable `ReconcileJudge`; OpenAI (`gpt-4o-mini`,
-  `TROVE_RECONCILE_JUDGE_MODEL`) when a key is configured, otherwise a
-  conservative heuristic that only flags near-identical titles. Verdicts:
-  supersedes / duplicate / contradicts / related / distinct.
+  `TROVE_RECONCILE_JUDGE_MODEL`), otherwise a conservative heuristic that only
+  flags near-identical titles. Verdicts: supersedes / duplicate / contradicts /
+  related / distinct. **The LLM judge is opt-in (`TROVE_RECONCILE_JUDGE=1`) as
+  of the PR #26 merge** — it originally activated on any `OPENAI_API_KEY`,
+  which meant every deployment with semantic search silently paid up to 5 LLM
+  calls per write. Heuristic is the shipped default until #27 gates it.
 - **Act, conservatively** — a confident `supersedes` writes a non-destructive
   `supersedes` edge; `contradicts`/`duplicate` become flags in the job result.
   Nothing is tombstoned or invalidated automatically: a wrong auto-invalidation
@@ -689,9 +692,15 @@ answer is "no" for almost all of them.
 2. **Batch the survivors into one call.** Judged in isolation the model cannot
    tell which of two similar atoms is the prior version; seen together it can.
    Worst case 5 calls → 1. Cheaper *and* better.
-3. **Per-owner reconcile budget.** `TROVE_RECONCILE_JUDGE=0` is binary — off, or
+3. **Per-owner reconcile budget.** `TROVE_RECONCILE_JUDGE` is binary — off, or
    unbounded and proportional to writes. A budget is the dial a hosted
    deployment actually needs.
+
+**Interim mitigation shipped** — the judge was flipped from opt-out to **opt-in**
+so PR #26 could merge without sending unbounded spend to production. That is a
+default change, not a fix: the moment anyone sets `=1` the full cost returns,
+and supersession (#16's whole point) stays dormant until they do. Items 1-3
+above are what make it safe to turn on.
 
 Rejected: read-time reconciliation. It re-pays on every read of the same
 conflict and puts model latency on the read path. Write-time amortises once —

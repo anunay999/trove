@@ -16,7 +16,8 @@
  * - "contradicts" / "duplicate" → flags in the job result for an agent or
  *   operator to resolve. Auto-invalidation of a genuine contradiction needs a
  *   temporal judgement we deliberately do not automate.
- * - Without a configured judge (no OPENAI_API_KEY, or TROVE_RECONCILE_JUDGE=0)
+ * - Without a configured judge (the default — see createReconcileJudgeFromEnv;
+ *   the LLM judge is opt-in via TROVE_RECONCILE_JUDGE=1)
  *   a conservative heuristic runs instead: it only flags near-identical titles
  *   as possible duplicates and never mutates the graph.
  *
@@ -121,9 +122,22 @@ function judgePrompt(newNode: GraphNode, candidate: GraphNode): string {
  * Build the LLM judge from the environment, or return null when unconfigured.
  * Uses the OpenAI chat API directly (same key as embeddings); the model
  * defaults to gpt-4o-mini and is overridable via TROVE_RECONCILE_JUDGE_MODEL.
+ *
+ * OPT-IN — `TROVE_RECONCILE_JUDGE=1` is required. It was originally opt-OUT,
+ * which meant any deployment with an OPENAI_API_KEY (i.e. any deployment with
+ * semantic search) silently took up to 5 LLM calls per write, proportional to
+ * write volume and with no ceiling. Measured: a 335-node corpus cost ~25
+ * minutes and ~1,675 judge calls, which was enough to break benchmark runs.
+ *
+ * The judge is also being asked a question it should not need to answer — "are
+ * these two atoms even related?" is already answered numerically, for free, by
+ * the embedding distance that `SearchResult` currently discards. Until backlog
+ * #27 gates on that distance and batches the survivors, the honest default is
+ * off: the heuristic below still flags near-identical titles and never mutates
+ * the graph, so nothing is silently lost by leaving it off.
  */
 export function createReconcileJudgeFromEnv(): ReconcileJudge | null {
-  if (process.env.TROVE_RECONCILE_JUDGE === "0") return null;
+  if (process.env.TROVE_RECONCILE_JUDGE !== "1") return null;
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
   const model = process.env.TROVE_RECONCILE_JUDGE_MODEL ?? "gpt-4o-mini";
