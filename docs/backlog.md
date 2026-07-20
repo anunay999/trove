@@ -24,6 +24,80 @@ Two cautionary examples worth remembering when working this list:
 
 ---
 
+## Where Trove actually stands (2026-07-20)
+
+A consolidated read of everything measured so far. Each row points at the item
+that owns it — this is an index, not a second copy of the list.
+
+### The central gap
+
+| | | |
+|---|---|---|
+| ✅ | **The graph loses multi-hop by 18 pts** at n=33 (59-63% vs 76-100%), controls level at 100%. The architectural bet does not pay off on the only adequately-powered instrument that exists | #25 |
+| ✅ | **The cause is unresolved.** Distillation loss and traversal-stopping both fit the data and point at completely different work | **#26** |
+
+Nothing below #26 should be funded before #26 answers it. #3 is the standing
+reminder: that fix was obvious, wrong, and cheap to falsify.
+
+### Retrieval and ranking
+
+| | | |
+|---|---|---|
+| ✅ | `trove-cov` 71-88% vs `flat-cov` 92-97% — Trove surfaces *less* evidence than naive top-k | #25 |
+| ✅ | Six misses at **exactly 50% coverage** — traversal reaches the join hub and stops | #8/#10 |
+| ✅ | Three misses at **100% coverage** — evidence present, model abstained. Atom presentation reads less naturally than raw spans | #10 |
+| ✅ | Precision 22-23% against Hit@K 90-100% | #8 |
+| ✅ | Activation ranking is recency+frequency+degree; no semantic-alignment term | #10 |
+| ✅ | Extraction loses ~10 pts (85.4% in units, 75.6% into atoms) | #4 |
+
+### Provenance — the differentiating claim
+
+| | | |
+|---|---|---|
+| ✅ | **`weak_evidence` found 0%-containment citations in real vault data** — provenance present but wrong, in production, today | #17 |
+| ✅ | The API still asks LLMs to echo UUIDs; quote form landed, strict rejection deliberately deferred | #9(c) |
+| ✅ | #17 is a lint **warning, not a gate** — nothing prevents a bad citation being written | #17 |
+| ✅ | No integrity suite: every README claim is asserted, none enforced in CI | **#28** |
+
+### Cost and performance
+
+| | | |
+|---|---|---|
+| ✅ | **Reconciliation is unconditional** — 335 nodes cost ~25 min and ~1,675 judge calls, and killed two harness runs. Now blocks benchmark iteration | **#27** |
+| ✅ | `SearchResult` discards distance, so the judge pays model prices to re-derive what the embedding already answered | **#27** |
+| ✅ | No backpressure on embedding calls · `OVERFETCH` is a guess · tuning constants hardcoded against a 245-row fixture | #21, #14, #13 |
+
+### Measurement gaps
+
+| | | |
+|---|---|---|
+| ✅ | **No competitor baseline has ever completed** (Mem0 failed 4x; Zep/Supermemory unfunded). Any ranking against rivals would be fabrication | FINDINGS |
+| ✅ | The harness's distillation is one write policy, not Trove end-to-end — may **understate** Trove | #25 |
+| ✅ | The flat baseline gets raw spans, which Trove deliberately never serves — may **overstate** the baseline | #25 |
+| ✅ | **No task-shaped eval.** The actual product question is untested | **#29** |
+| ✅ | No realistic-scale fixture; no plan assertions for lexical/neighborhood/evidence paths | #20, #19 |
+
+### Still unverified
+
+| | | |
+|---|---|---|
+| ⚠️ | `read` may not fetch an older revision — time travel may be edges-only, making the README's fact-level claim an overstatement | #18 |
+| ⚠️ | README copy on bitemporal history | #22 |
+
+### A note on how these numbers were produced
+
+The 2026-07-20 review found four harness defects **that all pushed in the same
+direction**: reconciliation forced off (voiding the supersede items), its jobs
+never drained (so no supersedes edges existed at recall), the `SUPERSEDED`
+marker never taught to the answering model though `recall`'s tool description
+teaches every real client, and a mid-edit tree tested and misread as a flake.
+Each made Trove look worse than it is; teaching the marker alone moved supersede
+from 50% to 100%. Systematic direction is not random error. When a number here
+disfavours Trove, check the instrument before accepting it — and when one
+favours Trove, check twice.
+
+---
+
 ## P0 — blocks scale or loses to a naive baseline
 
 ### 1. `refresh_embeddings` is not owner-scoped ✅ **fixed 2026-07-19**
@@ -524,6 +598,103 @@ loss) are the measured follow-ups, in the Suggested-order tracks below. A
 re-run after those land is the same command; the dataset is the instrument
 they get evaluated against.
 
+### 26. Separate distillation loss from traversal failure ✅ **the gating experiment**
+
+The n=33 run says Trove loses multi-hop by 18 pts. Two causes fit the data
+equally well and imply completely different work:
+
+- **Distillation loss (#4)** — Trove serves distilled atoms, flat serves raw
+  spans. Controls tie at 100%, so distillation costs nothing when one span
+  suffices; the deficit is concentrated exactly where facts must be composed.
+- **Traversal stopping (#8/#10)** — six misses at exactly 50% coverage, recall
+  reaching the join hub and going no further.
+
+**Action** — three variants of the same run, same dataset, same judge:
+
+| variant | Trove's context is | isolates |
+|---|---|---|
+| A (current) | distilled atom bodies | baseline: 59% / 63% |
+| B | the **raw text units those atoms cite** | distillation |
+| C | atoms at `depth=2` | traversal depth |
+
+B ≈ flat ⇒ distillation is the whole problem; fund #4 and leave ranking alone.
+B ≈ A ⇒ retrieval never reaches the right atoms; fund #8/#10.
+C > A ⇒ traversal stops one hop short, a much smaller fix than either.
+
+B is nearly free: `pack.citations` already maps atom → text unit, so it also
+exercises provenance end-to-end and double-checks #17.
+
+**Why this is first:** funding #4 or #8/#10 before it is a coin flip, and #3 is
+what that costs — an obvious causal story, wrong, cheap to falsify.
+
+### 27. Reconciliation is unconditional and expensive ✅
+
+**Evidence** — a 335-node corpus took **~25 minutes and ~1,675 judge calls** to
+drain, and killed two thesis runs before the process was detached. In
+production it is up to 5 LLM calls per write, proportional to write volume.
+
+**Root cause** — the judge is asked two bundled questions: *are these about the
+same thing?* (which the embedding already answers numerically, for free) and
+*same attribute, newer value?* (which genuinely needs a model). `SearchResult`
+is `{nodes, textUnits}` — the distance is computed and then discarded, so the
+first question is re-derived at model prices for every candidate, and the
+answer is "no" for almost all of them.
+
+**Action**, biggest win first:
+
+1. **Gate on distance.** Surface it from search, then band: `<0.05` near-certain
+   duplicate (flag, no call), `0.05-0.35` genuinely ambiguous (judge),
+   `>0.35` distinct (skip). Most writes have no near neighbour ⇒ **zero** calls.
+2. **Batch the survivors into one call.** Judged in isolation the model cannot
+   tell which of two similar atoms is the prior version; seen together it can.
+   Worst case 5 calls → 1. Cheaper *and* better.
+3. **Per-owner reconcile budget.** `TROVE_RECONCILE_JUDGE=0` is binary — off, or
+   unbounded and proportional to writes. A budget is the dial a hosted
+   deployment actually needs.
+
+Rejected: read-time reconciliation. It re-pays on every read of the same
+conflict and puts model latency on the read path. Write-time amortises once —
+the timing is right, the *unconditional* part is wrong.
+
+**Note** — this has become infrastructure rather than optimisation: it now
+bounds how fast #26 and every later thesis run can iterate.
+
+### 28. No integrity suite ✅
+
+Every claim in the README is asserted; none is enforced. #9 and #17 both found
+the core provenance claim failing silently in production — the pattern is that
+nothing *checks*.
+
+**Action** — roughly five assertions, cheap and permanent:
+
+1. Every recalled atom has a resolvable citation, or is explicitly marked agent
+   inference
+2. `remember` with an unresolvable ref never reports success
+3. A superseded atom never outranks its successor in the same pack
+4. No silently partial write — if annotations fail, the write says so
+5. Token budget is never exceeded *(already covered by repro `R3`)*
+
+These need no benchmark: they are local assertions. That is what makes them
+track 1 and available now.
+
+### 29. No task-shaped evaluation ⚠️ **the untested product question**
+
+Every number so far — LongMemEval, and now the thesis harness — grades
+question-answering over a fixed corpus. Trove's actual job is being the memory
+behind an agent doing work: picking up context it lacked, not re-deriving what
+is known, not acting on stale beliefs, and being auditable afterwards. **Three
+of those four are not accuracy metrics, and none is measured.**
+
+This is the gap most likely to make the other numbers misleading rather than
+merely incomplete: a system can lose a QA benchmark and still be the better
+working memory, and #25's own caveat (the flat baseline is served raw spans
+Trove deliberately never serves) is a small instance of exactly that.
+
+**Action** — not obvious, and worth designing rather than improvising. One
+credible shape: replay real Claude Code sessions against Trove and against a
+scratchpad, and score re-derivation, stale-belief actions, and citation
+traceability. Deliberately left open.
+
 ---
 
 ## Suggested order
@@ -537,30 +708,43 @@ evaluate. That is how the 222× regression stayed invisible.
 local. Largely closed 2026-07-19/20: ~~#9~~, ~~#17~~, ~~#5~~, ~~#6~~, ~~#7~~,
 ~~#23~~, ~~#16~~, ~~#1+#2~~, ~~#9 follow-through (a)+(b)~~. Remaining:
 
-1. **#9(c) strict rejection** — deliberately deferred until real clients have
+1. **#28 integrity suite** — converts the README from asserted to enforced.
+   #9 and #17 both found the core provenance claim failing silently in
+   production; the pattern is that nothing checks.
+2. **#9(c) strict rejection** — deliberately deferred until real clients have
    run with the quote form; the repair-shaped reasons are already in place.
-2. **An integrity suite** — every recalled atom has resolvable provenance; a
-   superseded atom never outranks its successor; no silently partial write.
-   Converts the README from asserted to enforced.
 
 **Track 2 — does the graph earn its complexity.** Blocked on instrument, now
-unblocked by #25.
+unblocked by #25 — which promptly returned a negative result.
 
 3. ~~**Grow `bench/thesis` to ≥30 multi-hop items**~~ — done 2026-07-20: 33
    multi-hop (17 bridge / 8 chain / 8 supersede) + 18 controls (35.3%),
    `validateDataset` clean. Result recorded in #25: **−18 pts multi-hop at
    n=33, controls level — the graph currently does NOT earn its complexity.**
-4. **#8 + #10 ranking** — measured target from the full run: six multi-hop
-   misses sat at exactly 50% coverage, traversal reaching the join hub and
-   stopping. The instrument is verdict-grade now; this is the first thing to
-   evaluate against it.
-5. **#4 extraction loss** — the write path discards answers; flat-cov 92-97%
-   vs trove-cov 71-88% bounds how much the distill stage can be costing.
+4. **#26 the ablation** — **THE GATE.** Distillation loss and traversal-stopping
+   both explain the −18 pts and imply different work. Items 5 and 6 are a coin
+   flip until this resolves which. ~1 hour; `pack.citations` already carries
+   what variant B needs.
+5. **#8 + #10 ranking** — *if #26 says traversal.* Measured target: six misses
+   at exactly 50% coverage, recall reaching the join hub and stopping.
+6. **#4 extraction loss** — *if #26 says distillation.* flat-cov 92-97% vs
+   trove-cov 71-88% bounds how much the distill stage can be costing.
+7. **#27 reconciliation cost** — has crossed from optimisation into
+   infrastructure: ~25 min and ~1,675 judge calls per 335-node corpus now
+   bounds how fast every item above can be iterated. Do it as soon as #26
+   answers, before the ranking or extraction work starts looping.
 
 **Track 3 — competitive comparison.** Deliberately last. No baseline has ever
 completed (`FINDINGS.md`), and a number here is meaningless while tracks 1 and 2
 are open. Rebuilding a MemoryBench provider is ~a day against FINDINGS.md's
 notes on the harness's quirks.
+
+**Track 4 — the question none of this answers.** #29: every number here grades
+question-answering over a fixed corpus, while Trove's actual job is being the
+memory behind an agent doing work. Three of its four real jobs are not accuracy
+metrics and none is measured. Left open deliberately — it needs designing, not
+improvising — but it is the gap most likely to make the numbers above
+misleading rather than merely incomplete.
 
 **Verify before acting** on every ⚠️ item — #18 and the `README.md` claims in
 #22. (#9, and the `deployment.md` half of #22, were verified true on 2026-07-19
