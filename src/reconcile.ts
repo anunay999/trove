@@ -119,6 +119,17 @@ function judgePrompt(newNode: GraphNode, candidate: GraphNode): string {
 }
 
 /**
+ * Opt-in flags accept the forms an operator actually types. A strict `=== "1"`
+ * turns `TROVE_RECONCILE_JUDGE=true` into a silent no-op — config that reads as
+ * enabled and is not — which is the same silent-failure class as dropping an
+ * unresolvable citation (#9). Anything unrecognised stays OFF, because the
+ * expensive direction should never be reached by accident.
+ */
+function isEnabled(value: string | undefined): boolean {
+  return value !== undefined && ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+/**
  * Build the LLM judge from the environment, or return null when unconfigured.
  * Uses the OpenAI chat API directly (same key as embeddings); the model
  * defaults to gpt-4o-mini and is overridable via TROVE_RECONCILE_JUDGE_MODEL.
@@ -137,7 +148,7 @@ function judgePrompt(newNode: GraphNode, candidate: GraphNode): string {
  * the graph, so nothing is silently lost by leaving it off.
  */
 export function createReconcileJudgeFromEnv(): ReconcileJudge | null {
-  if (process.env.TROVE_RECONCILE_JUDGE !== "1") return null;
+  if (!isEnabled(process.env.TROVE_RECONCILE_JUDGE)) return null;
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
   const model = process.env.TROVE_RECONCILE_JUDGE_MODEL ?? "gpt-4o-mini";

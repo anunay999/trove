@@ -5,7 +5,7 @@ import type { GraphJob, GraphOperationContext, GraphStore } from "../src/graphCo
 import { performRecall } from "../src/graphCore.js";
 import { InMemoryGraphStore } from "../src/store.js";
 import { PgGraphStore } from "../src/pgStore.js";
-import { parseReconcileJudgment, type ReconcileJudge } from "../src/reconcile.js";
+import { createReconcileJudgeFromEnv, parseReconcileJudgment, type ReconcileJudge } from "../src/reconcile.js";
 import { isolateDatabase, hasPostgres } from "./helpers.js";
 
 // Queue-state assertions: own database under Postgres (see helpers.isolateDatabase).
@@ -167,6 +167,59 @@ describe("reconcile: judge reply parsing", () => {
     const unknown = parseReconcileJudgment('{"verdict":"merge","confidence":0.99}');
     assert.equal(unknown.verdict, "related");
     assert.equal(unknown.confidence, 0.99, "confidence is kept but the unknown verdict drives no action");
+  });
+});
+
+describe("reconcile: judge is opt-in via TROVE_RECONCILE_JUDGE=1", () => {
+  // The env-var default is what keeps unbounded per-write LLM spend out of
+  // deployments that never asked for it (backlog #27 is the real gate).
+  function withEnv(vars: Record<string, string | undefined>, run: () => void): void {
+    const saved: Record<string, string | undefined> = {};
+    for (const key of Object.keys(vars)) {
+      saved[key] = process.env[key];
+      if (vars[key] === undefined) delete process.env[key];
+      else process.env[key] = vars[key];
+    }
+    try {
+      run();
+    } finally {
+      for (const key of Object.keys(saved)) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+    }
+  }
+
+  it("stays off for absent, falsey and unrecognised values, even with a key present", () => {
+    // Unrecognised means OFF: the expensive direction must never be reached by
+    // accident. Absence of the var is the shipped default.
+    for (const value of [undefined, "", "0", "false", "no", "off", "maybe"]) {
+      withEnv({ TROVE_RECONCILE_JUDGE: value, OPENAI_API_KEY: "sk-test" }, () => {
+        assert.equal(createReconcileJudgeFromEnv(), null, `value ${JSON.stringify(value)} must not enable the judge`);
+      });
+    }
+  });
+
+  it("accepts the affirmative forms an operator actually types", () => {
+    // A strict `=== "1"` made TROVE_RECONCILE_JUDGE=true a silent no-op —
+    // config that reads as enabled and is not. Same failure class as #9.
+    for (const value of ["1", "true", "TRUE", "yes", "on", " true "]) {
+      withEnv({ TROVE_RECONCILE_JUDGE: value, OPENAI_API_KEY: "sk-test" }, () => {
+        assert.ok(createReconcileJudgeFromEnv(), `value ${JSON.stringify(value)} should enable the judge`);
+      });
+    }
+  });
+
+  it("returns null with =1 but no OpenAI key", () => {
+    withEnv({ TROVE_RECONCILE_JUDGE: "1", OPENAI_API_KEY: undefined }, () => {
+      assert.equal(createReconcileJudgeFromEnv(), null);
+    });
+  });
+
+  it("returns a judge only with =1 and a key", () => {
+    withEnv({ TROVE_RECONCILE_JUDGE: "1", OPENAI_API_KEY: "sk-test" }, () => {
+      assert.ok(createReconcileJudgeFromEnv());
+    });
   });
 });
 

@@ -30,6 +30,7 @@ import { PgGraphStore } from "../../src/pgStore.js";
 import { performRecall } from "../../src/graphCore.js";
 import type { GraphOperationContext, TextUnit } from "../../src/graphCore.js";
 import { cosineSimilarity, createEmbeddingProviderFromEnv } from "../../src/embeddings.js";
+import { createReconcileJudgeFromEnv } from "../../src/reconcile.js";
 import { THESIS_ITEMS, validateDataset, type ThesisItem, type ThesisShape } from "./dataset.js";
 
 const DATABASE_URL = process.env.TROVE_THESIS_DATABASE_URL ?? process.env.DATABASE_URL ?? "";
@@ -161,7 +162,11 @@ async function main(): Promise<void> {
   // opt-out meant every deployment with an embedding key paid up to 5 LLM calls
   // per write). So this harness must now ask for it explicitly rather than
   // merely refrain from disabling it.
-  const judgeEnabled = process.env.TROVE_RECONCILE_JUDGE === "1";
+  //
+  // Ask the real factory rather than re-reading the env var: it owns which
+  // values count as enabled, and a second copy of that logic here would drift
+  // silently the first time one side changed.
+  const judgeEnabled = createReconcileJudgeFromEnv() !== null;
   const hasSupersedeItems = THESIS_ITEMS.some((item) => item.shape === "supersede");
   if (!judgeEnabled && hasSupersedeItems) {
     throw new Error(
