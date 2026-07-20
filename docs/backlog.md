@@ -74,6 +74,7 @@ reminder: that fix was obvious, wrong, and cheap to falsify.
 | ✅ | **No competitor baseline has ever completed** (Mem0 failed 4x; Zep/Supermemory unfunded). Any ranking against rivals would be fabrication | FINDINGS |
 | ✅ | The harness's distillation is one write policy, not Trove end-to-end — may **understate** Trove | #25 |
 | ✅ | The flat baseline gets raw spans, which Trove deliberately never serves — may **overstate** the baseline | #25 |
+| ✅ | **The thesis harness reports accuracy alone** — the same flaw this repo criticises in every vendor benchmark. Flat is served top-8 raw spans; Trove a token-budgeted brief. Until the triple is reported, "-18 pts" may be the wrong sentence | **#30** |
 | ✅ | **No task-shaped eval.** The actual product question is untested | **#29** |
 | ✅ | No realistic-scale fixture; no plan assertions for lexical/neighborhood/evidence paths | #20, #19 |
 
@@ -695,6 +696,34 @@ credible shape: replay real Claude Code sessions against Trove and against a
 scratchpad, and score re-derivation, stale-belief actions, and citation
 traceability. Deliberately left open.
 
+### 30. The thesis harness reports accuracy alone ✅ **do this before acting on #25's number**
+
+`bench/FINDINGS.md`, written during the LongMemEval pilot, says:
+
+> Publish the **MemScore triple** — accuracy / latency / **context tokens** —
+> not accuracy alone. The token column is the genuinely differentiated axis,
+> since `recall` takes a `tokenBudget` and cost is a dial rather than a
+> byproduct.
+
+`bench/thesis/run.ts` was then written ignoring that. It reports accuracy per
+shape and nothing else, which is the same flaw this repository criticises in
+every vendor benchmark it has looked at.
+
+**Why it may change #25's reading** — the two systems are not spending the same
+budget. Flat is served **top-8 raw spans**; Trove is served a **token-budgeted
+brief** and deliberately withholds the rest. `RecallResult` already carries
+`spentTokens`, and it is discarded. If Trove reaches 59% on ~1,200 tokens while
+flat reaches 76% on ~6,000, "Trove loses multi-hop by 18 pts" is the wrong
+sentence — those are two points on a cost curve, on the axis Trove exists to
+win. Right now nobody knows which it is, because it was never measured.
+
+**Action** — capture `pack.spentTokens` and a rough token count for the flat
+context, plus per-arm retrieval latency; report all three per shape. ~20 lines.
+Then re-read #25 before funding #26's outcome.
+
+**Note** — this is the fifth 2026-07-20 harness defect, and like the other four
+it made Trove look worse than it is. See the methodology note at the top.
+
 ---
 
 ## Suggested order
@@ -721,15 +750,18 @@ unblocked by #25 — which promptly returned a negative result.
    multi-hop (17 bridge / 8 chain / 8 supersede) + 18 controls (35.3%),
    `validateDataset` clean. Result recorded in #25: **−18 pts multi-hop at
    n=33, controls level — the graph currently does NOT earn its complexity.**
-4. **#26 the ablation** — **THE GATE.** Distillation loss and traversal-stopping
-   both explain the −18 pts and imply different work. Items 5 and 6 are a coin
+4. **#30 report the triple** — **STEP ZERO.** ~20 lines. The two systems are not
+   spending the same budget, and `spentTokens` is already on the pack and being
+   thrown away. Re-read #25 after this and before funding anything below it.
+5. **#26 the ablation** — **THE GATE.** Distillation loss and traversal-stopping
+   both explain the −18 pts and imply different work. The items below are a coin
    flip until this resolves which. ~1 hour; `pack.citations` already carries
    what variant B needs.
-5. **#8 + #10 ranking** — *if #26 says traversal.* Measured target: six misses
+6. **#8 + #10 ranking** — *if #26 says traversal.* Measured target: six misses
    at exactly 50% coverage, recall reaching the join hub and stopping.
-6. **#4 extraction loss** — *if #26 says distillation.* flat-cov 92-97% vs
+7. **#4 extraction loss** — *if #26 says distillation.* flat-cov 92-97% vs
    trove-cov 71-88% bounds how much the distill stage can be costing.
-7. **#27 reconciliation cost** — has crossed from optimisation into
+8. **#27 reconciliation cost** — has crossed from optimisation into
    infrastructure: ~25 min and ~1,675 judge calls per 335-node corpus now
    bounds how fast every item above can be iterated. Do it as soon as #26
    answers, before the ranking or extraction work starts looping.
@@ -749,3 +781,65 @@ misleading rather than merely incomplete.
 **Verify before acting** on every ⚠️ item — #18 and the `README.md` claims in
 #22. (#9, and the `deployment.md` half of #22, were verified true on 2026-07-19
 and are safe to work from; #9 is now fixed.)
+
+---
+
+## Path to a defensible position
+
+The tracks above say what to fix. This says what to fix *toward*, because the
+list is long enough that "do the next item" stops being a strategy.
+
+### Step zero, before anything else
+
+**#30** — measure the triple. It is ~20 lines and it may change what the problem
+even is. Acting on #25's accuracy-only number before this risks optimising the
+one axis Trove was built not to compete on.
+
+### Phase 1 — stop losing (weeks)
+
+1. #30 report accuracy / latency / tokens
+2. #26 ablation — distillation or traversal
+3. Fix whichever it names — #4 **or** #8/#10, not both on spec
+4. #27 reconciliation cost — currently throttles every iteration above it
+
+A prior worth recording so it can be falsified: the **exactly-50%** signature on
+six two-hop items points at traversal, since distillation loss would degrade
+both hops rather than precisely one. But controls tying at 100% while multi-hop
+collapses is equally what distillation-that-only-hurts-composition looks like.
+Genuinely 50/50 — which is the whole reason #26 exists rather than a fix.
+
+### Phase 2 — find the edge that is actually defensible
+
+Ranked by evidence, not by how good the story sounds:
+
+| candidate | status |
+|---|---|
+| **Search latency** | ✅ **4× verified** (109 ms vs 437 ms). Defensible today |
+| **Token efficiency** | Architecturally real, **unmeasured** — #30 closes this |
+| **Provenance / audit** | Genuinely unique. Currently *failing*: `weak_evidence` found 0%-containment citations in live vault data |
+| **Multi-hop reasoning** | Currently **behind an untuned RAG baseline** |
+
+The honest read: **QA accuracy is not a lane Trove leads soon.** It is crowded,
+Trove is currently behind an *untuned* baseline in it, and every competitor is
+optimising the same metric. Latency + token cost + auditable provenance is a
+lane nobody is seriously contesting, and two of those three are properties the
+architecture already has.
+
+### Phase 3 — make it undeniable
+
+- **Track 3 competitive baseline** — meaningless before Phase 1, essential after
+- **#29 task-shaped eval** — the actual product question, still unanswered
+- **Publish with full methodology** — sample size, judge, models, Trove SHA. The
+  absence of exactly that is what makes the rest of the ecosystem's numbers
+  uncitable; matching it is a positioning advantage available for free
+
+### The decision to take early, on evidence
+
+If #26 says traversal and fixing it does not close 18 points, the defensible
+position becomes: **Trove is auditable, token-efficient, low-latency memory**,
+and the graph is *how it works* rather than *why anyone buys it*.
+
+That is not failure — it is the same product with a claim that survives
+scrutiny. The failure mode is spending six months chasing a benchmark Trove is
+not structurally built to win, while the two axes it already leads on stay
+unmeasured.
