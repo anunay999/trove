@@ -397,17 +397,71 @@ dictionary do the rest.
 
 ---
 
+### 25. The benchmark measured the wrong shape ✅ **replaced 2026-07-20**
+
+LongMemEval is question-answering over chat history; Trove is a memory
+substrate for working agents. Optimising against it would have made Trove a
+better LongMemEval system and only incidentally a better memory — extraction
+recall and Hit@K are that benchmark's shape, not Trove's. The pilot earned its
+keep (it found empty recall packs for natural-language questions, and two lost
+HNSW indexes) but `bench/FINDINGS.md` lists six blockers between it and a
+publishable number, and closing them would have described a bespoke benchmark
+agent rather than Trove as shipped.
+
+`bench/providers/trove` and `bench/setup.sh` are deleted; `bench/thesis/`
+replaces them, testing the claim that actually justifies the graph: multi-hop
+questions whose joining entity never appears in the question, with single-hop
+controls so a win is attributable to traversal rather than to a rigged corpus.
+
+**First run (n=15, 9 multi-hop):** multi-hop gap **+22 pts**, control gap
+**0 pts**, supersede **100% vs 50%**. The harness declares this INCONCLUSIVE —
+9 items means one item is 11 pts — and that is the correct reading. Running it
+also exposed that Trove's `SUPERSEDED` marker only works when the consumer has
+been told what it means: teaching it in the answer prompt (as `recall`'s tool
+description already teaches every real MCP client) moved supersede from 50% to
+100% with the edges unchanged.
+
+**To close:** grow the multi-hop set to ≥30. That is dataset authoring, not
+engineering, and it is what converts a diagnostic into a result.
+
+---
+
 ## Suggested order
 
-1. ~~#16 write-time reconciliation~~ — **done** (reconcile_node job, supersedes marks in recall)
-2. ~~#1 + #2 owner-scoped, batched embedding backfill~~ — **done** (payload.ownerId; 256/1000 limits, 128-text batches)
-3. ~~#3 temporal terms~~ — **falsified**; the fix was date anchoring, not the strip list
-4. **#4 extraction loss** — the write path discards answers
-5. **#8 + #10 ranking** — retrieval finds the evidence and fails to surface it
+Three tracks, and the dependency between them is the point: **#4 and #8/#10 are
+accuracy work, and accuracy work needs a valid instrument.** Sequencing them
+first — as this document originally did — means shipping changes nobody can
+evaluate. That is how the 222× regression stayed invisible.
 
-Then #5 (typed job results) and #6 (driver parity), which are cheap and prevent
-recurrence of bugs already seen once.
+**Track 1 — correctness of the core claim.** Needs no benchmark; assertions are
+local. Largely closed 2026-07-19/20: ~~#9~~, ~~#17~~, ~~#5~~, ~~#6~~, ~~#7~~,
+~~#23~~, ~~#16~~, ~~#1+#2~~. Remaining:
 
-**Verify before acting** on every ⚠️ item — #9, #18, and the `deployment.md` /
-`README.md` claims in #22. (#9, #18 and the `deployment.md` half of #22 were
-verified true on 2026-07-19; they are safe to work from.)
+1. **#9 follow-through** — `evidenceRejected` makes failure loud, not
+   impossible. The API still asks LLMs to echo UUIDs, which is the one thing
+   they are structurally worst at. Cite by quote (the `selector` field is
+   already W3C `TextQuoteSelector`-shaped), validate against units actually
+   served this session, then make rejection strict. Composes with #17:
+   quote-resolution gives containment at write time, turning the weak-evidence
+   lint into a gate.
+2. **An integrity suite** — every recalled atom has resolvable provenance; a
+   superseded atom never outranks its successor; no silently partial write.
+   Converts the README from asserted to enforced.
+
+**Track 2 — does the graph earn its complexity.** Blocked on instrument, now
+unblocked by #25.
+
+3. **Grow `bench/thesis` to ≥30 multi-hop items** — the gate on every
+   accuracy claim below it.
+4. **#8 + #10 ranking** — now has a concrete target: `bridge-invoice-owner`
+   failed at 50% coverage, traversal reaching the join hub and stopping.
+5. **#4 extraction loss** — the write path discards answers.
+
+**Track 3 — competitive comparison.** Deliberately last. No baseline has ever
+completed (`FINDINGS.md`), and a number here is meaningless while tracks 1 and 2
+are open. Rebuilding a MemoryBench provider is ~a day against FINDINGS.md's
+notes on the harness's quirks.
+
+**Verify before acting** on every ⚠️ item — #18 and the `README.md` claims in
+#22. (#9, and the `deployment.md` half of #22, were verified true on 2026-07-19
+and are safe to work from; #9 is now fixed.)
