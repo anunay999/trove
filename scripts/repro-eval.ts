@@ -92,6 +92,8 @@ async function section(id: string, fn: () => Promise<void>): Promise<void> {
   try {
     await fn();
   } catch (error) {
+    // TEMP-DEBUG: full stack for the R8/R12 harness-error investigation; revert.
+    console.log(`  [debug-stack] ${error instanceof Error ? error.stack : String(error)}`);
     report(id, false, `harness error: ${(error instanceof Error ? error.message : String(error)).slice(0, 220)}`);
   }
 }

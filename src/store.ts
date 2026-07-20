@@ -63,6 +63,8 @@ import {
   evidenceSupportScore,
   sha256,
   splitTextUnits,
+  ServedUnitLog,
+  FUZZY_QUOTE_CANDIDATE_FLOOR,
   WEAK_EVIDENCE_FLOOR,
   type GraphEvent,
   type GraphEventFeed,
@@ -81,6 +83,7 @@ import {
   type ReadResult,
   type RecallResult,
   type SearchResult,
+  type TextQuoteMatch,
 } from "./graphCore.js";
 import { cosineSimilarity, createEmbeddingProviderFromEnv, type EmbeddingProvider } from "./embeddings.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
@@ -115,6 +118,8 @@ export class InMemoryGraphStore implements GraphStore {
   private deletedNodeIds = new Set<string>();
   /** Fake-provider vectors by content hash so semantic search stays cheap. */
   private embeddingCache = new Map<string, number[]>();
+  /** Session-served provenance log (backlog #9b) — same shape as the pg driver's. */
+  private servedUnits = new ServedUnitLog();
   /**
    * Reconciliation judge. The in-memory driver defaults to the heuristic
    * (null) rather than the env OpenAI judge: it backs the test suite, and an
@@ -143,6 +148,7 @@ export class InMemoryGraphStore implements GraphStore {
       const units = [...this.textUnits.values()]
         .filter((unit) => unit.sourceId === existing.id)
         .sort((left, right) => left.ordinal - right.ordinal);
+      this.servedUnits.mark(units.map((unit) => unit.id), context);
       return { source: publicSource, textUnits: units };
     }
 
@@ -167,6 +173,7 @@ export class InMemoryGraphStore implements GraphStore {
     this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
 
     const { contentText: _contentText, metadata: _metadata, ...publicSource } = source;
+    this.servedUnits.mark(units.map((unit) => unit.id), context);
     return { source: publicSource, textUnits: units };
   }
 
@@ -201,24 +208,27 @@ export class InMemoryGraphStore implements GraphStore {
       : null;
   }
 
-  async search(input: SearchInput): Promise<SearchResult> {
+  async search(input: SearchInput, context?: GraphOperationContext): Promise<SearchResult> {
     const provider = input.mode === "lexical" ? null : createEmbeddingProviderFromEnv();
 
+    let result: SearchResult;
     // Mirrors PgGraphStore.search: a semantic-only search must not run (and
     // discard) a lexical pass. No Promise.all here — this driver's lexical arm
     // is synchronous, so there is nothing to overlap.
     if (input.mode === "semantic") {
-      return provider ? this.semanticSearch(input, provider) : { nodes: [], textUnits: [] };
+      result = provider ? await this.semanticSearch(input, provider) : { nodes: [], textUnits: [] };
+    } else if (input.mode === "lexical" || !provider) {
+      result = this.lexicalSearch(input);
+    } else {
+      const lexical = this.lexicalSearch(input);
+      const semantic = await this.semanticSearch(input, provider);
+      result = {
+        nodes: reciprocalRankFusion(lexical.nodes, semantic.nodes),
+        textUnits: reciprocalRankFusion(lexical.textUnits, semantic.textUnits),
+      };
     }
-    const lexical = this.lexicalSearch(input);
-    if (input.mode === "lexical" || !provider) return lexical;
-
-    const semantic = await this.semanticSearch(input, provider);
-
-    return {
-      nodes: reciprocalRankFusion(lexical.nodes, semantic.nodes),
-      textUnits: reciprocalRankFusion(lexical.textUnits, semantic.textUnits),
-    };
+    this.servedUnits.mark(result.textUnits.map((unit) => unit.id), context);
+    return result;
   }
 
   private lexicalSearch(input: SearchInput): SearchResult {
@@ -337,7 +347,7 @@ export class InMemoryGraphStore implements GraphStore {
     return vector;
   }
 
-  grep(input: GrepInput): GrepResult {
+  grep(input: GrepInput, context?: GraphOperationContext): GrepResult {
     const scope = input.scope ?? "all";
     const limit = input.limit ?? 20;
     const regex = compileGrepPattern(input.pattern, input.caseSensitive ?? false);
@@ -379,7 +389,12 @@ export class InMemoryGraphStore implements GraphStore {
       }
     }
 
-    return { matches: matches.slice(0, limit), truncated: matches.length > limit };
+    const served = matches.slice(0, limit);
+    this.servedUnits.mark(
+      served.flatMap((match) => (match.textUnitId ? [match.textUnitId] : [])),
+      context,
+    );
+    return { matches: served, truncated: matches.length > limit };
   }
 
   read(input: ReadInput, context?: GraphOperationContext, opts?: { trackAccess?: boolean }): ReadResult | null {
@@ -418,6 +433,11 @@ export class InMemoryGraphStore implements GraphStore {
       }
     }
 
+    // A tracked read is an agent-facing one — its evidence was actually shown,
+    // so it counts as served. Internal reads (trackAccess: false) show nothing.
+    if (opts?.trackAccess ?? true) {
+      this.servedUnits.mark(evidence.filter(isTextUnit).map((unit) => unit.id), context);
+    }
     return { ...node, evidence, annotations };
   }
 
@@ -450,6 +470,35 @@ export class InMemoryGraphStore implements GraphStore {
       }
     }
     return evidence;
+  }
+
+  resolveTextQuote(input: { quote: string; sourceId?: string; textUnitId?: string; limit?: number }): TextQuoteMatch[] {
+    const limit = Math.max(1, Math.min(25, Math.trunc(input.limit ?? 8)));
+    const needle = input.quote.toLowerCase();
+    const inScope = (unit: TextUnit): boolean =>
+      (!input.sourceId || unit.sourceId === input.sourceId) && (!input.textUnitId || unit.id === input.textUnitId);
+    const exact = [...this.textUnits.values()]
+      .filter((unit) => inScope(unit) && unit.text.toLowerCase().includes(needle))
+      .sort((left, right) => left.sourceId.localeCompare(right.sourceId) || left.ordinal - right.ordinal)
+      .slice(0, limit)
+      .map((unit): TextQuoteMatch => ({ unit, match: "exact", score: 1 }));
+    if (exact.length > 0) return exact;
+
+    if (contentTerms(input.quote).length === 0) return [];
+    return [...this.textUnits.values()]
+      .filter(inScope)
+      .map((unit): TextQuoteMatch => ({ unit, match: "fuzzy", score: evidenceSupportScore(input.quote, [unit.text]) }))
+      .filter((match) => match.score >= FUZZY_QUOTE_CANDIDATE_FLOOR)
+      .sort((left, right) => right.score - left.score || left.unit.id.localeCompare(right.unit.id))
+      .slice(0, limit);
+  }
+
+  markTextUnitsServed(textUnitIds: string[], context?: GraphOperationContext): void {
+    this.servedUnits.mark(textUnitIds, context);
+  }
+
+  textUnitWasServed(input: { textUnitId: string }, context?: GraphOperationContext): boolean {
+    return this.servedUnits.wasServed(input.textUnitId, context);
   }
 
   findSimilarTitles(title: string, limit: number): Array<{ node: GraphNode; score: number }> {
@@ -740,7 +789,7 @@ export class InMemoryGraphStore implements GraphStore {
     return updated;
   }
 
-  project(input: ProjectInput): ProjectResult | null {
+  project(input: ProjectInput, context?: GraphOperationContext): ProjectResult | null {
     const node = this.nodes.get(input.nodeId);
     if (!node || this.deletedNodeIds.has(node.id)) return null;
     const neighborhood = this.neighborhood({ nodeId: node.id, depth: input.depth });
@@ -750,6 +799,9 @@ export class InMemoryGraphStore implements GraphStore {
     if (input.format === "mind_map") {
       return { format: "mind_map", ...neighborhood };
     }
+
+    // markdown and agent_context both carry the evidence text — that is a serve.
+    this.servedUnits.mark(evidence.map((unit) => unit.id), context);
 
     if (input.format === "agent_context") {
       return {

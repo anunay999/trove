@@ -59,6 +59,15 @@ export class UnknownEvidenceReferenceError extends Error {
  */
 export const WEAK_EVIDENCE_FLOOR = 0.15;
 
+/**
+ * Minimum containment for a fuzzy quote match to be returned by the drivers
+ * at all (backlog #9a). Below this the "closest" span shares less than half
+ * the quote's terms — reporting it as a candidate would invite a wrong
+ * citation. The higher ACCEPT floor/margin lives in agentOps.remember, which
+ * decides whether a candidate may be cited automatically.
+ */
+export const FUZZY_QUOTE_CANDIDATE_FLOOR = 0.5;
+
 export function evidenceSupportScore(nodeText: string, unitTexts: string[]): number {
   const nodeTerms = new Set(contentTerms(nodeText));
   if (nodeTerms.size === 0) return 1; // nothing to support — don't flag
@@ -156,6 +165,74 @@ export function ownerScope(context?: GraphOperationContext): OwnerScope {
   if (!context || context.superuser || !context.ownerId) return { scoped: false, ownerId: null };
   return { scoped: true, ownerId: context.ownerId };
 }
+
+/**
+ * Session-served provenance log (backlog #9b). Records which text units a
+ * session was actually shown — ingest/search/recall/grep/read/project
+ * responses — so `remember` can flag a cited unit the caller never received:
+ * a ref the agent was never given is a hallucination by definition.
+ *
+ * In-process and per-owner BY DESIGN: it backs a warning, not a security
+ * boundary, one tenant's serves must never validate another's refs, and the
+ * cap + TTL keep it session-sized. Both drivers hold one instance each, so
+ * the check behaves identically on either driver.
+ */
+export class ServedUnitLog {
+  private buckets = new Map<string, Map<string, number>>();
+
+  constructor(
+    private readonly cap = 2000,
+    private readonly ttlMs = 6 * 60 * 60 * 1000,
+  ) {}
+
+  private keyFor(context?: GraphOperationContext): string {
+    const scope = ownerScope(context);
+    return scope.scoped ? `owner:${scope.ownerId}` : "global";
+  }
+
+  mark(unitIds: Iterable<string>, context?: GraphOperationContext): void {
+    const now = Date.now();
+    const key = this.keyFor(context);
+    let bucket = this.buckets.get(key);
+    if (!bucket) {
+      bucket = new Map();
+      this.buckets.set(key, bucket);
+    }
+    for (const [id, at] of bucket) {
+      if (now - at > this.ttlMs) bucket.delete(id);
+    }
+    for (const id of unitIds) {
+      // delete+set refreshes recency AND moves the entry to the young end.
+      bucket.delete(id);
+      bucket.set(id, now);
+    }
+    while (bucket.size > this.cap) {
+      const oldest = bucket.keys().next();
+      if (oldest.done) break;
+      bucket.delete(oldest.value);
+    }
+  }
+
+  wasServed(textUnitId: string, context?: GraphOperationContext): boolean {
+    const bucket = this.buckets.get(this.keyFor(context));
+    const at = bucket?.get(textUnitId);
+    if (at === undefined) return false;
+    if (Date.now() - at > this.ttlMs) {
+      bucket?.delete(textUnitId);
+      return false;
+    }
+    return true;
+  }
+}
+
+/** A text unit matching a quoted span (backlog #9a — cite by quote). */
+export type TextQuoteMatch = {
+  unit: TextUnit;
+  /** exact: the quote appears verbatim (case-insensitive); fuzzy: term containment only. */
+  match: "exact" | "fuzzy";
+  /** 1 for exact; for fuzzy, the share of the quote's content terms the unit contains (0..1). */
+  score: number;
+};
 
 export type GraphSourceOverview = GraphSource & {
   metadata: Record<string, unknown>;
@@ -331,6 +408,27 @@ export type GraphStore = {
    * (default 5) units per node.
    */
   getEvidenceForNodes(nodeIds: string[], context?: GraphOperationContext, opts?: { query?: string; perNodeLimit?: number }): MaybePromise<Map<string, TextUnit[]>>;
+  /**
+   * Resolve quoted span text to the text unit(s) containing it (backlog #9a —
+   * cite by quote). Exact matches contain the quote verbatim
+   * (case-insensitive); fuzzy matches come back only when nothing contains it,
+   * scored by containment of the quote's content terms. Owner-scoped, so an
+   * agent can never resolve a quote against another tenant's text.
+   */
+  resolveTextQuote(input: { quote: string; sourceId?: string; textUnitId?: string; limit?: number }, context?: GraphOperationContext): MaybePromise<TextQuoteMatch[]>;
+  /**
+   * Record units as served to this session. Internal plumbing — drivers call
+   * it from their own read paths (ingest/search/grep/read/project), and
+   * performRecall calls it for the evidence that actually made the pack.
+   */
+  markTextUnitsServed(textUnitIds: string[], context?: GraphOperationContext): MaybePromise<void>;
+  /**
+   * Was this unit served to the current session (backlog #9b)? `remember`
+   * flags cited units that were not — a ref the agent never received is a
+   * hallucination by definition. Heuristic (in-process, per-owner, capped):
+   * backs a warning, never a rejection.
+   */
+  textUnitWasServed(input: { textUnitId: string }, context?: GraphOperationContext): MaybePromise<boolean>;
   /**
    * Active `supersedes` edges pointing AT the given nodes — i.e. which of them
    * a newer node has replaced. Recall uses it to mark superseded atoms so an
@@ -801,6 +899,13 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     truncated,
   };
   enforceRecallWireBudget(result);
+  // Provenance guard (backlog #9b): only the evidence that survived EVERY cut
+  // counts as served — units fetched but dropped by the budget or the wire
+  // guard were never shown, and a later citation of them was never "given" to
+  // the agent. Marking runs after enforceRecallWireBudget for exactly that.
+  if (result.evidence.length > 0) {
+    await store.markTextUnitsServed(result.evidence.map((unit) => unit.id), context);
+  }
   return result;
 }
 

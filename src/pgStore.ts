@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
-import { normalizeRetrievalQuery } from "./queryNormalize.js";
+import { contentTerms, normalizeRetrievalQuery } from "./queryNormalize.js";
 import type {
   AnnotateInput,
   CaptureInput,
@@ -43,6 +43,8 @@ import {
   renderMarkdownProjection,
   sha256,
   splitTextUnits,
+  ServedUnitLog,
+  FUZZY_QUOTE_CANDIDATE_FLOOR,
   UnknownEvidenceReferenceError,
   WEAK_EVIDENCE_FLOOR,
   type GraphEvent,
@@ -61,6 +63,7 @@ import {
   type ReadResult,
   type RecallResult,
   type SearchResult,
+  type TextQuoteMatch,
 } from "./graphCore.js";
 import { createEmbeddingProviderFromEnv, vectorLiteral, type EmbeddingProvider } from "./embeddings.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
@@ -95,6 +98,11 @@ type PgStoreOptions = {
 export class PgGraphStore implements GraphStore {
   private pool: pg.Pool;
   private reconcileJudge: ReconcileJudge | null;
+  /**
+   * Session-served provenance log (backlog #9b). In-process by design — the
+   * server is one process, and this backs a warning, not a security boundary.
+   */
+  private servedUnits = new ServedUnitLog();
 
   constructor(options: PgStoreOptions) {
     this.pool = new Pool({ connectionString: options.connectionString, keepAlive: true });
@@ -174,6 +182,7 @@ export class PgGraphStore implements GraphStore {
       await client.query("commit");
 
       const textUnits = await this.textUnitsForSource(source.id);
+      this.servedUnits.mark(textUnits.map((unit) => unit.id), context);
       return { source, textUnits };
     } catch (error) {
       await client.query("rollback");
@@ -326,34 +335,42 @@ export class PgGraphStore implements GraphStore {
       }
     }
 
-    return { matches: matches.slice(0, limit), truncated: matches.length > limit };
+    const served = matches.slice(0, limit);
+    this.servedUnits.mark(
+      served.flatMap((match) => (match.textUnitId ? [match.textUnitId] : [])),
+      context,
+    );
+    return { matches: served, truncated: matches.length > limit };
   }
 
   async search(input: SearchInput, context?: GraphOperationContext): Promise<SearchResult> {
     const scope = ownerScope(context);
     const provider = input.mode === "lexical" ? null : createEmbeddingProviderFromEnv();
 
+    let result: SearchResult;
     // Semantic-only searches used to run a full lexical search first and throw
     // the result away; they now do no lexical work at all.
     if (input.mode === "semantic") {
-      return provider ? this.semanticSearch(input, provider, scope) : { nodes: [], textUnits: [] };
+      result = provider ? await this.semanticSearch(input, provider, scope) : { nodes: [], textUnits: [] };
+    } else if (input.mode === "lexical" || !provider) {
+      // Lexical-only, or hybrid with no embedding provider configured.
+      result = await this.lexicalSearch(input, scope);
+    } else {
+      // The two arms are independent, and the semantic one blocks on an embedding
+      // API round trip. Running them concurrently hides the lexical SQL entirely
+      // behind that call rather than adding to it — recall (the hot path) calls
+      // this with limit 50.
+      const [lexical, semantic] = await Promise.all([
+        this.lexicalSearch(input, scope),
+        this.semanticSearch(input, provider, scope),
+      ]);
+      result = {
+        nodes: reciprocalRankFusion(lexical.nodes, semantic.nodes),
+        textUnits: reciprocalRankFusion(lexical.textUnits, semantic.textUnits),
+      };
     }
-    // Lexical-only, or hybrid with no embedding provider configured.
-    if (input.mode === "lexical" || !provider) return this.lexicalSearch(input, scope);
-
-    // The two arms are independent, and the semantic one blocks on an embedding
-    // API round trip. Running them concurrently hides the lexical SQL entirely
-    // behind that call rather than adding to it — recall (the hot path) calls
-    // this with limit 50.
-    const [lexical, semantic] = await Promise.all([
-      this.lexicalSearch(input, scope),
-      this.semanticSearch(input, provider, scope),
-    ]);
-
-    return {
-      nodes: reciprocalRankFusion(lexical.nodes, semantic.nodes),
-      textUnits: reciprocalRankFusion(lexical.textUnits, semantic.textUnits),
-    };
+    this.servedUnits.mark(result.textUnits.map((unit) => unit.id), context);
+    return result;
   }
 
   private async lexicalSearch(input: SearchInput, scope: OwnerScope): Promise<SearchResult> {
@@ -642,6 +659,11 @@ export class PgGraphStore implements GraphStore {
       }
     }
 
+    // A tracked read is an agent-facing one — its evidence was actually shown,
+    // so it counts as served. Internal reads (trackAccess: false) show nothing.
+    if (opts?.trackAccess ?? true) {
+      this.servedUnits.mark(evidence.filter(isTextUnit).map((unit) => unit.id), context);
+    }
     return { ...node, evidence, annotations };
   }
 
@@ -702,6 +724,72 @@ export class PgGraphStore implements GraphStore {
       evidence.get(String(row.node_id))?.push(mapTextUnit(row));
     }
     return evidence;
+  }
+
+  async resolveTextQuote(
+    input: { quote: string; sourceId?: string; textUnitId?: string; limit?: number },
+    context?: GraphOperationContext,
+  ): Promise<TextQuoteMatch[]> {
+    const scope = ownerScope(context);
+    const limit = Math.max(1, Math.min(25, Math.trunc(input.limit ?? 8)));
+    // Exact: verbatim containment, case-insensitive. position() sidesteps
+    // ILIKE's %/_ escaping entirely.
+    const exact = await this.pool.query(
+      `select id, source_id, ordinal, section_path, char_start, char_end, text, content_sha256
+       from text_unit
+       where ($2 or owner_id = $3)
+         and ($4::uuid is null or source_id = $4)
+         and ($5::uuid is null or id = $5)
+         and position(lower($1) in lower(text)) > 0
+       order by created_at desc, ordinal
+       limit $6`,
+      [input.quote, !scope.scoped, scope.ownerId, input.sourceId ?? null, input.textUnitId ?? null, limit],
+    );
+    if (exact.rows.length > 0) {
+      return exact.rows.map((row): TextQuoteMatch => ({ unit: mapTextUnit(row), match: "exact", score: 1 }));
+    }
+
+    // Fuzzy: units holding any of the quote's content terms (the same OR form
+    // as lexical search's fallback), then containment-scored in JS with the
+    // helper the weak-evidence lint uses — one scoring rule, two call sites.
+    if (contentTerms(input.quote).length === 0) return [];
+    const fuzzy = await this.pool.query(
+      `with q as (
+         select coalesce(
+           (select (string_agg(lexeme, ' | '))::tsquery
+            from unnest(tsvector_to_array(to_tsvector('english', $1))) as terms(lexeme)),
+           ''::tsquery
+         ) as query
+       )
+       select id, source_id, ordinal, section_path, char_start, char_end, text, content_sha256,
+              ts_rank_cd(to_tsvector('english', text), q.query) as rank
+       from text_unit
+       cross join q
+       where ($2 or owner_id = $3)
+         and ($4::uuid is null or source_id = $4)
+         and ($5::uuid is null or id = $5)
+         and to_tsvector('english', text) @@ q.query
+       order by rank desc
+       limit 25`,
+      [input.quote, !scope.scoped, scope.ownerId, input.sourceId ?? null, input.textUnitId ?? null],
+    );
+    return fuzzy.rows
+      .map((row): TextQuoteMatch => ({
+        unit: mapTextUnit(row),
+        match: "fuzzy",
+        score: evidenceSupportScore(input.quote, [String(row.text ?? "")]),
+      }))
+      .filter((match) => match.score >= FUZZY_QUOTE_CANDIDATE_FLOOR)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, limit);
+  }
+
+  markTextUnitsServed(textUnitIds: string[], context?: GraphOperationContext): void {
+    this.servedUnits.mark(textUnitIds, context);
+  }
+
+  textUnitWasServed(input: { textUnitId: string }, context?: GraphOperationContext): boolean {
+    return this.servedUnits.wasServed(input.textUnitId, context);
   }
 
   async supersededBy(nodeIds: string[], context?: GraphOperationContext): Promise<Map<string, { byNodeId: string; byTitle: string }>> {
@@ -1234,6 +1322,9 @@ export class PgGraphStore implements GraphStore {
     if (input.format === "mind_map") {
       return { format: "mind_map", ...neighborhood };
     }
+
+    // markdown and agent_context both carry the evidence text — that is a serve.
+    this.servedUnits.mark(evidence.map((unit) => unit.id), context);
 
     if (input.format === "agent_context") {
       return {

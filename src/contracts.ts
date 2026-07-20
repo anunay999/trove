@@ -188,6 +188,23 @@ export const evidenceRefSchema = z.object({
   message: "Evidence must reference a source or text unit.",
 });
 
+/**
+ * remember's evidence form: everything evidenceRefSchema allows, PLUS citing
+ * by quote — { quote: "the span's own words" }, resolved to a text unit by the
+ * store (exact substring first, then term containment). This is the form LLMs
+ * are actually good at: quoting text they were served beats echoing a UUID
+ * they were served (backlog #9). capture keeps the UUID-only schema — its
+ * callers (imports, scripts) hold real ids.
+ */
+export const quoteEvidenceRefSchema = z.object({
+  sourceId: z.string().uuid().optional(),
+  textUnitId: z.string().uuid().optional(),
+  quote: z.string().min(1).optional(),
+  selector: z.record(z.string(), z.unknown()).default({}),
+}).refine((value) => value.sourceId || value.textUnitId || value.quote, {
+  message: "Evidence must reference a source, a text unit, or quote span text.",
+});
+
 export const captureInputSchema = z.object({
   title: z.string().min(1),
   type: nodeTypeSchema.default("claim"),
@@ -205,7 +222,7 @@ export const rememberInputSchema = z.object({
   type: nodeTypeSchema.default("claim"),
   summary: z.string().min(1),
   content: z.string().optional(),
-  evidence: z.array(evidenceRefSchema).default([]),
+  evidence: z.array(quoteEvidenceRefSchema).default([]),
   links: z.array(z.object({
     toSlug: z.string().min(1),
     predicate: z.string().min(1).default("relates_to"),
@@ -385,6 +402,7 @@ export type ListJobsInput = z.infer<typeof listJobsInputSchema>;
 export type RunJobInput = z.infer<typeof runJobInputSchema>;
 export type EventFeedInput = z.infer<typeof eventFeedInputSchema>;
 export type GrepInput = z.input<typeof grepInputSchema>;
+export type QuoteEvidenceRef = z.input<typeof quoteEvidenceRefSchema>;
 export type RememberInput = z.input<typeof rememberInputSchema>;
 export type ForgetInput = z.infer<typeof forgetInputSchema>;
 export type ReadAnyInput = z.infer<typeof readAnyInputSchema>;

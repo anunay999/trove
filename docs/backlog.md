@@ -230,7 +230,7 @@ result set rather than switching wholesale between them.
 
 ---
 
-### 9. `remember` may accept and silently discard evidence ✅→**fixed 2026-07-19**
+### 9. `remember` may accept and silently discard evidence ✅→**fixed 2026-07-19; follow-through 2026-07-20**
 
 **Verified 2026-07-19** — true, with one refinement: on the update path every
 evidence ref was annotated inside a catch-all, so invalid refs vanished
@@ -246,6 +246,42 @@ uniformly on create and revise: each ref is attempted individually, bogus refs
 come back in the result as `evidenceRejected` with reasons, and any other
 failure still throws (no more swallow-all). The remember tool description
 teaches the field. Covered in `tests/agent-ops.test.ts` on both drivers.
+
+**Follow-through (2026-07-20) — provenance correct by construction, layers
+(a) and (b) shipped; (c) deliberately not done:**
+
+- **(a) Cite by quote** — `remember` evidence accepts `{ quote: "..." }` and
+  the store resolves it to a text unit (`resolveTextQuote` on both drivers):
+  verbatim containment first (case-insensitive `position()` on pg, no ILIKE
+  escaping hazards), then term-containment fuzzy scored with the #17
+  `evidenceSupportScore` helper — quote-resolution yields containment at write
+  time, the composition the lint needed. Ambiguous-exact and fuzzy-near-tie
+  quotes are REJECTED with repairable reasons (candidate spans, `add
+  sourceId`, `quote a longer passage`, `ingest the source first`) — a wrong
+  auto-citation is worse than an error the agent can act on. `quote +
+  textUnitId` verifies containment in the cited unit and, on mismatch, says
+  where the quote actually is. Successful resolutions store
+  `selector: { type: "TextQuoteSelector", exact, match }` — the field was
+  always W3C-shaped; now it is W3C-typed in practice. Resolution is
+  owner-scoped, so a quote fails closed against another tenant's text.
+- **(b) Session-served validation** — a `ServedUnitLog` (graphCore, shared by
+  both drivers: per-owner, capped, TTL'd, in-process by design) records the
+  units a session was actually shown: ingest/search/grep/read/project mark
+  their returned units, and `performRecall` marks exactly the evidence that
+  made the pack (units cut by the budget were never shown). `remember` flags
+  an attached UUID ref the session never received in `evidenceUnserved` —
+  warning, not rejection, with the repair (`re-cite as { quote }, or fetch
+  the span first`). Quote-resolved citations are exempt: resolution grounds
+  them by construction.
+- **(c) Strict rejection — NOT done, by design.** Only (a)+(b) were additive
+  and non-breaking; making rejection strict belongs after real clients have
+  run with the quote form. When it lands, the `evidenceRejected` reasons are
+  already repair-shaped.
+
+Covered by `tests/evidence-quote.test.ts` on both drivers: exact, fuzzy,
+ambiguous-exact (+ sourceId repair), fuzzy-ambiguous, no-match, quote+id
+verify/mismatch, mixed refs, unserved-UUID warning, grep-serves, recall-serves,
+and cross-owner fail-closed (pg).
 
 ---
 
@@ -382,6 +418,21 @@ undermines confidence in its own output.
 the denominator is the map's size instead of a hardcoded 17. The summary now
 reads `17/17`.
 
+**Harness flake notes (2026-07-20)** — three transient failure modes observed
+across four runs on two days, none in shipped code, never the same id twice in
+a row: (1) **R5 flaps at the 0.55 semantic floor** — the deleted-phrase query
+and the node's current revision share the run's `stamp` tokens, so the
+distance sits on the floor and varies per run; the fix under test held every
+run (0 stale embedding rows). (2) **R9b's 4-way concurrent remember** asserts
+4 distinct nodes, but racers that see each other's commit revise instead —
+`fulfilled=4, rejected=0` in every run, i.e. the 23505 slug retry (the thing
+under test) never failed. (3) One run reported R8/R12
+`Cannot read properties of undefined (reading 'id')` harness errors,
+unreproduced in two later runs with full-stack capture armed — that run
+overlapped the thesis benchmark's reconcile-judge drain on the same API key
+and same Postgres host. Treat single-run failures in *different* R-ids as
+harness noise; investigate when the *same* id fails twice.
+
 ### 24. The `queryNormalize` stop-word list as a concept ✅
 
 Its header claimed to be "a superset of the pg english dictionary list". It is
@@ -421,8 +472,57 @@ been told what it means: teaching it in the answer prompt (as `recall`'s tool
 description already teaches every real MCP client) moved supersede from 50% to
 100% with the edges unchanged.
 
-**To close:** grow the multi-hop set to ≥30. That is dataset authoring, not
-engineering, and it is what converts a diagnostic into a result.
+**Grown dataset + full run (2026-07-20, n=51, 33 multi-hop — the first
+verdict-grade number):** the dataset grew to 17 bridge / 8 chain / 8 supersede
++ 18 controls (35.3%), `validateDataset` clean, each new item designed so no
+single span suffices (the answer-bearing span carries multiple candidate
+values; only the join selects). Result, verbatim:
+
+```
+shape       n   trove   flat    trove-cov  flat-cov
+--------------------------------------------------------
+bridge     17    59%    76%        79%       97%
+chain       8    63%   100%        71%       92%
+supersede   8    75%    75%        88%       94%
+control    18   100%   100%        94%       94%
+
+multi-hop gap (trove - flat): -18 pts  (n=33, one item = 3 pts)
+control gap   (trove - flat): 0 pts  (n=18)
+DOES NOT support the thesis: no multi-hop advantage at adequate n.
+```
+
+This is a real negative result, not a rigged-corpus artifact: controls tie at
+100% (distillation costs nothing on single-span answers), and the deficit is
+concentrated where the graph was supposed to win. The diagnostics point at the
+machinery, in order:
+
+1. **Retrieval coverage, not answering, is the main gap** — trove-cov trails
+   flat-cov by 18-21 pts on bridge/chain. Flat gets raw spans top-8 over a
+   ~100-unit corpus and simply HAS both hops; Trove's recall reaches the join
+   hub and stops (same signature as `bridge-invoice-owner` at 50% in the first
+   run — it recurred: 5 more items missed at exactly 50% coverage). That is
+   #8/#10's target, now measured at adequate n.
+2. **Three misses at 100% coverage are answering failures** — the facts were
+   in the pack and the model still abstained (`bridge-standup-timezone`,
+   `bridge-lunch-vegan-count`, `chain-golive-approval`). Atom presentation
+   (headers/slugs/marks) reads less naturally than raw spans; worth one prompt
+   pass before blaming retrieval for these.
+3. **Supersession parity hides a split** — both systems missed
+   `supersede-standup-time` at 50% coverage, but flat's misses were stale-value
+   answers (`Every two weeks`) while Trove's were abstentions or non-answers
+   (`end of every iteration`). The SUPERSEDED machinery prevents confident
+   wrong answers; it does not yet produce confident right ones.
+4. **Caveat — the harness's distillation is a specific write policy** (its own
+   prompt, hub entities, no quote-form evidence), not Trove-the-product
+   end-to-end; the flat baseline faces no such lossy stage. This cuts both
+   ways: it may understate Trove (extraction loss, #4) and overstate the
+   baseline (raw spans are what Trove deliberately does NOT serve agents).
+   Both are instrument facts, recorded here rather than litigated after.
+
+**To close:** #8/#10 (traversal stops at the join hub) and #4 (extraction
+loss) are the measured follow-ups, in the Suggested-order tracks below. A
+re-run after those land is the same command; the dataset is the instrument
+they get evaluated against.
 
 ---
 
@@ -435,15 +535,10 @@ evaluate. That is how the 222× regression stayed invisible.
 
 **Track 1 — correctness of the core claim.** Needs no benchmark; assertions are
 local. Largely closed 2026-07-19/20: ~~#9~~, ~~#17~~, ~~#5~~, ~~#6~~, ~~#7~~,
-~~#23~~, ~~#16~~, ~~#1+#2~~. Remaining:
+~~#23~~, ~~#16~~, ~~#1+#2~~, ~~#9 follow-through (a)+(b)~~. Remaining:
 
-1. **#9 follow-through** — `evidenceRejected` makes failure loud, not
-   impossible. The API still asks LLMs to echo UUIDs, which is the one thing
-   they are structurally worst at. Cite by quote (the `selector` field is
-   already W3C `TextQuoteSelector`-shaped), validate against units actually
-   served this session, then make rejection strict. Composes with #17:
-   quote-resolution gives containment at write time, turning the weak-evidence
-   lint into a gate.
+1. **#9(c) strict rejection** — deliberately deferred until real clients have
+   run with the quote form; the repair-shaped reasons are already in place.
 2. **An integrity suite** — every recalled atom has resolvable provenance; a
    superseded atom never outranks its successor; no silently partial write.
    Converts the README from asserted to enforced.
@@ -451,11 +546,16 @@ local. Largely closed 2026-07-19/20: ~~#9~~, ~~#17~~, ~~#5~~, ~~#6~~, ~~#7~~,
 **Track 2 — does the graph earn its complexity.** Blocked on instrument, now
 unblocked by #25.
 
-3. **Grow `bench/thesis` to ≥30 multi-hop items** — the gate on every
-   accuracy claim below it.
-4. **#8 + #10 ranking** — now has a concrete target: `bridge-invoice-owner`
-   failed at 50% coverage, traversal reaching the join hub and stopping.
-5. **#4 extraction loss** — the write path discards answers.
+3. ~~**Grow `bench/thesis` to ≥30 multi-hop items**~~ — done 2026-07-20: 33
+   multi-hop (17 bridge / 8 chain / 8 supersede) + 18 controls (35.3%),
+   `validateDataset` clean. Result recorded in #25: **−18 pts multi-hop at
+   n=33, controls level — the graph currently does NOT earn its complexity.**
+4. **#8 + #10 ranking** — measured target from the full run: six multi-hop
+   misses sat at exactly 50% coverage, traversal reaching the join hub and
+   stopping. The instrument is verdict-grade now; this is the first thing to
+   evaluate against it.
+5. **#4 extraction loss** — the write path discards answers; flat-cov 92-97%
+   vs trove-cov 71-88% bounds how much the distill stage can be costing.
 
 **Track 3 — competitive comparison.** Deliberately last. No baseline has ever
 completed (`FINDINGS.md`), and a number here is meaningless while tracks 1 and 2

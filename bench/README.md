@@ -97,7 +97,9 @@ Writes a corpus, so it refuses non-local databases unless
 
 ## Reporting a number
 
-15 items is enough to see a signal and **not** enough to publish. Whatever gets
-reported carries the sample size, both systems' scores per shape, the models,
-and the Trove SHA — the absence of exactly that is what makes the rest of the
-ecosystem's numbers uncitable (`FINDINGS.md`).
+The multi-hop set (n=33, 51 items total) clears the runner's own verdict gate
+(n≥30 multi-hop). Whatever gets reported carries the sample size, both systems'
+scores per shape, the models, and the Trove SHA — the absence of exactly that
+is what makes the rest of the ecosystem's numbers uncitable (`FINDINGS.md`).
+The first verdict-grade run (2026-07-20) and its reading are recorded in
+`docs/backlog.md` #25.
