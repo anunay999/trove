@@ -79,8 +79,8 @@ next to the number, and be disbelieved if it does not.
 
 | | | |
 |---|---|---|
-| ✅ | **Reconciliation is unconditional** — 335 nodes cost ~25 min and ~1,675 judge calls, and killed two harness runs. Now blocks benchmark iteration | **#27** |
-| ✅ | `SearchResult` discards distance, so the judge pays model prices to re-derive what the embedding already answered | **#27** |
+| ✅ | **Reconciliation was unconditional** — 335 nodes cost ~25 min and ~1,675 judge calls. **Gated + batched 2026-07-20**: calibrated distance gate (0.45), one call per write max, per-owner budget; measured 74 → 34 calls on the 56-atom calibration corpus | ~~**#27**~~ |
+| ✅ | ~~`SearchResult` discards distance~~ — distance now rides on every semantic hit (`SearchResultNode.distance`, both drivers) | ~~**#27**~~ |
 | ✅ | No backpressure on embedding calls · `OVERFETCH` is a guess · tuning constants hardcoded against a 245-row fixture | #21, #14, #13 |
 
 ### Measurement gaps
@@ -433,7 +433,9 @@ Shipped as the `reconcile_node` graph job (migration `011`):
   related / distinct. **The LLM judge is opt-in (`TROVE_RECONCILE_JUDGE=1`) as
   of the PR #26 merge** — it originally activated on any `OPENAI_API_KEY`,
   which meant every deployment with semantic search silently paid up to 5 LLM
-  calls per write. Heuristic is the shipped default until #27 gates it.
+  calls per write. Cost is now bounded by construction (#27: calibrated
+  distance gate, one batched call per write, per-owner budget); the flag stays
+  opt-in until that bound has production mileage.
 - **Act, conservatively** — a confident `supersedes` writes a non-destructive
   `supersedes` edge; `contradicts`/`duplicate` become flags in the job result.
   Nothing is tombstoned or invalidated automatically: a wrong auto-invalidation
@@ -671,43 +673,86 @@ exercises provenance end-to-end and double-checks #17.
 this item was itself briefly labelled "first" on the strength of a number that
 did not survive review; #31 now precedes it.
 
-### 27. Reconciliation is unconditional and expensive ✅
+### 27. Reconciliation is unconditional and expensive ✅ **gated + batched 2026-07-20**
 
 **Evidence** — a 335-node corpus took **~25 minutes and ~1,675 judge calls** to
 drain, and killed two thesis runs before the process was detached. In
-production it is up to 5 LLM calls per write, proportional to write volume.
+production it was up to 5 LLM calls per write, proportional to write volume.
 
-**Root cause** — the judge is asked two bundled questions: *are these about the
+**Root cause** — the judge was asked two bundled questions: *are these about the
 same thing?* (which the embedding already answers numerically, for free) and
 *same attribute, newer value?* (which genuinely needs a model). `SearchResult`
-is `{nodes, textUnits}` — the distance is computed and then discarded, so the
-first question is re-derived at model prices for every candidate, and the
-answer is "no" for almost all of them.
+was `{nodes, textUnits}` — the distance was computed and then discarded, so the
+first question was re-derived at model prices for every candidate, and the
+answer was "no" for almost all of them.
 
-**Action**, biggest win first:
+**Done — gate + batch + budget.** `SearchResult` nodes now carry the semantic
+arm's cosine distance (`SearchResultNode.distance`, both drivers; lexical-only
+hits carry none). `performReconcileNode` partitions candidates on it, judges
+the survivors in ONE batched call (worst case 5 calls → 1; a write with no near
+neighbour makes **0**), and reports `judgeCalls` plus a per-candidate `via`
+(judge / heuristic / distance_gate / budget) in the job result. A per-owner
+hourly budget (`TROVE_RECONCILE_JUDGE_BUDGET`, default 100, 0 disables) is the
+backstop; overflow is flagged `judge_budget_exceeded`, not retried into the
+same window.
 
-1. **Gate on distance.** Surface it from search, then band: `<0.05` near-certain
-   duplicate (flag, no call), `0.05-0.35` genuinely ambiguous (judge),
-   `>0.35` distinct (skip). Most writes have no near neighbour ⇒ **zero** calls.
-2. **Batch the survivors into one call.** Judged in isolation the model cannot
-   tell which of two similar atoms is the prior version; seen together it can.
-   Worst case 5 calls → 1. Cheaper *and* better.
-3. **Per-owner reconcile budget.** `TROVE_RECONCILE_JUDGE` is binary — off, or
-   unbounded and proportional to writes. A budget is the dial a hosted
-   deployment actually needs.
+**The thresholds are calibrated, not guessed** — the 0.05/0.35 bands originally
+proposed here were measured first, and the measurement rejected half the plan
+(`scripts/calibrateReconcileBands.ts`, 56-atom labelled corpus, 1 owner,
+`text-embedding-3-small`, pg driver):
 
-**Interim mitigation shipped** — the judge was flipped from opt-out to **opt-in**
-so PR #26 could merge without sending unbounded spend to production. That is a
-default change, not a fix: the moment anyone sets `=1` the full cost returns,
-and supersession (#16's whole point) stays dormant until they do. Items 1-3
-above are what make it safe to turn on.
+```
+partner distances:  supersede   0.076-0.408 (n=8)   duplicate 0.050-0.399 (n=6)
+                    contradicts 0.073-0.286 (n=4)   related   0.388-0.548 (n=5)
+gate simulation:    T=0.40  *** loses a real supersession (standup-930 at 0.408)
+                    T=0.45  34 calls / 56 writes, 22 writes make 0 calls,
+                            no actionable partner skipped
+                    T=0.50  34 calls / 56 writes, same zero-call count
+```
+
+- **The no-call duplicate band is REJECTED by the data.** Duplicate and
+  supersede pairs occupy the *same* distance range (0.050-0.399 vs 0.076-0.408,
+  overlapping almost completely) — anything close enough to flag blindly is
+  close enough to be a supersession. Flagging duplicates without judgment would
+  have flagged supersessions as duplicates and never written the edge: the
+  trap, measured in advance.
+- **The skip band landed at 0.45** (`TROVE_RECONCILE_SKIP_DISTANCE`), not 0.35
+  as guessed: the guessed value would have skipped 3 of 8 real supersessions
+  (they measured 0.307-0.408). 0.40 was already too low — it lost one. 0.45
+  keeps a measured margin above every actionable class (max 0.408; contradicts
+  pairs land in the supersede range at 0.073-0.286).
+- Before/after on the calibration corpus (56 atoms, adversarially dense with
+  near neighbours — real corpora are sparser): **74 → 34 judge calls** for the
+  same 56 writes, measured against the shipped `performReconcileNode` with
+  `judgeCalls` summed from job results — with no actionable partner ever gated
+  away. Lexical-only candidates (renamed facts) are always judged — a candidate
+  with no distance is never treated as far.
+
+**The batch prompt needed grounding, measured live.** First version of the
+batched prompt let gpt-4o-mini copy a strong verdict onto an unrelated
+candidate — banana bread judged "supersedes" of a volleyball record at 0.9
+confidence, reason and all; the edge would have been written. The reply schema
+now requires each entry to echo its candidate's `Title` verbatim, and
+`parseReconcileJudgments` rejects entries whose echo is missing or mismatched
+(safe default, no action). After grounding, the live judge classifies
+supersede / distinct / related correctly on the smoke pairs. This is the same
+lesson as the thresholds, one layer up: the batching-is-better claim was
+plausible, and only the live run showed where it broke.
+
+**Interim mitigation shipped earlier** — the judge was flipped from opt-out to
+**opt-in** so PR #26 could merge without sending unbounded spend to production.
+The flag stays opt-in for now: the bound is measured on a 56-atom calibration
+corpus, not yet on production mileage. Flipping the default is a separate
+decision.
 
 Rejected: read-time reconciliation. It re-pays on every read of the same
-conflict and puts model latency on the read path. Write-time amortises once —
-the timing is right, the *unconditional* part is wrong.
+conflict and puts model latency on the read path. Write-time amortises once.
 
-**Note** — this has become infrastructure rather than optimisation: it now
-bounds how fast #26 and every later thesis run can iterate.
+Covered by `tests/reconcile.test.ts`: the gate partition (unknown ≠ far),
+zero-call writes, skipped candidates recorded `distance_gate`, batched
+single-call judging, budget overflow, batch reply parsing, and the standing
+trap guard — "volleyball record is 4-2" → "5-2" still produces a `supersedes`
+edge end-to-end on both drivers.
 
 ### 28. No integrity suite ✅
 
@@ -803,9 +848,11 @@ keeping the same 51 items and their sessions. The items stay the instrument;
 only the haystack changes. Re-run, and only then read #30's triple and #26's
 ablation, both of which currently measure the artifact rather than the system.
 
-**Cost note** — reconciliation (#27) makes this expensive: 335 nodes already
-cost ~25 min and ~1,675 judge calls, and distractor material will multiply the
-node count. **#27 is now a prerequisite for #31**, not a follow-up.
+**Cost note** — reconciliation (#27) made this expensive: 335 nodes cost ~25
+min and ~1,675 judge calls. **#27 landed 2026-07-20** (calibrated distance
+gate, one batched call per write, per-owner budget), so the multiplier on
+distractor material is now ~1 gated call per write worst-case, most writes
+zero.
 
 **Provenance of the error** — flagged during the 2026-07-20 review, after the
 number had been recorded, analysed in detail, and used to re-sequence this
@@ -842,10 +889,14 @@ open as it was before the harness existed — with better items to ask it with.
    `validateDataset` clean. **The sample size is sufficient; the corpus is
    not** — see #31. The run's "−18 pts" is retracted and must not be planned
    from; its per-item diagnostics survive only as leads to reconfirm at scale.
-4. **#27 gate the reconcile judge** — moved up from step 8. It is a prerequisite
-   for #31: padding the corpus multiplies the node count, and 335 nodes already
-   cost ~25 min and ~1,675 judge calls. Also **decide this before merging PR
-   #26** — unconditional reconciliation should not reach a hosted deployment.
+4. ~~**#27 gate the reconcile judge**~~ — **done 2026-07-20.** Distance surfaced
+   on `SearchResultNode` (both drivers), candidates gated at a *calibrated* 0.45
+   (the guessed 0.35 would have skipped 3 of 8 real supersessions; the no-call
+   duplicate band was measured and rejected — duplicates and supersessions share
+   the same distance range), survivors judged in one batched call, per-owner
+   hourly budget. Measured 74 → 34 calls on the 56-atom calibration corpus, no
+   labelled partner ever gated away. The opt-in default stays until the bound
+   has production mileage. PR #26's merge blocker is resolved.
 5. **#31 scale the corpus to 5-10k text units** — **STEP ZERO.** At 100 units
    with `TOP_K=8` the flat baseline sees 8% of everything and #25's number is an
    artifact. Keep the 51 items; change only the haystack. Every measurement
@@ -906,9 +957,9 @@ precision about nothing.
 
 ### Phase 1 — find out whether we are losing at all (weeks)
 
-1. **#27** gate the reconcile judge — prerequisite, since #31 multiplies node
-   count and reconciliation already costs ~25 min per 335 nodes. Decide it
-   before merging PR #26 either way.
+1. ~~**#27** gate the reconcile judge~~ — **done 2026-07-20.** Calibrated
+   distance gate (0.45), batched single-call judging, per-owner budget; 74 → 34
+   calls on the 56-atom calibration corpus. PR #26's merge blocker is resolved.
 2. **#31** pad the corpus to 5-10k units, same 51 items
 3. **#30** report accuracy / latency / tokens
 4. **Re-run** — this produces the first number that means anything

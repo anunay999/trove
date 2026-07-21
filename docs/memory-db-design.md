@@ -85,9 +85,13 @@ Ordered by leverage; the schema is already ~70% of the way there.
 > Status (2026-07-19, reconciliation shipped): write-time reconciliation is now live as
 > `reconcile_node` graph jobs — capture and content-changing updates enqueue a per-node
 > pass that candidate-matches against existing nodes (lexical + semantic search) and
-> judges each pair. An LLM judge (OpenAI, `TROVE_RECONCILE_JUDGE_MODEL`, heuristic
+> judges the surviving candidates. An LLM judge (OpenAI, `TROVE_RECONCILE_JUDGE_MODEL`, heuristic
 > fallback without a key) classifies supersedes / duplicate / contradicts / related /
-> distinct. A confident `supersedes` verdict writes a non-destructive `supersedes`
+> distinct. Cost is bounded (backlog #27, 2026-07-20): a calibrated distance gate
+> (`TROVE_RECONCILE_SKIP_DISTANCE`, default 0.45) excuses far candidates without a
+> call, survivors are judged in one batched call per write, and a per-owner hourly
+> budget (`TROVE_RECONCILE_JUDGE_BUDGET`) is the backstop. A confident `supersedes`
+> verdict writes a non-destructive `supersedes`
 > edge and recall marks the replaced atom `SUPERSEDED by <title>`; contradictions and
 > duplicates are flagged in the job result for an agent to resolve — auto-invalidation
 > of genuine contradictions is deliberately not automated. See `src/reconcile.ts` and

@@ -5,7 +5,14 @@ import type { GraphJob, GraphOperationContext, GraphStore } from "../src/graphCo
 import { performRecall } from "../src/graphCore.js";
 import { InMemoryGraphStore } from "../src/store.js";
 import { PgGraphStore } from "../src/pgStore.js";
-import { createReconcileJudgeFromEnv, parseReconcileJudgment, type ReconcileJudge } from "../src/reconcile.js";
+import {
+  createReconcileJudgeFromEnv,
+  parseReconcileJudgment,
+  parseReconcileJudgments,
+  partitionReconcileCandidates,
+  performReconcileNode,
+  type ReconcileJudge,
+} from "../src/reconcile.js";
 import { isolateDatabase, hasPostgres } from "./helpers.js";
 
 // Queue-state assertions: own database under Postgres (see helpers.isolateDatabase).
@@ -93,10 +100,12 @@ describe("reconcile: heuristic judge (no LLM configured)", () => {
 });
 
 describe("reconcile: LLM-judged path (fake judge)", () => {
-  const supersedesJudge: ReconcileJudge = async ({ candidate }) =>
-    candidate.title.includes("4-2")
-      ? { verdict: "supersedes", confidence: 0.95, reason: "same metric, newer value" }
-      : { verdict: "related", confidence: 0.9, reason: "different subject" };
+  const supersedesJudge: ReconcileJudge = async ({ candidates }) =>
+    candidates.map((candidate) =>
+      candidate.title.includes("4-2")
+        ? { verdict: "supersedes", confidence: 0.95, reason: "same metric, newer value" }
+        : { verdict: "related", confidence: 0.9, reason: "different subject" },
+    );
 
   async function runJudgedScenario(store: GraphStore): Promise<{ oldNode: GraphNode; newNode: GraphNode }> {
     const oldNode = await capture(store, "Volleyball record is 4-2", "The recreational league record is 4 wins, 2 losses.");
@@ -123,7 +132,8 @@ describe("reconcile: LLM-judged path (fake judge)", () => {
 
   it("a contradicts verdict flags the pair without mutating the graph", async () => {
     const store = new InMemoryGraphStore({
-      reconcileJudge: async () => ({ verdict: "contradicts", confidence: 0.9, reason: "values disagree, recency unclear" }),
+      reconcileJudge: async ({ candidates }) =>
+        candidates.map(() => ({ verdict: "contradicts", confidence: 0.9, reason: "values disagree, recency unclear" })),
     });
     const oldNode = await capture(store, "Deploy window is Tuesday", "Releases go out on Tuesdays.");
     const newNode = await capture(store, "Deploy window is Thursday", "Releases go out on Thursdays.");
@@ -138,7 +148,7 @@ describe("reconcile: LLM-judged path (fake judge)", () => {
 
   it("an unparseable or low-confidence judge reply triggers no action", async () => {
     const store = new InMemoryGraphStore({
-      reconcileJudge: async () => parseReconcileJudgment("I'm not sure, these seem kind of similar?"),
+      reconcileJudge: async ({ candidates }) => candidates.map(() => parseReconcileJudgment("I'm not sure, these seem kind of similar?")),
     });
     const oldNode = await capture(store, "Volleyball record is 4-2", "The recreational league record is 4-2.");
     const newNode = await capture(store, "Volleyball record is 5-2", "The recreational league record is now 5-2.");
@@ -167,6 +177,171 @@ describe("reconcile: judge reply parsing", () => {
     const unknown = parseReconcileJudgment('{"verdict":"merge","confidence":0.99}');
     assert.equal(unknown.verdict, "related");
     assert.equal(unknown.confidence, 0.99, "confidence is kept but the unknown verdict drives no action");
+  });
+
+  it("parses a batched reply index-aligned, degrading gaps to safe no-ops", () => {
+    const judgments = parseReconcileJudgments(
+      '{"verdicts":[{"index":2,"verdict":"supersedes","confidence":0.92,"reason":"newer value"},{"index":9,"verdict":"duplicate"}]}',
+      2,
+    );
+    assert.equal(judgments.length, 2);
+    assert.equal(judgments[0]?.verdict, "related", "a missing entry degrades to the safe default");
+    assert.equal(judgments[0]?.confidence, 0);
+    assert.equal(judgments[1]?.verdict, "supersedes");
+    assert.equal(judgments[1]?.confidence, 0.92);
+
+    const garbage = parseReconcileJudgments("not json at all", 3);
+    assert.equal(garbage.length, 3);
+    assert.ok(garbage.every((judgment) => judgment.verdict === "related" && judgment.confidence === 0));
+  });
+
+  it("rejects entries whose echoed title does not match the candidate they claim", () => {
+    // Observed live: gpt-4o-mini copied a supersedes verdict onto an unrelated
+    // candidate, reason and all. The echoed title makes the bleed detectable.
+    const candidates = [{ title: "Volleyball record is 4-2" }, { title: "Banana bread recipe" }];
+    const bled = parseReconcileJudgments(
+      '{"verdicts":[' +
+        '{"index":1,"title":"Volleyball record is 4-2","verdict":"supersedes","confidence":0.9,"reason":"newer value"},' +
+        '{"index":2,"title":"Volleyball record is 4-2","verdict":"supersedes","confidence":0.9,"reason":"copied across"}' +
+        "]}",
+      2,
+      candidates,
+    );
+    assert.equal(bled[0]?.verdict, "supersedes", "the correctly-grounded entry stands");
+    assert.equal(bled[1]?.verdict, "related", "the copied verdict is rejected as unverifiable");
+    assert.equal(bled[1]?.confidence, 0);
+
+    const titleless = parseReconcileJudgments('{"verdicts":[{"index":1,"verdict":"supersedes","confidence":0.9}]}', 1, candidates);
+    assert.equal(titleless[0]?.verdict, "related", "a missing echo is unverifiable, not trusted");
+  });
+});
+
+describe("reconcile: batched judging", () => {
+  it("judges every surviving candidate in ONE call", async () => {
+    let calls = 0;
+    let seen = 0;
+    const store = new InMemoryGraphStore({
+      reconcileJudge: async ({ candidates }) => {
+        calls += 1;
+        seen = candidates.length;
+        return candidates.map(() => ({ verdict: "related", confidence: 0.9, reason: "counted" }));
+      },
+    });
+    await capture(store, "Volleyball record is 4-2", "The recreational league record is 4 wins, 2 losses.");
+    await capture(store, "Volleyball record is 4-3", "The recreational league record briefly stood at 4 wins, 3 losses.");
+    const newNode = await capture(store, "Volleyball record is 5-2", "Update: the recreational league record is now 5 wins, 2 losses.");
+
+    const job = await reconcileJobFor(store, newNode.id);
+    const done = await store.runJob({ jobId: job.id }, context);
+    const result = done?.result as Record<string, unknown>;
+    assert.equal(calls, 1, "N candidates must cost exactly one judge call");
+    assert.equal(seen, 2);
+    assert.equal(result.judgeCalls, 1);
+    const candidates = result.candidates as Array<{ via: string }>;
+    assert.ok(candidates.every((candidate) => candidate.via === "judge"), "no provider configured: lexical-only hits are always judged");
+  });
+});
+
+describe("reconcile: distance gate (backlog #27)", () => {
+  // The gate's partition is the load-bearing decision: far candidates are
+  // excused without a call, unknown distance is never treated as far.
+  it("partitionReconcileCandidates skips only known-far candidates", () => {
+    const finalists = [
+      { id: "near", distance: 0.1 },
+      { id: "edge", distance: 0.45 },
+      { id: "far", distance: 0.5 },
+      { id: "lexical-only", distance: undefined },
+    ];
+    const { toJudge, skipped } = partitionReconcileCandidates(finalists, 0.45);
+    assert.deepEqual(toJudge.map((entry) => entry.id), ["near", "edge", "lexical-only"]);
+    assert.deepEqual(skipped.map((entry) => entry.id), ["far"]);
+  });
+
+  function fakeNode(id: string, title: string): GraphNode {
+    return {
+      id, type: "claim", slug: id, title, summary: null, content: null,
+      revisionId: `${id}-rev`, updatedAt: new Date().toISOString(), accessCount: 0, lastAccessedAt: null,
+    };
+  }
+
+  function stubStore(semantic: Array<GraphNode & { distance?: number }>, lexical: GraphNode[] = []): GraphStore {
+    return {
+      read: async () => fakeNode("new-node", "New fact title"),
+      search: async (input: { mode?: string }) =>
+        input.mode === "semantic" ? { nodes: semantic, textUnits: [] } : { nodes: lexical, textUnits: [] },
+      link: async () => null,
+    } as unknown as GraphStore;
+  }
+
+  it("far candidates are recorded via distance_gate and never reach the judge", async () => {
+    const near = { ...fakeNode("near", "Near neighbour"), distance: 0.1 };
+    const far = { ...fakeNode("far", "Far neighbour"), distance: 0.5 };
+    let judged: string[] = [];
+    const result = await performReconcileNode(
+      stubStore([near, far]),
+      { nodeId: "new-node" },
+      async ({ candidates }) => {
+        judged = candidates.map((candidate) => candidate.id);
+        return candidates.map(() => ({ verdict: "related", confidence: 0.5, reason: "ok" }));
+      },
+    );
+    assert.deepEqual(judged, ["near"], "only the near candidate is judged");
+    assert.equal(result.judgeCalls, 1);
+    const gated = result.candidates.find((candidate) => candidate.nodeId === "far");
+    assert.equal(gated?.via, "distance_gate");
+    assert.equal(gated?.verdict, "distinct");
+    assert.equal(gated?.distance, 0.5);
+  });
+
+  it("a write with no near neighbour makes ZERO judge calls", async () => {
+    let calls = 0;
+    const result = await performReconcileNode(
+      stubStore([{ ...fakeNode("far-1", "Far one"), distance: 0.52 }, { ...fakeNode("far-2", "Far two"), distance: 0.49 }]),
+      { nodeId: "new-node" },
+      async ({ candidates }) => {
+        calls += 1;
+        return candidates.map(() => ({ verdict: "related", confidence: 0.5, reason: "ok" }));
+      },
+    );
+    assert.equal(calls, 0);
+    assert.equal(result.judgeCalls, 0);
+    assert.equal(result.candidates.every((candidate) => candidate.via === "distance_gate"), true);
+  });
+
+  it("lexical-only candidates (no distance) are always judged", async () => {
+    let judged: string[] = [];
+    const result = await performReconcileNode(
+      stubStore([], [fakeNode("renamed", "Renamed fact")]),
+      { nodeId: "new-node" },
+      async ({ candidates }) => {
+        judged = candidates.map((candidate) => candidate.id);
+        return candidates.map(() => ({ verdict: "related", confidence: 0.5, reason: "ok" }));
+      },
+    );
+    assert.deepEqual(judged, ["renamed"], "a renamed fact is exactly the case embeddings can miss");
+    assert.equal(result.candidates[0]?.distance, null);
+  });
+
+  it("the per-owner budget leaves overflow unjudged, flagged, and still succeeds", async () => {
+    const saved = process.env.TROVE_RECONCILE_JUDGE_BUDGET;
+    process.env.TROVE_RECONCILE_JUDGE_BUDGET = "1";
+    const ownerId = `budget-test-${Date.now()}`;
+    try {
+      const store = stubStore([{ ...fakeNode("near", "Near neighbour"), distance: 0.1 }]);
+      const judge: ReconcileJudge = async ({ candidates }) =>
+        candidates.map(() => ({ verdict: "related", confidence: 0.5, reason: "ok" }));
+
+      const first = await performReconcileNode(store, { nodeId: "new-node", ownerId }, judge);
+      assert.equal(first.judgeCalls, 1, "the first write consumes the single budgeted call");
+
+      const second = await performReconcileNode(store, { nodeId: "new-node", ownerId }, judge);
+      assert.equal(second.judgeCalls, 0, "the second write is over budget");
+      assert.equal(second.candidates[0]?.via, "budget");
+      assert.ok(second.flags.some((flag) => flag.code === "judge_budget_exceeded"));
+    } finally {
+      if (saved === undefined) delete process.env.TROVE_RECONCILE_JUDGE_BUDGET;
+      else process.env.TROVE_RECONCILE_JUDGE_BUDGET = saved;
+    }
   });
 });
 
@@ -224,10 +399,12 @@ describe("reconcile: judge is opt-in via TROVE_RECONCILE_JUDGE=1", () => {
 });
 
 describe("reconcile: postgres driver", { skip: !hasPostgres() }, () => {
-  const judge: ReconcileJudge = async ({ candidate }) =>
-    candidate.title.includes("4-2")
-      ? { verdict: "supersedes", confidence: 0.95, reason: "same metric, newer value" }
-      : { verdict: "related", confidence: 0.9, reason: "different subject" };
+  const judge: ReconcileJudge = async ({ candidates }) =>
+    candidates.map((candidate) =>
+      candidate.title.includes("4-2")
+        ? { verdict: "supersedes", confidence: 0.95, reason: "same metric, newer value" }
+        : { verdict: "related", confidence: 0.9, reason: "different subject" },
+    );
 
   it("runs the judged flow end-to-end on Postgres", async () => {
     const store = new PgGraphStore({ connectionString: process.env.DATABASE_URL as string, reconcileJudge: judge });

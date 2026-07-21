@@ -332,7 +332,10 @@ export class InMemoryGraphStore implements GraphStore {
     }
 
     return {
-      nodes: scoredNodes.slice(0, input.limit).map((entry) => entry.node),
+      // Distance attached like the pg driver (same 1 - cosine metric) — the
+      // declared test double keeps the shape honest so reconcile's distance
+      // gate is exercisable without Postgres.
+      nodes: scoredNodes.slice(0, input.limit).map((entry) => ({ ...entry.node, distance: entry.distance })),
       textUnits: scoredUnits.slice(0, input.limit).map((entry) => entry.unit),
     };
   }

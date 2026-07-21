@@ -599,7 +599,10 @@ export class PgGraphStore implements GraphStore {
     };
 
     return {
-      nodes: nodeResult.rows.map(mapNode),
+      // The semantic arm's per-node cosine distance (best over the dual-embed
+      // vectors) rides along on the hit — reconciliation gates judge calls on
+      // it (#27). mapNode alone would discard what the SQL already computed.
+      nodes: nodeResult.rows.map((row) => ({ ...mapNode(row), distance: Number(row.distance) })),
       textUnits: textUnitResult.rows.map(mapTextUnit),
     };
   }

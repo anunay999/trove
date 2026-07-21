@@ -84,7 +84,7 @@ Graph writes enqueue durable `graph_job` rows for:
 - `refresh_obsidian_projection`
 - `lint_graph`
 - `refresh_embeddings`
-- `reconcile_node` (write-time reconciliation; conservative heuristic by default — the LLM judge is opt-in via `TROVE_RECONCILE_JUDGE=1` and costs up to 5 calls per write, unbounded and proportional to write volume, until backlog #27 gates it on embedding distance)
+- `reconcile_node` (write-time reconciliation; conservative heuristic by default — the LLM judge is opt-in via `TROVE_RECONCILE_JUDGE=1`. Cost is bounded by construction: candidates beyond `TROVE_RECONCILE_SKIP_DISTANCE` (default 0.45, calibrated) are gated out, survivors are judged in one batched call per write, and `TROVE_RECONCILE_JUDGE_BUDGET` is a per-owner-per-hour backstop (default 100, 0 disables). The budget is **in-process**: each worker tracks its own window and it resets on restart, so across N workers the effective ceiling is N×100 and a crash-loop re-arms it. The distance gate, not the budget, is the real cost bound — the budget only catches pathological bursts)
 
 Run a bounded worker pass:
 

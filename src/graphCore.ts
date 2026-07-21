@@ -267,8 +267,19 @@ export type ReadResult = GraphNode & {
   annotations: GraphAnnotation[];
 };
 
+/**
+ * A node hit from search. `distance` is the cosine distance the semantic arm
+ * computed for this hit (query ↔ node-revision embedding, min over the
+ * dual-embed vectors) — present only when the semantic arm produced or
+ * co-produced the hit. Lexical-only hits carry no distance: ts_rank is a
+ * different metric that does not compare with cosine distance, so consumers
+ * must treat `undefined` as "unknown", not as "far". Reconciliation (#27) is
+ * the primary consumer: it gates judge calls on this number.
+ */
+export type SearchResultNode = GraphNode & { distance?: number };
+
 export type SearchResult = {
-  nodes: GraphNode[];
+  nodes: SearchResultNode[];
   textUnits: TextUnit[];
 };
 
