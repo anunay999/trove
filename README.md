@@ -54,14 +54,14 @@ Full setup — keys, scopes, stdio, importing a vault — is in [docs/quickstart
 ## What you get
 
 - **Durable agent memory** — agents save facts, decisions, and notes through MCP tools (`remember`, `ingest`) and retrieve them later with `recall`, which packs the most relevant memories into a token budget you set.
-- **Time-travel, not overwrites** — facts carry validity intervals. When something changes, the old edge is invalidated, never deleted, so you can ask what the graph believed at any point in time.
-- **Evidence, by construction** — nodes are written citing the exact source text they came from, and the linter flags any node left without evidence (`missing_evidence`) so gaps are found, not hidden.
+- **Time-travel, not overwrites** — beliefs carry validity intervals. When something changes, the old edge is invalidated, never deleted, so you can ask what the graph believed at any point in time.
+- **Evidence, by construction** — recalled atoms either resolve to cited source text or are explicitly marked `AGENT INFERENCE`; the linter flags evidence-free nodes (`missing_evidence`) for review.
 - **A dashboard** — memory KPIs, write-cadence heatmap, lint health, and an interactive force-directed graph explorer with a full-document reader.
 - **Your notes, imported** — point the importer at an Obsidian vault and it becomes the seed of the graph. Append-heavy files like `log.md` are split into per-entry episodes and deduped, so re-imports only store what's new.
 
 ## How it works
 
-Trove is an **evidence graph**: nothing is a free-floating fact. Everything an agent knows traces back to source text.
+Trove is an **evidence graph**: sourced facts trace back to cited text, while evidence-free conclusions stay visibly marked as agent inference.
 <img width="550" height="409" alt="image" src="https://github.com/user-attachments/assets/d19b60e1-086a-48ff-9522-31e518ec0f06" />
 
 

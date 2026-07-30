@@ -75,9 +75,9 @@ next to the number, and be disbelieved if it does not.
 | | | |
 |---|---|---|
 | ✅ | **`weak_evidence` found 0%-containment citations in real vault data** — provenance present but wrong, in production, today | #17 |
-| ✅ | The API still asks LLMs to echo UUIDs; quote form landed, strict rejection deliberately deferred | #9(c) |
-| ✅ | #17 is a lint **warning, not a gate** — nothing prevents a bad citation being written | #17 |
-| ✅ | No integrity suite: every README claim is asserted, none enforced in CI | **#28** |
+| ✅ | Quote-form citation landed; rejected or unserved evidence now makes `remember.complete=false` with repair-shaped reasons | ~~#9(c)~~ |
+| ✅ | #17 remains a read-side lint warning; #9(c) now supplies the write-result provenance gate | #17, ~~#9(c)~~ |
+| ✅ | ~~No integrity suite~~ — five core claims now run on both stores in CI | ~~**#28**~~ |
 
 ### Cost and performance
 
@@ -342,8 +342,8 @@ come back in the result as `evidenceRejected` with reasons, and any other
 failure still throws (no more swallow-all). The remember tool description
 teaches the field. Covered in `tests/agent-ops.test.ts` on both drivers.
 
-**Follow-through (2026-07-20) — provenance correct by construction, layers
-(a) and (b) shipped; (c) deliberately not done:**
+**Follow-through — provenance correct by construction, all three layers now
+shipped:**
 
 - **(a) Cite by quote** — `remember` evidence accepts `{ quote: "..." }` and
   the store resolves it to a text unit (`resolveTextQuote` on both drivers):
@@ -368,10 +368,13 @@ teaches the field. Covered in `tests/agent-ops.test.ts` on both drivers.
   warning, not rejection, with the repair (`re-cite as { quote }, or fetch
   the span first`). Quote-resolved citations are exempt: resolution grounds
   them by construction.
-- **(c) Strict rejection — NOT done, by design.** Only (a)+(b) were additive
-  and non-breaking; making rejection strict belongs after real clients have
-  run with the quote form. When it lands, the `evidenceRejected` reasons are
-  already repair-shaped.
+- **(c) Strict completion gate — done 2026-07-30.** `remember` now returns
+  `complete: false` whenever a requested citation is rejected or was never
+  served, while retaining the repair-shaped `evidenceRejected` /
+  `evidenceUnserved` reasons and the independent `action` describing the node
+  mutation. Evidence-free agent inference remains a valid complete write and
+  is explicitly marked as inference when recalled. Failed requested links are
+  likewise reported in `linkRejected` instead of disappearing.
 
 Covered by `tests/evidence-quote.test.ts` on both drivers: exact, fuzzy,
 ambiguous-exact (+ sourceId repair), fuzzy-ambiguous, no-match, quote+id
@@ -824,12 +827,22 @@ nothing *checks*.
 1. Every recalled atom has a resolvable citation, or is explicitly marked agent
    inference
 2. `remember` with an unresolvable ref never reports success
-3. A superseded atom never outranks its successor in the same pack
+3. A superseded atom is labelled, and an in-pack successor receives no lower
+   body fidelity (supersession is annotation-first, not a ranker)
 4. No silently partial write — if annotations fail, the write says so
 5. Token budget is never exceeded *(already covered by repro `R3`)*
 
 These need no benchmark: they are local assertions. That is what makes them
 track 1 and available now.
+
+**Done 2026-07-30** — `tests/integrity.test.ts` enforces all five claims on
+both stores. Recall exposes citation-vs-agent-inference provenance; `remember`
+reports incomplete evidence/link attachments; and packing transfers body
+fidelity from a superseded atom to its in-pack successor without changing
+relevance order. This matches the production-graph check that motivated the
+honest invariant: the highest-risk live successor already ranked naturally
+above its labelled predecessor (0.85 vs 0.43), so supersession remains
+annotation-first rather than becoming a general reranker.
 
 ### 29. No task-shaped evaluation ⚠️ **the untested product question**
 
@@ -974,14 +987,10 @@ first — as this document originally did — means shipping changes nobody can
 evaluate. That is how the 222× regression stayed invisible.
 
 **Track 1 — correctness of the core claim.** Needs no benchmark; assertions are
-local. Largely closed 2026-07-19/20: ~~#9~~, ~~#17~~, ~~#5~~, ~~#6~~, ~~#7~~,
-~~#23~~, ~~#16~~, ~~#1+#2~~, ~~#9 follow-through (a)+(b)~~. Remaining:
-
-1. **#28 integrity suite** — converts the README from asserted to enforced.
-   #9 and #17 both found the core provenance claim failing silently in
-   production; the pattern is that nothing checks.
-2. **#9(c) strict rejection** — deliberately deferred until real clients have
-   run with the quote form; the repair-shaped reasons are already in place.
+local. Closed 2026-07-19 through 2026-07-30: ~~#9~~, ~~#17~~, ~~#5~~, ~~#6~~,
+~~#7~~, ~~#23~~, ~~#16~~, ~~#1+#2~~, ~~#9 follow-through (a)+(b)+(c)~~, and
+~~#28 integrity suite~~. The README's core integrity claims are now enforced
+on both stores rather than left as prose.
 
 **Track 2 — does the graph earn its complexity.** Still **blocked on
 instrument.** #25 built the dataset and #31 then found the corpus it runs

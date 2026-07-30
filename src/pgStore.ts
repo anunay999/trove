@@ -729,6 +729,21 @@ export class PgGraphStore implements GraphStore {
     return evidence;
   }
 
+  async evidenceNodeIds(nodeIds: string[], context?: GraphOperationContext): Promise<Set<string>> {
+    if (nodeIds.length === 0) return new Set();
+    const scope = ownerScope(context);
+    const result = await this.pool.query(
+      `select distinct a.node_id
+       from annotation a
+       join node n on n.id = a.node_id
+       where a.node_id = any($1::uuid[])
+         and n.deleted_at is null
+         and ($2 or n.owner_id = $3)`,
+      [nodeIds, !scope.scoped, scope.ownerId],
+    );
+    return new Set(result.rows.map((row) => String(row.node_id)));
+  }
+
   async resolveTextQuote(
     input: { quote: string; sourceId?: string; textUnitId?: string; limit?: number },
     context?: GraphOperationContext,
