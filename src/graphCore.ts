@@ -589,6 +589,11 @@ export function activationScore(node: GraphNode, nowMs: number): number {
   return 0.6 * recency + 0.4 * frequency;
 }
 
+/** Cosine distance (0..2; lower = closer) → alignment in [0,1] (higher = closer). */
+export function semanticAlignment(distance: number): number {
+  return Math.min(1, Math.max(0, 1 - distance));
+}
+
 /** Vault-import stubs used to point at sources without storing the body. */
 function isPlaceholderContent(content: string | null | undefined): boolean {
   if (!content) return true;
@@ -686,10 +691,16 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
   }, context);
 
   const nowMs = Date.now();
-  type Candidate = { node: GraphNode; matchRank: number | null; hops: number; degree: number };
+  type Candidate = {
+    node: GraphNode;
+    matchRank: number | null;
+    hops: number;
+    degree: number;
+    distance: number | undefined;
+  };
   const candidates = new Map<string, Candidate>();
   search.nodes.forEach((node, index) => {
-    candidates.set(node.id, { node, matchRank: index, hops: 0, degree: 0 });
+    candidates.set(node.id, { node, matchRank: index, hops: 0, degree: 0, distance: node.distance });
   });
 
   const edgePool = new Map<string, GraphEdge>();
@@ -705,7 +716,13 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
       for (const node of expansion.nodes) {
         if (!candidates.has(node.id)) {
           // True BFS depth from the seed: depth-2 neighbors are hops 2.
-          candidates.set(node.id, { node, matchRank: null, hops: Math.max(1, node.level), degree: 0 });
+          candidates.set(node.id, {
+            node,
+            matchRank: null,
+            hops: Math.max(1, node.level),
+            degree: 0,
+            distance: undefined,
+          });
         }
       }
     }
@@ -719,18 +736,28 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
   }
 
   const maxDegree = Math.max(1, ...[...candidates.values()].map((candidate) => candidate.degree));
+  const knownAlignments = [...candidates.values()]
+    .filter((candidate) => candidate.distance !== undefined)
+    .map((candidate) => semanticAlignment(candidate.distance as number));
+  const neutralAlignment = knownAlignments.length
+    ? knownAlignments.reduce((left, right) => left + right, 0) / knownAlignments.length
+    : 0.5;
   // Prefer hop-0 (direct matches) over linked neighbors so budget goes to full pages.
   // Soft-penalize giant catalog/log pages so they don't outrank a specific runbook.
   const scored = [...candidates.values()]
     .map((candidate) => {
       const contentLen = candidate.node.content?.length ?? 0;
       const giantPenalty = contentLen > GIANT_CONTENT_CHARS ? 0.12 : 0;
+      const align = candidate.distance !== undefined
+        ? semanticAlignment(candidate.distance)
+        : neutralAlignment;
       return {
         ...candidate,
         score:
-          (candidate.matchRank === null ? 0 : 0.5 / (1 + candidate.matchRank)) +
-          0.3 * activationScore(candidate.node, nowMs) +
-          0.2 * (candidate.degree / maxDegree) +
+          (candidate.matchRank === null ? 0 : 0.35 / (1 + candidate.matchRank)) +
+          0.30 * align +
+          0.20 * activationScore(candidate.node, nowMs) +
+          0.15 * (candidate.degree / maxDegree) +
           (candidate.hops === 0 ? 0.15 : 0) -
           giantPenalty,
       };

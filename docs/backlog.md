@@ -392,6 +392,10 @@ despite ACT-R's formula being the documented intent (`docs/memory-db-design.md`)
 With #8 pushing more candidates through, this is now the binding constraint on
 precision.
 
+**Status 2026-07-30:** semantic alignment from query↔node embedding distance now
+ships as `w_s`; lexical-only hits and graph neighbors receive the mean known
+alignment. Noise remains deliberately open to keep ranking deterministic.
+
 ### 11. No decay or archive ✅
 
 Low-activation atoms rank lower but are never archived. The working set grows
