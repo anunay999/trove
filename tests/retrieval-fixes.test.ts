@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import pg from "pg";
 import { suiteStore, closeStore, hasPostgres, sleep, isolateDatabase } from "./helpers.js";
 import type { GraphJob, GraphOperationContext } from "../src/graphCore.js";
+import type { SearchInput } from "../src/contracts.js";
 import { FakeEmbeddingProvider, cosineSimilarity } from "../src/embeddings.js";
 import { normalizeRetrievalQuery } from "../src/queryNormalize.js";
 import { UserStore } from "../src/users.js";
@@ -181,7 +182,7 @@ describe("retrieval fixes", () => {
       title: `${marker} operations`,
       type: "community",
       summary: "which the and fillerone fillertwo fillerthree",
-      content: `${marker} fillerfour fillerfive fillersix`,
+      content: `${marker} fillerfour fillerfive fillersix fillerseven fillereight extranine extraten extraeleven`,
       evidence: [],
       links: [],
     }, context);
@@ -311,6 +312,40 @@ describe("retrieval fixes", () => {
     assert.ok(
       lexicalOnlyIndex < pack.atoms.length - 1,
       `neutral imputation must keep the lexical-only candidate off the bottom (index ${lexicalOnlyIndex})`,
+    );
+  });
+  it("F10c: a co-produced hit carries semantic distance through hybrid fusion", async () => {
+    const marker = `coproduced${stamp}`;
+    const node = await store.capture({
+      title: `${marker} runbook`,
+      type: "question",
+      summary: `${marker} ${marker} operational answer`,
+      content: `${marker} ${marker} ${marker} exact procedure`,
+      evidence: [],
+      links: [],
+    }, context);
+    await drainJobs();
+
+    const searchInput: Omit<SearchInput, "mode"> = {
+      query: marker,
+      types: ["question"],
+      includeTextUnits: false,
+      limit: 10,
+      maxSemanticDistance: 0.55,
+    };
+    const semantic = await store.search({ ...searchInput, mode: "semantic" }, context);
+    const lexical = await store.search({ ...searchInput, mode: "lexical" }, context);
+    const hybrid = await store.search({ ...searchInput, mode: "hybrid" }, context);
+
+    const semanticHit = semantic.nodes.find((candidate) => candidate.id === node.id);
+    assert.equal(typeof semanticHit?.distance, "number", "fixture: semantic arm must produce a distance");
+    assert.ok(lexical.nodes.some((candidate) => candidate.id === node.id), "fixture: lexical arm must produce the same hit");
+    const hybridHit = hybrid.nodes.find((candidate) => candidate.id === node.id);
+    assert.ok(hybridHit, "hybrid fusion must retain the co-produced hit");
+    assert.equal(
+      hybridHit.distance,
+      semanticHit?.distance,
+      "hybrid fusion must preserve the semantic arm's distance for a co-produced hit",
     );
   });
   it("F8: giant nodes are excluded from search unless the query hits title or slug", async () => {
