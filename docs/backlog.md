@@ -24,7 +24,7 @@ Two cautionary examples worth remembering when working this list:
 
 ---
 
-## Where Trove actually stands (2026-07-20)
+## Where Trove actually stands (updated 2026-07-30)
 
 A consolidated read of everything measured so far. Each row points at the item
 that owns it — this is an index, not a second copy of the list.
@@ -33,14 +33,18 @@ that owns it — this is an index, not a second copy of the list.
 
 | | | |
 |---|---|---|
-| ⚠️ | **The thesis harness ran on a 100-text-unit corpus with `TOP_K=8`** — the flat baseline retrieves **8% of everything that exists** on every question. Retrieval is barely a filter at that scale | **#31** |
-| ❌ | **The "-18 pts multi-hop" number is therefore NOT a finding about Trove.** It is far more likely a fixture artifact. Do not plan from it | #25, **#31** |
-| ✅ | **The instrument itself is sound in design** — controls tie at 100%, `validateDataset` enforces the bridge property mechanically, and the shapes separate cleanly. It is the *corpus scale* that is wrong, not the experiment | #25 |
-| ⚠️ | **Cause of any real gap is unresolved** — distillation loss vs traversal-stopping. Cannot be answered until the corpus is realistic | **#26** after **#31** |
+| ✅ | **Corpus scaled to 7,202 units / 7,434 nodes** (was 100 units at `TOP_K=8` = 8% of everything per question; now top-8 = 0.11%). The judged re-run (2026-07-30) confirms retrieval finally filters — flat's top-8 is mostly distractors | ~~**#31**~~ |
+| ✅ | **The "-18 pts multi-hop" was a fixture artifact — now confirmed, not just suspected.** At 7,202 units the sign flipped to **+6 pts** (trove 45% vs flat 39%, n=33). The -18 is dead; do not plan from it | #25, ~~**#31**~~, ~~**#30**~~ |
+| ✅ | **The instrument itself is sound in design** — controls tie at 100%, `validateDataset` enforces the bridge property mechanically, and the shapes separate cleanly. It was the *corpus scale* that was wrong, not the experiment | #25 |
+| ⚠️ | **The re-run's edge is marginal and broad, not a clean traversal win.** +6 multi-hop is exactly **2 items** on n=33 — sitting on the harness's own significance floor (it printed SUPPORTS only because the guard is strict `<`). Trove also leads controls **+11** (2 items, 100% vs 89%), which the label calls "level." #26 was written to explain a *loss* that no longer exists — its premise is gone | ~~**#26**~~ premise moot |
+| ⚠️ | **Trove buys its +8-pt overall edge with ~6.5× context tokens (972 vs 149) and ~1.7× retrieval latency (780 vs 447 ms).** The triple (#30) reframes "Trove wins" as "wins narrowly, and pays materially for it" — the cost axis is where the graph must ultimately justify itself | ~~**#30**~~ |
 
-**Nothing in Track 2 should be funded before #31.** #26 and #30 are both
-well-designed measurements of a regime that does not resemble production, and
-running them first buys precision about an artifact.
+**Track 2 measured (2026-07-30).** #31 + #30 landed and the judged re-run ran
+at 7,202 units. Overall: **trove 65% / flat 57%**; multi-hop **+6 pts**, control
+**+11 pts**; trove **972 ctx-tokens & 780 ms** vs flat **149 & 447**. The
+retracted -18 is confirmed dead. The honest reading is a *modest, broad*
+accuracy edge bought at ~6.5× tokens and ~1.7× latency — not the decisive
+traversal win the harness's SUPPORTS label suggests. Full block under #25.
 
 This is the **third** instance of the same error in this repository, and the
 lesson was already written down twice before it recurred:
@@ -568,7 +572,62 @@ been told what it means: teaching it in the answer prompt (as `recall`'s tool
 description already teaches every real MCP client) moved supersede from 50% to
 100% with the edges unchanged.
 
-**Grown dataset + full run (2026-07-20, n=51, 33 multi-hop):**
+**Re-run at scale (2026-07-30, n=51, 33 multi-hop, 7,202-unit corpus, judged, triple reported):**
+
+This is the first number that is not a fixture artifact — same 51 items, same
+judge, same two arms, but the corpus is padded to 7,202 units / 7,434 nodes so
+flat's `TOP_K=8` sees 0.11% of the world instead of 8%. Result, verbatim:
+
+```
+system   accuracy   ctx-tokens (mean)   retrieval-ms (mean)
+--------------------------------------------------------------
+trove     65%             972               780
+flat      57%             149               447
+
+--- verdict ---
+multi-hop gap (trove - flat): 6 pts  (n=33, one item = 3 pts)
+control gap   (trove - flat): 11 pts  (n=18)
+SUPPORTS the thesis: ahead on multi-hop, level on single-hop — the graph is doing the work.
+```
+
+Per-bucket (from the miss lists): multi-hop **trove 15/33 (45%) vs flat 13/33
+(39%)**; control **trove 18/18 (100%) vs flat 16/18 (89%)**. The entire win is
+**4 questions out of 51** — +2 multi-hop, +2 control.
+
+**What this settles.** The retracted **-18 flipped to +6** at scale. That is the
+decisive confirmation that the 100-unit number was a fixture artifact and not a
+property of the graph: the sign of the headline result reversed when the only
+thing that changed was corpus size. Plan from this, not from the -18.
+
+**What this does NOT settle — read the SUPPORTS label with discipline.** The
+harness's own guard refuses to conclude when the gap is within two items of
+zero. The multi-hop gap here is **exactly two items** (2/33 = 6.06 pts) and the
+floor is `perItem*2` = 6.06 pts — it cleared the gate only because the
+comparison is strict `<`, not `<=`. It is real-but-marginal, sitting on the
+line the repo drew precisely to stop overclaiming (see the LongMemEval "40 vs
+30 off ten questions" lesson). And Trove leads the *controls* by +11 pts (also
+two items) — the harness treats ≤15 pts as "level," but proportionally the
+single-hop edge (2/18) is larger than the multi-hop edge (2/33). So the data
+fits "atom distillation helps modestly across the board" at least as well as
+"the graph is doing the [traversal] work." Do not upgrade the sentence beyond
+"no longer loses multi-hop at scale, wins narrowly overall."
+
+**The triple is the real story (#30).** Trove's +8-pt overall edge is bought
+with **~6.5× the context tokens** (972 vs 149) and **~1.7× the retrieval
+latency** (780 vs 447 ms). Accuracy-alone reads "Trove wins"; the triple reads
+"Trove wins narrowly and spends materially more to do it" — which is exactly the
+cost axis Trove exists to argue about, now measured instead of asserted. Whether
+the graph *earns* its complexity at this scale is a cost/accuracy tradeoff
+question, not a clean yes.
+
+**Provenance / reproduction.** pg driver, `text-embedding-3-small` (1536-dim),
+`TROVE_RECONCILE_JUDGE=1`, scratch DB `trove_thesis`, `distractors.json` (fixed
+haystack). 162 item reconciles drained cleanly (0 skipped after the hardened
+retry loop — see #30); distractor reconciles left pending by design.
+
+---
+
+**Grown dataset + full run (2026-07-20, n=51, 33 multi-hop) — RETRACTED, kept for the record:**
 
 > ❌ **RETRACTED AS A FINDING — see #31.** This run used a **100-text-unit
 > corpus** against `TOP_K = 8`, so the flat baseline retrieved 8% of everything
@@ -790,7 +849,7 @@ credible shape: replay real Claude Code sessions against Trove and against a
 scratchpad, and score re-derivation, stale-belief actions, and citation
 traceability. Deliberately left open.
 
-### 30. The thesis harness reports accuracy alone ✅ **do this before acting on #25's number**
+### 30. The thesis harness reports accuracy alone ✅ **done 2026-07-30 — the triple is reported**
 
 `bench/FINDINGS.md`, written during the LongMemEval pilot, says:
 
@@ -811,14 +870,28 @@ flat reaches 76% on ~6,000, "Trove loses multi-hop by 18 pts" is the wrong
 sentence — those are two points on a cost curve, on the axis Trove exists to
 win. Right now nobody knows which it is, because it was never measured.
 
-**Action** — capture `pack.spentTokens` and a rough token count for the flat
-context, plus per-arm retrieval latency; report all three per shape. ~20 lines.
-Then re-read #25 before funding #26's outcome.
+**Done** — `run.ts` now times each arm's retrieval (`retrievalMs` around
+`performRecall` for trove, around embed+cosine+slice for flat) and estimates
+context tokens with a single char/4 heuristic applied to *both* arms
+(`estimateTokens`, deliberately not `pack.spentTokens`, so the comparison is
+apples-to-apples rather than one arm's accounting vs a guess). `report()` prints
+the triple: `system  accuracy  ctx-tokens  retrieval-ms`. Hardened alongside:
+`chat()` retries network/429/5xx with backoff, and the job drain
+(`runJobWithRetry`) survives transient failures instead of killing a two-hour
+run on one blip — reconcile skips are disclosed, embedding failures still throw.
 
-**Note** — this is the fifth 2026-07-20 harness defect, and like the other four
-it made Trove look worse than it is. See the methodology note at the top.
+**Result (2026-07-30, full block under #25):** trove **65% / 972 tok / 780 ms**
+vs flat **57% / 149 tok / 447 ms**. The triple changed the sentence exactly as
+predicted — not "Trove loses multi-hop by 18 pts" (retracted) and not simply
+"Trove wins," but **"Trove wins narrowly (+8 pts) and pays ~6.5× the tokens and
+~1.7× the latency for it."** The cost axis, the one Trove exists to win, is now
+measured. #26's premise (explain a multi-hop *loss*) no longer exists.
 
-### 31. The thesis corpus is too small to measure retrieval ❌ **invalidates #25's number**
+**Note** — this closes the fifth 2026-07-20 harness defect; like the other four,
+it had made Trove look worse than it is (the retracted -18). See the methodology
+note at the top.
+
+### 31. The thesis corpus is too small to measure retrieval ✅ **padded 2026-07-20; judged re-run done 2026-07-30**
 
 **Evidence** — the n=51 run ingested **100 text units** and the flat baseline
 uses `TOP_K = 8`. It retrieves **8% of the entire corpus** for every question.
@@ -843,16 +916,47 @@ reported that the graph did not help.
 **This does not mean Trove wins at scale** — it means the experiment has not
 been run. The honest status of the thesis is **unmeasured**, not disproved.
 
-**Action** — pad the corpus to 5-10k text units of distractor material while
-keeping the same 51 items and their sessions. The items stay the instrument;
-only the haystack changes. Re-run, and only then read #30's triple and #26's
-ablation, both of which currently measure the artifact rather than the system.
+**Update 2026-07-30 — the experiment has now been run.** At 7,202 units the
+retracted -18 flipped to **+6 pts multi-hop** (trove 65% / flat 57% overall).
+The corpus scaling was the load-bearing fix: the sign of the headline reversed
+with corpus size as the only changed variable. Full result and the (marginal,
+broad, cost-heavy) reading are under #25's re-run block; the triple is #30.
 
-**Cost note** — reconciliation (#27) made this expensive: 335 nodes cost ~25
-min and ~1,675 judge calls. **#27 landed 2026-07-20** (calibrated distance
+**Done — the haystack is built and verified at scale; the judged re-run waits
+for #30 (reporting the triple) so the first real number is not accuracy-only
+again.** `bench/thesis/genDistractors.ts` generated **7,102 distractor notes**
+(committed as `bench/thesis/distractors.json` — the haystack is identical
+across runs; regenerating makes runs incomparable). Safety is mechanical:
+every item's answers/bridgeTerms/requiredFacts plus item proper nouns are
+banned substrings (1,216 candidate notes dropped), domains are adjacent-but-
+different-subject, exact dupes dropped. `run.ts` ingests them symmetrically —
+sources for the flat units, pre-atomic claim nodes for the graph (no LLM
+distillation: they are already single-fact; padding only one side would rig
+the comparison in the other direction). `TROVE_THESIS_DISTRACTORS=0`
+reproduces the retracted regime for A/B.
+
+**Verified at full scale** (prepare-only run, ~15 min, pg driver,
+`text-embedding-3-small`): **7,202 text units** (100 item + 7,102 distractor)
+and **7,434 nodes**; top-8 is now **0.11%** of the corpus, not 8% — retrieval
+finally filters. 136 judged calls for 161 item reconciles (the #27 gate doing
+its work), 5 supersedes edges written, embeddings complete (0 missing on both
+tables), and a spot-check recall over the full graph returns a sane pack while
+the flat top-8 is now 5/8 distractors.
+
+**Two drain bugs found by that verification, both fixed:**
+`runJob` drains stopped after one 256-row batch because the embedding
+follow-up is only ever enqueued by the background *worker* — direct `runJob`
+loops must queue it themselves (now `enqueueEmbeddingDrainFollowUp`, shared
+between worker and harness, covered in `tests/jobs.test.ts`); and the harness
+drained reconciles *before* embeddings, leaving the semantic arm empty (10
+judged calls, 1 edge) — the old blanket drain had gotten the order for free
+from job priorities. Embeddings now drain first; reconciles follow.
+
+**Cost note** — reconciliation (#27) landed 2026-07-20 (calibrated distance
 gate, one batched call per write, per-owner budget), so the multiplier on
-distractor material is now ~1 gated call per write worst-case, most writes
-zero.
+distractor material is ~1 gated call per write worst-case, most writes zero —
+and distractor reconcile jobs are never drained at all (no measurement value),
+which is why 7,102 extra nodes cost zero judge calls.
 
 **Provenance of the error** — flagged during the 2026-07-20 review, after the
 number had been recorded, analysed in detail, and used to re-sequence this
@@ -897,13 +1001,15 @@ open as it was before the harness existed — with better items to ask it with.
    hourly budget. Measured 74 → 34 calls on the 56-atom calibration corpus, no
    labelled partner ever gated away. The opt-in default stays until the bound
    has production mileage. PR #26's merge blocker is resolved.
-5. **#31 scale the corpus to 5-10k text units** — **STEP ZERO.** At 100 units
-   with `TOP_K=8` the flat baseline sees 8% of everything and #25's number is an
-   artifact. Keep the 51 items; change only the haystack. Every measurement
-   below is meaningless until this lands.
+5. ~~**#31 scale the corpus to 5-10k text units**~~ — **done 2026-07-20.**
+   7,202 text units / 7,434 nodes, verified at scale; top-8 is now 0.11% of
+   the corpus. `genDistractors.ts` → committed `distractors.json`; the 51
+   items are untouched, only the haystack changed. Two harness drain bugs
+   found and fixed in the doing (embedding follow-up is worker-only; drains
+   ordered embeddings-before-reconcile).
 6. **#30 report the triple** — accuracy / latency / tokens. ~20 lines,
-   `spentTokens` is already on the pack. Run it *after* #31, since at 100 units
-   Trove's selectivity is pure downside with nothing to select away from.
+   `spentTokens` is already on the pack. **Now the step before the re-run**,
+   so the first real number is not accuracy-only again.
 7. **#26 the ablation** — **THE GATE**, once the instrument is real.
    Distillation loss and traversal-stopping both explain a multi-hop gap and
    imply different work. ~1 hour; `pack.citations` already carries what variant
@@ -923,7 +1029,7 @@ Had a second system been runnable, "everything loses to raw-span retrieval at
 100 units" would have surfaced immediately instead of being written up as a
 finding about Trove.
 
-**Revised guidance:** once #31 lands, rebuild **one** provider (~a day against
+**Revised guidance:** with #31 landed, rebuild **one** provider (~a day against
 `FINDINGS.md`'s notes on the harness's quirks) and run it as an instrument check,
 not for a number. A comparator that shares Trove's distillation-shaped
 disadvantage is the cheapest available guard against another single-system
@@ -960,11 +1066,16 @@ precision about nothing.
 1. ~~**#27** gate the reconcile judge~~ — **done 2026-07-20.** Calibrated
    distance gate (0.45), batched single-call judging, per-owner budget; 74 → 34
    calls on the 56-atom calibration corpus. PR #26's merge blocker is resolved.
-2. **#31** pad the corpus to 5-10k units, same 51 items
-3. **#30** report accuracy / latency / tokens
-4. **Re-run** — this produces the first number that means anything
-5. **#26** ablation, *if a gap survives* — distillation or traversal
-6. Fix whichever it names — #4 **or** #8/#10, not both on spec
+2. ~~**#31** pad the corpus to 5-10k units, same 51 items~~ — **done 2026-07-20**
+   (7,202 units, fixed `distractors.json` haystack)
+3. ~~**#30** report accuracy / latency / tokens~~ — **done 2026-07-30**
+4. ~~**Re-run**~~ — **done 2026-07-30.** trove 65% / flat 57%; multi-hop **+6**,
+   control +11; trove 972 tok / 780 ms vs flat 149 / 447. The -18 is dead
+5. ~~**#26** ablation, *if a gap survives*~~ — **premise gone.** There is no
+   multi-hop *loss* to attribute; Trove is (narrowly) ahead. #26 would now only
+   answer a different question — why the win is small and broad, not traversal-
+   shaped — and that is not urgent
+6. Fix whichever it names — deferred with #26
 
 Note the change of title. The earlier version of this section was called "stop
 losing", which presumed the loss was real. It has not been established.
@@ -983,18 +1094,23 @@ Ranked by evidence, not by how good the story sounds:
 
 | candidate | status |
 |---|---|
-| **Search latency** | ✅ **4× verified** (109 ms vs 437 ms). Defensible today |
-| **Token efficiency** | Architecturally real, **unmeasured** — #30 closes this |
+| **Search latency** | ✅ **4× verified** (109 ms vs 437 ms) — but that is *raw semantic search*. Note the thesis harness measured *full recall pack assembly* at **780 ms vs flat's 447 ms cosine** (2026-07-30): the traversal+brief path is ~1.7× slower than naive top-k. Both are true of different operations; don't quote the 4× for the recall path |
+| **Token efficiency** | ⚠️ **Measured 2026-07-30 and it cuts the other way at this scale** — Trove spent **6.5× the context tokens** (972 vs 149) for +8 pts. The budget *dial* is real; the default write policy is not token-cheap. #30 closed the measurement |
 | **Provenance / audit** | Genuinely unique. Currently *failing*: `weak_evidence` found 0%-containment citations in live vault data |
-| **Multi-hop reasoning** | ⚠️ **Unmeasured.** The one run that looked like a loss was invalid (#31); the honest status is unknown, not behind |
+| **Multi-hop reasoning** | ✅ **Measured 2026-07-30: narrowly ahead, not behind.** +6 pts at 7,202 units (the -18 was a fixture artifact, #31). But it is 2 items on the significance floor, and controls lead by more — a modest broad edge, not a proven traversal win |
 
 The honest read: **QA accuracy is a crowded lane and a hard one**, and it is the
 axis every competitor already optimises. Latency + token cost + auditable
-provenance is a lane nobody is seriously contesting, and two of those three are
-properties the architecture already has. That argument stands on its own merits
-and never needed the multi-hop number — which is fortunate, because an earlier
-version of this section leaned on "Trove is behind an untuned baseline" as though
-it were established. It was not.
+provenance is a lane nobody is seriously contesting — but the 2026-07-30 re-run
+is a caution against assuming Trove already owns it: on the recall path Trove
+was *slower* (780 vs 447 ms) and *token-heavier* (972 vs 149) than a naive
+baseline. What is architecturally real is that both are **dials** (the HNSW
+search is 4× faster in isolation; `recall` takes a `tokenBudget`), not that the
+default configuration is already cheap. Provenance remains the one genuinely
+uncontested axis. That argument never needed the multi-hop number — which is
+fortunate, because an earlier version of this section leaned on "Trove is behind
+an untuned baseline" as though it were established. It was not; and it is now
+narrowly ahead.
 
 ### Phase 3 — make it undeniable
 
