@@ -54,7 +54,7 @@ Full setup — keys, scopes, stdio, importing a vault — is in [docs/quickstart
 ## What you get
 
 - **Durable agent memory** — agents save facts, decisions, and notes through MCP tools (`remember`, `ingest`) and retrieve them later with `recall`, which packs the most relevant memories into a token budget you set.
-- **Time-travel, not overwrites** — facts carry validity intervals. When something changes, the old edge is invalidated, never deleted, so you can ask what the graph believed at any point in time.
+- **Time-travel, not overwrites** — beliefs carry validity intervals. When something changes, the old edge is invalidated, never deleted, so you can ask what the graph believed at any point in time.
 - **Evidence, by construction** — recalled atoms either resolve to cited source text or are explicitly marked `AGENT INFERENCE`; the linter flags evidence-free nodes (`missing_evidence`) for review.
 - **A dashboard** — memory KPIs, write-cadence heatmap, lint health, and an interactive force-directed graph explorer with a full-document reader.
 - **Your notes, imported** — point the importer at an Obsidian vault and it becomes the seed of the graph. Append-heavy files like `log.md` are split into per-entry episodes and deduped, so re-imports only store what's new.

@@ -1,6 +1,7 @@
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { remember } from "../src/agentOps.js";
+import { slugify } from "../src/slug.js";
 import { UserStore } from "../src/users.js";
 import { closeStore, hasPostgres, isolateDatabase, suiteStore } from "./helpers.js";
 
@@ -220,20 +221,22 @@ describe("integrity suite (backlog #28)", () => {
   });
 
   it("#4 reports a partial write when a requested annotation or link fails", async () => {
-    const missingSlug = `missing-integrity-target-${stamp}`;
+    const phantomTitle = `Phantom integrity target ${stamp}`;
+    const phantomSlug = slugify(phantomTitle);
     const partial = await remember(store, {
       title: `Partial integrity write ${stamp}`,
       type: "claim",
       summary: "Agent inference: the node should land while its failed link remains visible.",
       evidence: [],
-      links: [{ toSlug: missingSlug, predicate: "relates_to" }],
+      links: [{ toSlug: phantomSlug, predicate: "relates_to" }],
     }, context);
 
     assert.equal(partial.action, "created", "the durable node mutation still occurred");
     assert.equal(partial.complete, false, "a failed requested link must prevent a complete result");
     assert.equal(partial.linkRejected?.length, 1);
-    assert.equal(partial.linkRejected?.[0]?.toSlug, missingSlug);
-    assert.match(partial.linkRejected?.[0]?.reason ?? "", /not found|missing|unknown/i);
+    const rejectedLink = partial.linkRejected?.find((entry) => entry.toSlug === phantomSlug);
+    assert.ok(rejectedLink, "linkRejected must identify the exact requested target structurally");
+    assert.match(rejectedLink.reason, /not found|missing|unknown/i);
     const read = await store.read({ nodeId: partial.node.id }, context, { trackAccess: false });
     assert.ok(read, "the result must identify the partial node that actually landed");
   });

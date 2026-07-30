@@ -12,6 +12,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test-memory:
+    name: test (memory driver)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test (node:test, memory store)
+        run: TROVE_STORE=memory npm test
+        env:
+          DATABASE_URL: ""
+
   test:
     name: test
     runs-on: ubuntu-latest
