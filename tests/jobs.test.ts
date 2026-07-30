@@ -1,6 +1,8 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { suiteStore, closeStore, isolateDatabase } from "./helpers.js";
+import { enqueueEmbeddingDrainFollowUp } from "../src/jobWorker.js";
+import type { GraphJob } from "../src/graphCore.js";
 
 // This suite asserts on queue state, and `runJob({})` claims whichever job is
 // next — including a parallel sibling's. Own database, own queue.
@@ -78,5 +80,42 @@ describe("jobs", () => {
     assert.equal(second.id, first.id, "a join returns the existing job");
 
     await store.runJob({ jobId: first.id }, context); // drain: leave nothing pending
+  });
+
+  it("enqueueEmbeddingDrainFollowUp continues an unfinished drain in its owner scope", async () => {
+    const drainJob = (ownerId: string | null, missing: number, embedded: number): GraphJob => ({
+      id: `drain-${stamp}`,
+      kind: "refresh_embeddings",
+      status: "succeeded",
+      payload: ownerId ? { ownerId } : {},
+      result: {
+        provider: "fake", model: "fake", status: "refreshed", ownerId,
+        missingBefore: { nodeRevisions: missing, textUnits: 0 },
+        embedded: { nodeRevisions: embedded, textUnits: 0 },
+      },
+      dedupeKey: null, error: null, attempts: 1, priority: 40,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+    });
+
+    // Unfinished, owner-scoped: follow-up queued with the owner's dedupe key.
+    const queued = await enqueueEmbeddingDrainFollowUp(store, drainJob(`owner-${stamp}`, 10, 4), context);
+    assert.equal(queued, true);
+    const followUps = (await store.jobs({ kind: "refresh_embeddings", limit: 100 }))
+      .filter((job) => String(job.dedupeKey).endsWith(`:owner-${stamp}`));
+    assert.equal(followUps.length, 1, "exactly one owner-scoped follow-up");
+    assert.equal((followUps[0]!.payload as Record<string, unknown>).ownerId, `owner-${stamp}`);
+
+    // Finished drain: no follow-up.
+    assert.equal(await enqueueEmbeddingDrainFollowUp(store, drainJob(`owner-${stamp}`, 4, 4), context), false);
+
+    // Global drain: global dedupe key, no ownerId in the payload.
+    await store.enqueueJob({ kind: "refresh_embeddings", payload: { reason: "graph_mutation" }, priority: 40, dedupeKey: "maintenance:refresh_embeddings" }, context);
+    const globalQueued = await enqueueEmbeddingDrainFollowUp(store, drainJob(null, 10, 4), context);
+    assert.equal(globalQueued, true);
+    const globals = (await store.jobs({ kind: "refresh_embeddings", limit: 100 }))
+      .filter((job) => job.dedupeKey === "maintenance:refresh_embeddings" && job.status === "pending");
+    assert.equal(globals.length, 1, "the global follow-up dedupes onto the one pending row");
+    assert.equal((globals[0]!.payload as Record<string, unknown>).ownerId, undefined);
   });
 });
