@@ -1036,6 +1036,43 @@ disadvantage is the cheapest available guard against another single-system
 artifact. The reasoning for deleting it — LongMemEval is the wrong *shape* —
 still holds for publication; it did not hold for calibration.
 
+**Track 3 design note — the competitor calibration arm (scaffolded 2026-07-30).**
+Added as a third arm behind `TROVE_THESIS_COMPETITOR=mem0` in
+`bench/thesis/run.ts` (logic in `bench/thesis/competitor.ts`). Default runs are
+unchanged: unset the flag and the harness is the same two-arm (trove/flat) path,
+needing no third-party key.
+
+- **Provider: Mem0, via the OSS `mem0ai/oss` library — not the Mem0 cloud
+  Platform.** Justified from `FINDINGS.md`: Mem0 is the *only* competitor the
+  doc ever attempted (§1); Zep/Supermemory were never run (unfunded keys, "free
+  tiers likely will not cover a full run"). Mem0's documented blocker was
+  specifically the cloud Platform's async *indexing* phase never converging
+  (§1, "provider-side latency … not anything fixable here"). The OSS `Memory`
+  class sidesteps that: synchronous extraction into a local in-memory vector
+  store, driven by the `OPENAI_API_KEY` the harness already requires. So the arm
+  needs *no funded third-party key* — the single most-runnable choice.
+- **FINDINGS.md quirks handled:** (1) cloud indexing non-convergence — avoided
+  by using OSS local `Memory`; (2) silent extraction failures (§Secondary) —
+  every failed `add` is counted and warned; (3) judge/prompt contamination (the
+  Zep lesson, §Secondary) — the arm supplies *retrieval context only* and is
+  answered/graded by the harness's own ANSWER/JUDGE prompts, exactly like flat;
+  (4) slow sequential ingest (~169 s/question) — disclosed, with an opt-out for
+  the expensive symmetric-haystack pass.
+- **What a calibration pass WOULD tell us:** whether `flat` is anomalously
+  strong on this corpus. If an independent memory system *also* trails flat
+  top-k here, that points at the instrument/corpus shape (#31's fear), not at
+  Trove. **What it would NOT tell us:** a publishable Trove-vs-Mem0 ranking — our
+  prompt, our judge, our corpus shape (which FINDINGS argues is the wrong shape
+  for these systems), a bespoke adapter on each side. Instrument check, not a
+  number.
+- **External dependency to actually run (disclosed):** `npm i mem0ai` (kept out
+  of `package.json` so the default path is untouched) and `OPENAI_API_KEY`
+  (already required; Mem0 OSS reuses it — no Mem0 cloud key, no Qdrant, no extra
+  network service). Symmetric haystack (`TROVE_THESIS_COMPETITOR_DISTRACTORS=1`,
+  default) ingests all 7,202 distractors into Mem0 = thousands of extra LLM
+  extraction calls; set it to `0` for a cheap wiring smoke whose number is
+  explicitly non-comparable.
+
 **Track 4 — the question none of this answers.** #29: every number here grades
 question-answering over a fixed corpus, while Trove's actual job is being the
 memory behind an agent doing work. Three of its four real jobs are not accuracy

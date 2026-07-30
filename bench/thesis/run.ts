@@ -48,6 +48,15 @@ import { cosineSimilarity, createEmbeddingProviderFromEnv } from "../../src/embe
 import { createReconcileJudgeFromEnv } from "../../src/reconcile.js";
 import { enqueueEmbeddingDrainFollowUp } from "../../src/jobWorker.js";
 import { THESIS_ITEMS, validateDataset, type ThesisItem, type ThesisShape } from "./dataset.js";
+// Track 3 — competitor CALIBRATION arm (instrument check, NOT a ranking). Inert
+// unless TROVE_THESIS_COMPETITOR is set, so the default two-arm path is
+// unchanged and needs no third-party key. See competitor.ts for the full note.
+import {
+  COMPETITOR_ENABLED,
+  COMPETITOR_DISTRACTORS,
+  createCompetitorProvider,
+  type CompetitorProvider,
+} from "./competitor.js";
 
 const DATABASE_URL = process.env.TROVE_THESIS_DATABASE_URL ?? process.env.DATABASE_URL ?? "";
 const MODEL = process.env.TROVE_THESIS_MODEL ?? "gpt-4o";
@@ -374,6 +383,11 @@ async function main(): Promise<void> {
   if (items.length === 0) throw new Error(`TROVE_THESIS_ITEM_FILTER matched nothing: ${ITEM_FILTER.join(", ")}`);
   if (items.length !== THESIS_ITEMS.length) console.log(`Item filter: running ${items.length}/${THESIS_ITEMS.length} items`);
 
+  // Track 3 calibration arm — created only when explicitly enabled, so the
+  // trove/flat path below is untouched by default. Declared out here so `finally`
+  // can always close it.
+  let competitor: CompetitorProvider | null = null;
+
   try {
     const { rows } = await pool.query(
       `insert into app_user (clerk_user_id, email, display_name, role, status)
@@ -386,6 +400,20 @@ async function main(): Promise<void> {
       requestId: `thesis-${runId}`,
       ownerId: String(rows[0].id),
     };
+
+    if (COMPETITOR_ENABLED) {
+      competitor = await createCompetitorProvider({ runId, topK: TOP_K });
+      console.log(
+        `\n=== Track 3 CALIBRATION arm ENABLED: ${competitor.name} — INSTRUMENT CHECK, NOT A RANKING ===\n` +
+          "    Its number is not publishable; it exists only to test whether `flat` is anomalously strong.\n" +
+          (COMPETITOR_DISTRACTORS
+            ? "    Symmetric haystack ON: the competitor will also ingest every distractor — thousands of extra\n" +
+              "    LLM extraction calls (see FINDINGS.md §Secondary, ~169 s/question). Set\n" +
+              "    TROVE_THESIS_COMPETITOR_DISTRACTORS=0 for a cheap wiring smoke (non-comparable number).\n"
+            : "    WARNING: TROVE_THESIS_COMPETITOR_DISTRACTORS=0 — competitor sees a SMALLER world than\n" +
+              "    trove/flat. Its number is NOT comparable; treat this as a wiring smoke only.\n"),
+      );
+    }
 
     // --- ingest: one shared corpus, so every item distracts every other -------
     console.log(`Ingesting ${items.length} items into corpus ${runId}...`);
@@ -402,6 +430,17 @@ async function main(): Promise<void> {
       perItemSources.push({ item, texts: item.sessions });
     }
     const itemUnitCount = flatUnits.length;
+
+    // Track 3: feed the SAME item sessions into the competitor. Separate pass so
+    // the trove/flat ingest loop above stays untouched.
+    if (competitor) {
+      console.log(`Ingesting ${items.length} items' sessions into ${competitor.name} (calibration arm)...`);
+      for (const item of items) {
+        for (const [index, text] of item.sessions.entries()) {
+          await competitor.ingest(`${item.id}-s${index + 1}`, text);
+        }
+      }
+    }
 
     // --- trove: distill into linked atoms ------------------------------------
     console.log("Distilling into linked atoms...");
@@ -475,6 +514,17 @@ async function main(): Promise<void> {
       await drainJobs(store, ctx, "refresh_embeddings");
     }
 
+    // Track 3: pad the competitor's haystack symmetrically (comparability
+    // requires it). Expensive — one LLM extraction per distractor — hence the
+    // opt-out. Bounded concurrency; failures are counted inside ingest().
+    if (competitor && COMPETITOR_DISTRACTORS && distractors.length > 0) {
+      console.log(`Ingesting ${distractors.length} distractors into ${competitor.name} (symmetric haystack; this is the slow part)...`);
+      const provider = competitor;
+      await mapWithConcurrency(distractors, 4, async (note) => {
+        await provider.ingest(`distractor:${note.title}`, note.text);
+      });
+    }
+
     console.log(
       `Corpus: ${itemUnitCount} item units + ${flatUnits.length - itemUnitCount} distractor units = ${flatUnits.length} text units; ` +
         `${itemAtomCount} item atoms + ${distractors.length} distractor atoms; ${hubs.size} hubs`,
@@ -496,6 +546,9 @@ async function main(): Promise<void> {
 
     // --- ask both -------------------------------------------------------------
     const results = new Map<"trove" | "flat", Outcome[]>([["trove", []], ["flat", []]]);
+    // Track 3 outcomes kept SEPARATE from the trove/flat map so report() and the
+    // two arms it prints are literally untouched. Populated only when enabled.
+    const competitorResults: Outcome[] = [];
     for (const item of items) {
       // Time each arm's RETRIEVAL alone (backlog #30) — the LLM answer/judge
       // calls that follow are identical across arms and dominated by network, so
@@ -533,12 +586,38 @@ async function main(): Promise<void> {
           retrievalMs,
         });
       }
+
+      // Track 3 arm: same question, same ANSWER_PROMPT, same JUDGE. The competitor
+      // supplies retrieval context ONLY (like flat) — it never touches answering
+      // or grading, which keeps the calibration apples-to-apples (FINDINGS.md's
+      // Zep judge-override lesson).
+      if (competitor) {
+        const compStart = Date.now();
+        const compContext = await competitor.search(item.question);
+        const compMs = Date.now() - compStart;
+        const compAnswer = (await chat(MODEL, ANSWER_PROMPT(item.question, compContext))).trim();
+        const compVerdict = JSON.parse(
+          await chat(JUDGE_MODEL, JUDGE_PROMPT(item.question, item.answers, compAnswer), true),
+        ) as { correct?: boolean };
+        competitorResults.push({
+          id: item.id,
+          shape: item.shape,
+          correct: compVerdict.correct === true,
+          coverage: bridgeCoverage(item, compContext),
+          answer: compAnswer,
+          contextTokens: estimateTokens(compContext),
+          retrievalMs: compMs,
+        });
+      }
+
       process.stdout.write(".");
     }
     console.log("\n");
 
     report(results);
+    if (competitor) reportCompetitor(competitor, competitorResults, results);
   } finally {
+    if (competitor) await competitor.close();
     await store.close();
     await pool.end();
   }
@@ -632,6 +711,59 @@ function report(results: Map<"trove" | "flat", Outcome[]>): void {
       console.log(`  ${row.id} [cov ${(row.coverage * 100).toFixed(0)}%] -> ${row.answer.slice(0, 90)}`);
     }
   }
+}
+
+/**
+ * Track 3 report — deliberately its OWN block, banner-wrapped, so a competitor
+ * figure can never be mistaken for the trove/flat result printed above. This is
+ * an instrument check: it says whether `flat` is anomalously strong on this
+ * corpus, NOT how Trove ranks against Mem0. No number here is publishable.
+ */
+function reportCompetitor(
+  competitor: CompetitorProvider,
+  rows: Outcome[],
+  troveFlat: Map<"trove" | "flat", Outcome[]>,
+): void {
+  const pct = (n: number, d: number) => (d === 0 ? "  -  " : `${((n / d) * 100).toFixed(0).padStart(3)}%`);
+  const mean = (xs: Outcome[], pick: (r: Outcome) => number) =>
+    xs.length === 0 ? 0 : xs.reduce((sum, r) => sum + pick(r), 0) / xs.length;
+  const acc = (xs: Outcome[]) => pct(xs.filter((r) => r.correct).length, xs.length);
+
+  console.log("\n==================== TRACK 3: CALIBRATION / INSTRUMENT CHECK ====================");
+  console.log(`Provider: ${competitor.name} (mem0ai OSS). NOT A RANKING — do not publish this number.`);
+  if (!COMPETITOR_DISTRACTORS) {
+    console.log("Distractors OFF: competitor saw a SMALLER haystack than trove/flat — number NOT comparable.");
+  }
+  if (competitor.ingestFailures > 0) {
+    console.log(`WARNING: ${competitor.ingestFailures} competitor ingest(s) failed — its corpus is under-populated (disclosed, not hidden).`);
+  }
+
+  console.log("\nsystem       accuracy   ctx-tokens (mean)   retrieval-ms (mean)");
+  console.log("------------------------------------------------------------------");
+  const trove = troveFlat.get("trove") ?? [];
+  const flat = troveFlat.get("flat") ?? [];
+  for (const [name, xs] of [["trove", trove], ["flat", flat], [competitor.name, rows]] as const) {
+    console.log(
+      `${name.padEnd(11)}  ${acc(xs)}      ${String(Math.round(mean(xs, (r) => r.contextTokens))).padStart(10)}          ${mean(xs, (r) => r.retrievalMs).toFixed(0).padStart(8)}`,
+    );
+  }
+
+  const shapes: ThesisShape[] = ["bridge", "chain", "supersede", "control"];
+  console.log("\nshape       n    " + competitor.name + "-acc");
+  console.log("----------------------------");
+  for (const shape of shapes) {
+    const xs = rows.filter((r) => r.shape === shape);
+    if (xs.length === 0) continue;
+    console.log(`${shape.padEnd(10)} ${String(xs.length).padStart(2)}    ${acc(xs)}`);
+  }
+
+  console.log(
+    "\nReading: the calibration question is whether `flat` is unusually strong here.\n" +
+      `If ${competitor.name} ALSO trails flat, that points at the corpus/instrument, not at Trove.\n` +
+      "This does NOT establish a Trove-vs-" + competitor.name + " ranking (our prompt, our judge, our\n" +
+      "corpus shape, a bespoke adapter on each side). See competitor.ts for the full caveats.",
+  );
+  console.log("================================================================================\n");
 }
 
 main().catch((error) => {
