@@ -360,6 +360,8 @@ export type GraphLintReport = {
 
 export type RecallAtom = {
   node: GraphNode;
+  /** Whether this atom is backed by a resolvable text-unit citation or is explicitly inference. */
+  provenance: "citation" | "agent_inference";
   score: number;
   hops: number;
   tokens: number;
@@ -419,6 +421,11 @@ export type GraphStore = {
    * (default 5) units per node.
    */
   getEvidenceForNodes(nodeIds: string[], context?: GraphOperationContext, opts?: { query?: string; perNodeLimit?: number }): MaybePromise<Map<string, TextUnit[]>>;
+  /**
+   * Return node ids with at least one attached evidence annotation, including
+   * source-level annotations that have no text unit to pack.
+   */
+  evidenceNodeIds(nodeIds: string[], context?: GraphOperationContext): MaybePromise<Set<string>>;
   /**
    * Resolve quoted span text to the text unit(s) containing it (backlog #9a —
    * cite by quote). Exact matches contain the quote verbatim
@@ -615,15 +622,16 @@ function renderRecallAtom(
   node: GraphNode,
   hops: number,
   remainingTokens: number,
-  options: { primaryMatch?: boolean; maxContentChars?: number; supersededByTitle?: string } = {},
+  options: { primaryMatch?: boolean; maxContentChars?: number; supersededByTitle?: string; agentInference?: boolean } = {},
 ): { block: string; body: string; contentTruncated: boolean } {
   const origin = hops === 0 ? "match" : "linked";
   const supersedeMark = options.supersededByTitle ? ` — SUPERSEDED by ${options.supersededByTitle}` : "";
+  const inferenceMark = options.agentInference ? " — AGENT INFERENCE" : "";
   const headerLines = [
     // The updated date anchors each atom in time: temporal questions ("what did
     // I buy 10 days ago?") are unanswerable from a dateless pack (bench finding —
     // the compare run's atoms carried no dates and temporal-reasoning scored 0%).
-    `## ${node.title} [${node.type}/${origin}] (${node.slug}) — updated ${node.updatedAt.slice(0, 10)}${supersedeMark}`,
+    `## ${node.title} [${node.type}/${origin}] (${node.slug}) — updated ${node.updatedAt.slice(0, 10)}${supersedeMark}${inferenceMark}`,
     node.summary ?? "",
   ].filter(Boolean);
   const header = headerLines.join("\n") + "\n";
@@ -635,13 +643,14 @@ function renderRecallAtom(
   if (raw && !isPlaceholderContent(raw) && budgetForContent > 0) {
     const giant = raw.length > GIANT_CONTENT_CHARS;
     let maxChars: number;
-    if (hops > 0) {
-      maxChars = Math.min(raw.length, 600, budgetForContent * 4);
-    } else if (giant) {
+    if (giant) {
       maxChars = Math.min(raw.length, GIANT_PACK_CHARS, budgetForContent * 4);
     } else if (options.primaryMatch) {
-      // Best lexical hit: pack as much as budget allows (Scribe-depth runbook).
+      // Primary lexical hits and fidelity-floor successors get a full-body
+      // allocation. The latter preserves current truth without reranking.
       maxChars = Math.min(raw.length, PRIMARY_PACK_CHARS, budgetForContent * 4);
+    } else if (hops > 0) {
+      maxChars = Math.min(raw.length, 600, budgetForContent * 4);
     } else {
       // Other hop-0 hits: leave room for the primary page + neighbors.
       maxChars = Math.min(raw.length, 4_000, Math.floor(budgetForContent * 4 * 0.35));
@@ -793,6 +802,31 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
   // A node a newer fact supersedes is marked in its header, so the reader
   // prefers the successor instead of weighing two co-equal "truths".
   const superseded = await store.supersededBy(ordered.map((candidate) => candidate.node.id), context);
+  // Supersession is annotation-first, not a ranking signal. Preserve `ordered`
+  // exactly, but transfer body fidelity toward an in-pack successor: a stale
+  // atom gets at most a linked-note teaser, while its successor is eligible
+  // for the full-body slot even when graph traversal found it at hops > 0.
+  const candidateIds = new Set(ordered.map((candidate) => candidate.node.id));
+  const fidelityFloorSuccessorIds = new Set(
+    [...superseded.values()]
+      .map((entry) => entry.byNodeId)
+      .filter((nodeId) => candidateIds.has(nodeId)),
+  );
+  // Provenance is part of every atom even when the caller omits evidence from
+  // the wire response. One batched lookup keeps the mark resolvable without
+  // introducing a per-node read.
+  const evidenceByNode = ordered.length > 0
+    ? await store.getEvidenceForNodes(
+      ordered.map((candidate) => candidate.node.id),
+      context,
+      { query: input.query, perNodeLimit: 5 },
+    )
+    : new Map<string, TextUnit[]>();
+  const evidenceNodeIds = ordered.length > 0
+    ? await store.evidenceNodeIds(ordered.map((candidate) => candidate.node.id), context)
+    : new Set<string>();
+  const contextIndexByNodeId = new Map<string, number>();
+  const candidateByNodeId = new Map(ordered.map((candidate) => [candidate.node.id, candidate]));
 
   // Phase 1: pack atom bodies/teasers for every candidate in rank order. No
   // per-node store.read — candidates from search/expansion already carry
@@ -804,7 +838,10 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
       truncated = true;
       break;
     }
-    const isPrimary = primary?.node.id === candidate.node.id;
+    const hasInPackSuccessor = superseded.has(candidate.node.id);
+    const isPrimary =
+      (primary?.node.id === candidate.node.id && !hasInPackSuccessor) ||
+      fidelityFloorSuccessorIds.has(candidate.node.id);
     const headerEstimate = estimateTokens(`${candidate.node.title}\n${candidate.node.summary ?? ""}`) + 4;
     const contentRoomTokens = Math.max(0, Math.floor(
       (wireLimit - spentTokens - wireExtras - headerEstimate - ATOM_META_TOKENS) / 2,
@@ -814,17 +851,24 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     let packed = false;
     // First try the slice the wire room allows; on overflow degrade to
     // header-only before skipping the candidate entirely.
-    for (const maxContentChars of [contentRoomTokens * 4, 0]) {
+    const contentCap = hasInPackSuccessor
+      ? Math.min(contentRoomTokens * 4, 600)
+      : contentRoomTokens * 4;
+    for (const maxContentChars of [contentCap, 0]) {
       const supersededByTitle = superseded.get(candidate.node.id)?.byTitle;
+      const provenance: RecallAtom["provenance"] =
+        evidenceNodeIds.has(candidate.node.id) ? "citation" : "agent_inference";
       const rendered = renderRecallAtom(candidate.node, candidate.hops, remaining, {
         primaryMatch: isPrimary,
         maxContentChars,
         ...(supersededByTitle ? { supersededByTitle } : {}),
+        ...(provenance === "agent_inference" ? { agentInference: true } : {}),
       });
       const atom: RecallAtom = {
         // The wire atom carries the packed slice the budgeter chose, never the
         // untruncated body; contentTruncated says whether more exists via read.
         node: { ...candidate.node, content: rendered.body },
+        provenance,
         score: candidate.score,
         hops: candidate.hops,
         tokens: estimateTokens(rendered.block),
@@ -835,6 +879,7 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
       if (spentTokens + blockCost <= input.tokenBudget && spentTokens + blockCost + wireExtras + extra <= wireLimit) {
         spentTokens += blockCost;
         wireExtras += extra;
+        contextIndexByNodeId.set(candidate.node.id, contextParts.length);
         contextParts.push(rendered.block);
         packedNodeIds.add(candidate.node.id);
         atoms.push(atom);
@@ -843,6 +888,63 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
       }
     }
     if (!packed) truncated = true;
+  }
+
+  // Annotation-first supersession still needs a real fidelity floor. Packing
+  // order and rank remain untouched; if both versions made the pack, trim the
+  // stale body's achieved fraction to no more than the successor's fraction.
+  // This can only return budget, never consume more or promote either atom.
+  // Iterate to a fixed point so A→B→C chains are independent of edge/map
+  // insertion order. Every change only shortens a stale body, so at most one
+  // propagation per packed atom is needed.
+  for (let pass = 0; pass < atoms.length; pass += 1) {
+    let changed = false;
+    for (const [staleNodeId, successor] of superseded) {
+      const staleIndex = atoms.findIndex((atom) => atom.node.id === staleNodeId);
+      const successorIndex = atoms.findIndex((atom) => atom.node.id === successor.byNodeId);
+      if (staleIndex < 0 || successorIndex < 0) continue;
+
+      const staleCandidate = candidateByNodeId.get(staleNodeId);
+      const successorCandidate = candidateByNodeId.get(successor.byNodeId);
+      if (!staleCandidate || !successorCandidate) continue;
+      const staleContent = staleCandidate.node.content ?? "";
+      const successorContent = successorCandidate.node.content ?? "";
+      const staleFullLength = isPlaceholderContent(staleContent)
+        ? 0
+        : staleContent.length;
+      const successorFullLength = isPlaceholderContent(successorContent)
+        ? 0
+        : successorContent.length;
+      const staleAtom = atoms[staleIndex];
+      const successorAtom = atoms[successorIndex];
+      if (!staleAtom || !successorAtom) continue;
+      const staleFidelity = staleFullLength === 0 ? 1 : (staleAtom.node.content?.length ?? 0) / staleFullLength;
+      const successorFidelity =
+        successorFullLength === 0 ? 1 : (successorAtom.node.content?.length ?? 0) / successorFullLength;
+      if (staleFidelity <= successorFidelity) continue;
+
+      const oldAtom = staleAtom;
+      const maxContentChars = Math.floor(staleFullLength * successorFidelity);
+      const rendered = renderRecallAtom(staleCandidate.node, staleCandidate.hops, input.tokenBudget, {
+        maxContentChars,
+        supersededByTitle: successor.byTitle,
+        ...(oldAtom.provenance === "agent_inference" ? { agentInference: true } : {}),
+      });
+      const replacement: RecallAtom = {
+        ...oldAtom,
+        node: { ...oldAtom.node, content: rendered.body },
+        tokens: estimateTokens(rendered.block),
+        contentTruncated: rendered.contentTruncated,
+      };
+      spentTokens += replacement.tokens - oldAtom.tokens;
+      wireExtras += estimateTokens(JSON.stringify(replacement)) - estimateTokens(JSON.stringify(oldAtom));
+      atoms[staleIndex] = replacement;
+      const contextIndex = contextIndexByNodeId.get(staleNodeId);
+      if (contextIndex !== undefined) contextParts[contextIndex] = rendered.block;
+      truncated = truncated || rendered.contentTruncated;
+      changed = true;
+    }
+    if (!changed) break;
   }
 
   // Phase 2: evidence, only after every atom had its body/teaser allocation —
@@ -867,16 +969,6 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
   };
 
   if (input.includeEvidence) {
-    const evidenceNodeIds = ordered
-      .filter((candidate) =>
-        packedNodeIds.has(candidate.node.id) &&
-        candidate.hops === 0 &&
-        (candidate.node.content?.length ?? 0) <= GIANT_CONTENT_CHARS)
-      .map((candidate) => candidate.node.id);
-    const evidenceByNode = evidenceNodeIds.length > 0
-      ? await store.getEvidenceForNodes(evidenceNodeIds, context, { query: input.query, perNodeLimit: 5 })
-      : new Map<string, TextUnit[]>();
-
     for (const candidate of ordered) {
       if (!packedNodeIds.has(candidate.node.id)) continue;
       for (const item of evidenceByNode.get(candidate.node.id) ?? []) {
@@ -931,8 +1023,13 @@ function enforceRecallWireBudget(result: RecallResult): void {
   if (estimateTokens(JSON.stringify(result)) <= limit) return;
 
   result.truncated = true;
+  const fidelityFloorSuccessorIds = new Set(
+    result.edges
+      .filter((edge) => edge.predicate === "supersedes")
+      .map((edge) => edge.fromNodeId),
+  );
   for (const atom of result.atoms) {
-    if (atom.hops === 0) continue;
+    if (atom.hops === 0 || fidelityFloorSuccessorIds.has(atom.node.id)) continue;
     const content = atom.node.content ?? "";
     if (content.length > 240) {
       atom.node.content = `${content.slice(0, 240)}\n…`;

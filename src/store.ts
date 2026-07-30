@@ -475,6 +475,15 @@ export class InMemoryGraphStore implements GraphStore {
     return evidence;
   }
 
+  evidenceNodeIds(nodeIds: string[]): Set<string> {
+    const requested = new Set(nodeIds);
+    return new Set(
+      [...this.annotations.values()].flatMap((annotation) =>
+        annotation.nodeId && requested.has(annotation.nodeId) ? [annotation.nodeId] : [],
+      ),
+    );
+  }
+
   resolveTextQuote(input: { quote: string; sourceId?: string; textUnitId?: string; limit?: number }): TextQuoteMatch[] {
     const limit = Math.max(1, Math.min(25, Math.trunc(input.limit ?? 8)));
     const needle = input.quote.toLowerCase();

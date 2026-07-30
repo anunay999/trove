@@ -4,6 +4,8 @@ import { UnknownEvidenceReferenceError } from "./graphCore.js";
 import { slugify } from "./slug.js";
 
 export type RememberResult = {
+  /** True only when every requested evidence ref and link completed without a surfaced failure. */
+  complete: boolean;
   action: "created" | "updated";
   node: GraphNode;
   /** Near-matches that were NOT merged into — surfaced so the agent can retarget with `slug` if the dedupe missed. */
@@ -26,6 +28,8 @@ export type RememberResult = {
    * construction. Present only when at least one ref was unserved.
    */
   evidenceUnserved?: Array<{ sourceId: string | null; textUnitId: string | null; reason: string }>;
+  /** Requested links that could not be attached after the node mutation landed. */
+  linkRejected?: Array<{ toSlug: string; predicate: string; reason: string }>;
 };
 
 export type ForgetResult = {
@@ -185,6 +189,7 @@ export async function remember(
   // `evidenceUnserved` — attached (non-breaking), but visibly suspect.
   const evidenceRejected: NonNullable<RememberResult["evidenceRejected"]> = [];
   const evidenceUnserved: NonNullable<RememberResult["evidenceUnserved"]> = [];
+  const linkRejected: NonNullable<RememberResult["linkRejected"]> = [];
   const attachEvidence = async (nodeId: string): Promise<void> => {
     for (const evidence of input.evidence ?? []) {
       if (evidence.quote) {
@@ -229,6 +234,20 @@ export async function remember(
         continue;
       }
 
+      // A source identifies a document, not the exact span supporting this
+      // claim. Refuse to turn a bare source id into a citation: the caller can
+      // repair it with a served text-unit id or with the span's own words.
+      if (evidence.sourceId && !evidence.textUnitId) {
+        evidenceRejected.push({
+          sourceId: evidence.sourceId,
+          textUnitId: null,
+          reason:
+            `source ${evidence.sourceId} does not identify an exact supporting span. ` +
+            "Add a textUnitId from served output, or cite { quote } (optionally narrowed with sourceId).",
+        });
+        continue;
+      }
+
       try {
         await store.annotate({
           motivation: "supports",
@@ -267,10 +286,40 @@ export async function remember(
       }
     }
   };
-  const finish = (result: RememberResult): RememberResult => ({
+  const attachLinks = async (nodeId: string): Promise<void> => {
+    for (const link of input.links ?? []) {
+      const predicate = link.predicate ?? "relates_to";
+      try {
+        const attached = await store.link({
+          fromNodeId: nodeId,
+          toSlug: link.toSlug,
+          predicate,
+          weight: 1,
+        }, context);
+        if (!attached) {
+          linkRejected.push({
+            toSlug: link.toSlug,
+            predicate,
+            reason: `Link target not found: ${link.toSlug}. Remember the target first, then retry this link.`,
+          });
+        }
+      } catch (error) {
+        linkRejected.push({
+          toSlug: link.toSlug,
+          predicate,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  };
+  const finish = (
+    result: Omit<RememberResult, "complete" | "evidenceRejected" | "evidenceUnserved" | "linkRejected">,
+  ): RememberResult => ({
     ...result,
+    complete: evidenceRejected.length === 0 && evidenceUnserved.length === 0 && linkRejected.length === 0,
     ...(evidenceRejected.length > 0 ? { evidenceRejected } : {}),
     ...(evidenceUnserved.length > 0 ? { evidenceUnserved } : {}),
+    ...(linkRejected.length > 0 ? { linkRejected } : {}),
   });
 
   if (!target) {
@@ -280,8 +329,9 @@ export async function remember(
       summary: input.summary,
       content: input.content,
       evidence: [],
-      links: (input.links ?? []).map((link) => ({ toSlug: link.toSlug, predicate: link.predicate ?? "relates_to" })),
+      links: [],
     }, context);
+    await attachLinks(node.id);
     await attachEvidence(node.id);
     return finish({ action: "created", node, similar });
   }
@@ -302,18 +352,7 @@ export async function remember(
     throw new Error(`remember: update of ${target.id} kept conflicting; re-read and retry.`);
   }
 
-  for (const link of input.links ?? []) {
-    try {
-      await store.link({
-        fromNodeId: target.id,
-        toSlug: link.toSlug,
-        predicate: link.predicate ?? "relates_to",
-        weight: 1,
-      }, context);
-    } catch {
-      // Missing link targets are non-fatal; the belief update already landed.
-    }
-  }
+  await attachLinks(target.id);
   await attachEvidence(target.id);
 
   return finish({ action: "updated", node: updated, similar });

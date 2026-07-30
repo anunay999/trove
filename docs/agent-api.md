@@ -66,9 +66,9 @@ Visibility is tiered by credential scope: **core** tools are shown to every cred
 
 - Input: `title`, `type`, `summary`, optional `content`, `evidence`, `links`, and optional `nodeId`/`slug` to force a target
 - One write door. Exact title/slug match → new revision of that node (optimistic concurrency handled server-side); no match → new node.
-- Output: `action` (`created` | `updated`), the node, and `similar` — near-matches it did NOT merge into, scored by trigram title similarity. Check it; re-call with `slug` if the dedupe missed.
-- Evidence refs: prefer `{ quote: "the span's own words" }` — the server resolves it to a text unit (verbatim first, then term-containment fuzzy) and stores a W3C `TextQuoteSelector`. Raw `{ textUnitId }` / `{ sourceId }` from an ingest/recall/grep/read response still work. Refs that resolve nowhere (or match ambiguously) come back in `evidenceRejected` with repairable reasons; attached refs the session was never served come back in `evidenceUnserved`; nothing is silently dropped.
-- Cite evidence or say it is agent inference in the summary. This is enforced by the `missing_evidence` lint check (detective), not rejected at write time.
+- Output: `action` (`created` | `updated`), `complete`, the node, and `similar` — near-matches it did NOT merge into, scored by trigram title similarity. `action` reports the durable node mutation; `complete: false` means at least one requested attachment was partial. Check it and the detail arrays; re-call with `slug` if the dedupe missed.
+- Evidence refs: prefer `{ quote: "the span's own words" }` — the server resolves it to a text unit (verbatim first, then term-containment fuzzy) and stores a W3C `TextQuoteSelector`. Raw `{ textUnitId }` from an ingest/recall/grep/read response still works; `sourceId` may narrow quote resolution but is not an exact-span citation by itself. Refs that resolve nowhere (or match ambiguously) come back in `evidenceRejected`; attached refs the session was never served come back in `evidenceUnserved`; failed requested links come back in `linkRejected`. Each has a repairable reason and makes `complete: false`.
+- Cite evidence or say it is agent inference in the summary. Recall explicitly marks evidence-free atoms `AGENT INFERENCE`; `missing_evidence` remains the detective lint for reviewing those notes.
 
 `connect`
 
