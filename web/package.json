@@ -17,6 +17,7 @@
     "@fontsource-variable/inter": "^5.2.8",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "d3-force-3d": "^3.0.6",
     "dompurify": "^3.4.11",
     "lucide-react": "^1.23.0",
     "marked": "^18.0.5",

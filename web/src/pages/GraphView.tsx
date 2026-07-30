@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D from "react-force-graph-2d";
+import { forceCollide, forceX, forceY } from "d3-force-3d";
 import { Skeleton } from "@/components/ui/skeleton";
 import { plainText, renderDocument } from "@/lib/markdown";
 import { typeColor } from "@/lib/viz";
@@ -126,6 +127,36 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
       })),
     };
   }, [snapshot]);
+
+  // Obsidian-style balance. The library's default forces give a stringy,
+  // unevenly-clumped sprawl: hubs fling their leaves into long tendrils and
+  // nothing keeps orphans from drifting off. We reshape the simulation into a
+  // contained, evenly-spaced disc with four changes — a capped-range charge so
+  // repulsion stays local, loose link springs, a collision force for even
+  // spacing (the core of the look), and gentle gravity toward the origin so
+  // tendrils and orphans stay in the frame.
+  useEffect(() => {
+    const graph = graphRef.current;
+    if (!graph || data.nodes.length === 0) return;
+    const radiusOf = (node: VizNode) => 2.5 + Math.sqrt((node.degree ?? 0) + 1) * 1.3;
+
+    graph
+      .d3Force("charge")
+      ?.strength((node: VizNode) => -(40 + (node.degree ?? 0) * 5))
+      .distanceMax(300)
+      .theta(0.9);
+    graph.d3Force("link")?.distance(42).strength(0.4);
+    graph.d3Force(
+      "collide",
+      forceCollide().radius((node: VizNode) => radiusOf(node) + 6).strength(0.9).iterations(2),
+    );
+    graph.d3Force("x", forceX(0).strength(0.05));
+    graph.d3Force("y", forceY(0).strength(0.05));
+
+    // Re-shape from the new forces, and let onEngineStop refit to the result.
+    didFitRef.current = false;
+    graph.d3ReheatSimulation();
+  }, [data]);
 
   const nodeById = useMemo(() => new Map(data.nodes.map((node) => [node.id, node])), [data]);
   const selected = selectedId ? nodeById.get(selectedId) ?? null : null;
@@ -266,7 +297,8 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
           linkWidth={1}
           linkDirectionalArrowLength={2.5}
           linkDirectionalArrowRelPos={1}
-          cooldownTicks={120}
+          d3VelocityDecay={0.45}
+          cooldownTicks={140}
           onEngineStop={() => {
             if (!didFitRef.current && graphRef.current) {
               didFitRef.current = true;
