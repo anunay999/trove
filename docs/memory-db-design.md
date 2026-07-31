@@ -76,11 +76,12 @@ Ordered by leverage; the schema is already ~70% of the way there.
 > the write path (2) and claim embeddings (5) remain open.
 
 > Shipped vs designed (2026-07-19): hybrid retrieval fuses lexical and semantic rankings
-> with RRF. Activation ranking is a simplified ACT-R-style heuristic (recency + frequency
-> + degree — no semantic-alignment or noise terms); explicit `read` bumps the counters,
-> recall packing deliberately does not. Decay/archive are not implemented — low-activation
-> atoms rank lower but are never archived or deleted. Tombstoned nodes (via `forget`) are
-> soft-deleted, not archived.
+> with RRF. Activation ranking uses recency, frequency, graph degree, and semantic
+> alignment derived from embedding distance (`w_s`); explicit `read` bumps the counters,
+> recall packing deliberately does not. The ACT-R noise term is the only activation
+> element still unshipped, deliberately preserving deterministic ranking. Decay/archive
+> are not implemented — low-activation atoms rank lower but are never archived or deleted.
+> Tombstoned nodes (via `forget`) are soft-deleted, not archived.
 
 > Status (2026-07-19, reconciliation shipped): write-time reconciliation is now live as
 > `reconcile_node` graph jobs — capture and content-changing updates enqueue a per-node

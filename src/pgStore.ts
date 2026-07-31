@@ -2602,6 +2602,13 @@ function reciprocalRankFusion<T extends { id: string }>(...lists: T[][]): T[] {
       if (existing) {
         existing.score += 1 / (60 + rank);
         existing.bestRank = Math.min(existing.bestRank, rank);
+        const incoming = (item as { distance?: number }).distance;
+        if (incoming !== undefined) {
+          const current = (existing.item as { distance?: number }).distance;
+          if (current === undefined || incoming < current) {
+            existing.item = { ...existing.item, distance: incoming };
+          }
+        }
       } else {
         fused.set(item.id, { item, score: 1 / (60 + rank), bestRank: rank });
       }

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import pg from "pg";
 import { suiteStore, closeStore, hasPostgres, sleep, isolateDatabase } from "./helpers.js";
 import type { GraphJob, GraphOperationContext } from "../src/graphCore.js";
+import type { SearchInput } from "../src/contracts.js";
 import { FakeEmbeddingProvider, cosineSimilarity } from "../src/embeddings.js";
 import { normalizeRetrievalQuery } from "../src/queryNormalize.js";
 import { UserStore } from "../src/users.js";
@@ -164,6 +165,187 @@ describe("retrieval fixes", () => {
     assert.ok(
       strongIndex < weakIndex,
       `RRF must rank the semantic-relevant node first (${strongIndex} vs ${weakIndex}); concat fusion would pin it behind`,
+    );
+  });
+  it("F10a: recall alignment outranks an earlier but semantically weaker hit", async () => {
+    const marker = `semrank${stamp}`;
+    const query = `which the and ${marker}`;
+    await store.capture({
+      title: `Which the and ${marker}`,
+      type: "community",
+      summary: query,
+      content: query,
+      evidence: [],
+      links: [],
+    }, context);
+    const offTopic = await store.capture({
+      title: `${marker} operations`,
+      type: "community",
+      summary: "which the and fillerone fillertwo fillerthree",
+      content: `${marker} fillerfour fillerfive fillersix fillerseven fillereight extranine extraten extraeleven`,
+      evidence: [],
+      links: [],
+    }, context);
+    const aligned = await store.capture({
+      title: `Aligned recall candidate ${stamp}`,
+      type: "community",
+      summary: "which the and which the and",
+      content: "which the and",
+      evidence: [],
+      links: [],
+    }, context);
+    for (let index = 0; index < 6; index += 1) {
+      await store.capture({
+        title: `Neutral baseline ${stamp} ${index}`,
+        type: "community",
+        summary: index % 2 === 0 ? "and the filler" : "which the filler",
+        content: `semantic baseline noise ${index}`,
+        evidence: [],
+        links: [],
+      }, context);
+    }
+    await drainJobs();
+
+    const semantic = await store.search({
+      query,
+      types: ["community"],
+      includeTextUnits: false,
+      mode: "semantic",
+      limit: 10,
+      maxSemanticDistance: 0.8,
+    }, context);
+    const offTopicDistance = semantic.nodes.find((node) => node.id === offTopic.id)?.distance;
+    const alignedDistance = semantic.nodes.find((node) => node.id === aligned.id)?.distance;
+    assert.equal(typeof offTopicDistance, "number", "fixture: weaker candidate needs a semantic distance");
+    assert.equal(typeof alignedDistance, "number", "fixture: aligned candidate needs a semantic distance");
+    assert.ok(
+      (alignedDistance as number) < (offTopicDistance as number),
+      `fixture: aligned distance ${alignedDistance} must beat weaker distance ${offTopicDistance}`,
+    );
+
+    const hybrid = await store.search({
+      query,
+      types: ["community"],
+      includeTextUnits: false,
+      mode: "hybrid",
+      limit: 10,
+      maxSemanticDistance: 0.8,
+    }, context);
+    const hybridIds = hybrid.nodes.map((node) => node.id);
+    assert.ok(
+      hybridIds.indexOf(offTopic.id) < hybridIds.indexOf(aligned.id),
+      "fixture: ordinal hybrid rank must initially favor the weaker candidate",
+    );
+
+    const pack = await store.recall({
+      query,
+      types: ["community"],
+      tokenBudget: 5000,
+      depth: 0,
+      includeEvidence: false,
+      maxSemanticDistance: 0.8,
+    }, context);
+    const packedIds = pack.atoms.map((atom) => atom.node.id);
+    const alignedIndex = packedIds.indexOf(aligned.id);
+    const offTopicIndex = packedIds.indexOf(offTopic.id);
+    assert.notEqual(alignedIndex, -1, "aligned candidate must be packed");
+    assert.notEqual(offTopicIndex, -1, "weaker candidate must be packed");
+    assert.ok(
+      alignedIndex < offTopicIndex,
+      `semantic alignment must reverse the ordinal-only order (${alignedIndex} vs ${offTopicIndex})`,
+    );
+  });
+  it("F10b: a lexical-only hit receives neutral semantic alignment instead of sinking", async () => {
+    const marker = `neutrallex${stamp}`;
+    const query = `which the and ${marker}`;
+    const lexicalOnly = await store.capture({
+      title: `${marker} operations`,
+      type: "person",
+      summary: "uone utwo uthree ufour ufive usix useven ueight",
+      content: "vone vtwo vthree vfour vfive vsix vseven veight vnine vten",
+      evidence: [],
+      links: [],
+    }, context);
+    const semanticOne = await store.capture({
+      title: `Neutral semantic one ${stamp}`,
+      type: "person",
+      summary: "which the and which the and",
+      content: "which the and",
+      evidence: [],
+      links: [],
+    }, context);
+    const semanticTwo = await store.capture({
+      title: `Neutral semantic two ${stamp}`,
+      type: "person",
+      summary: "which the and which the and",
+      content: "which the and",
+      evidence: [],
+      links: [],
+    }, context);
+    await drainJobs();
+
+    const hybrid = await store.search({
+      query,
+      types: ["person"],
+      includeTextUnits: false,
+      mode: "hybrid",
+      limit: 10,
+      maxSemanticDistance: 0.55,
+    }, context);
+    const lexicalHit = hybrid.nodes.find((node) => node.id === lexicalOnly.id);
+    assert.ok(lexicalHit, "fixture: strong lexical-only candidate must be retrieved");
+    assert.equal(lexicalHit.distance, undefined, "fixture: lexical-only distance must remain unknown");
+    assert.equal(typeof hybrid.nodes.find((node) => node.id === semanticOne.id)?.distance, "number");
+    assert.equal(typeof hybrid.nodes.find((node) => node.id === semanticTwo.id)?.distance, "number");
+
+    const pack = await store.recall({
+      query,
+      types: ["person"],
+      tokenBudget: 3000,
+      depth: 0,
+      includeEvidence: false,
+      maxSemanticDistance: 0.55,
+    }, context);
+    const packedIds = pack.atoms.map((atom) => atom.node.id);
+    const lexicalOnlyIndex = packedIds.indexOf(lexicalOnly.id);
+    assert.notEqual(lexicalOnlyIndex, -1, "lexical-only candidate must remain packed");
+    assert.ok(
+      lexicalOnlyIndex < pack.atoms.length - 1,
+      `neutral imputation must keep the lexical-only candidate off the bottom (index ${lexicalOnlyIndex})`,
+    );
+  });
+  it("F10c: a co-produced hit carries semantic distance through hybrid fusion", async () => {
+    const marker = `coproduced${stamp}`;
+    const node = await store.capture({
+      title: `${marker} runbook`,
+      type: "question",
+      summary: `${marker} ${marker} operational answer`,
+      content: `${marker} ${marker} ${marker} exact procedure`,
+      evidence: [],
+      links: [],
+    }, context);
+    await drainJobs();
+
+    const searchInput: Omit<SearchInput, "mode"> = {
+      query: marker,
+      types: ["question"],
+      includeTextUnits: false,
+      limit: 10,
+      maxSemanticDistance: 0.55,
+    };
+    const semantic = await store.search({ ...searchInput, mode: "semantic" }, context);
+    const lexical = await store.search({ ...searchInput, mode: "lexical" }, context);
+    const hybrid = await store.search({ ...searchInput, mode: "hybrid" }, context);
+
+    const semanticHit = semantic.nodes.find((candidate) => candidate.id === node.id);
+    assert.equal(typeof semanticHit?.distance, "number", "fixture: semantic arm must produce a distance");
+    assert.ok(lexical.nodes.some((candidate) => candidate.id === node.id), "fixture: lexical arm must produce the same hit");
+    const hybridHit = hybrid.nodes.find((candidate) => candidate.id === node.id);
+    assert.ok(hybridHit, "hybrid fusion must retain the co-produced hit");
+    assert.equal(
+      hybridHit.distance,
+      semanticHit?.distance,
+      "hybrid fusion must preserve the semantic arm's distance for a co-produced hit",
     );
   });
   it("F8: giant nodes are excluded from search unless the query hits title or slug", async () => {
