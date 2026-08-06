@@ -802,6 +802,18 @@ export class PgGraphStore implements GraphStore {
       .slice(0, limit);
   }
 
+  async textUnitText(
+    input: { textUnitId: string },
+    context?: GraphOperationContext,
+  ): Promise<string | null> {
+    const scope = ownerScope(context);
+    const result = await this.pool.query(
+      `select text from text_unit where id = $1 and ($2 or owner_id = $3)`,
+      [input.textUnitId, !scope.scoped, scope.ownerId],
+    );
+    return result.rowCount === 1 ? String(result.rows[0].text) : null;
+  }
+
   markTextUnitsServed(textUnitIds: string[], context?: GraphOperationContext): void {
     this.servedUnits.mark(textUnitIds, context);
   }

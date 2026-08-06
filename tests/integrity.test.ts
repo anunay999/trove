@@ -282,4 +282,110 @@ describe("integrity suite (backlog #28)", () => {
       );
     }
   });
+
+  it("#6 warns on zero-containment UUID evidence while still attaching it", async () => {
+    const ingested = await store.ingest({
+      kind: "agent_note",
+      title: `Zero-containment integrity source ${stamp}`,
+      contentText: "Quartz lantern calibrates nebula sextants.",
+      metadata: {},
+    }, context);
+    const unit = ingested.textUnits[0];
+    assert.ok(unit, "the zero-containment fixture must produce a served text unit");
+
+    const result = await remember(store, {
+      title: `Payroll cadence ${stamp}`,
+      type: "claim",
+      summary: "Biweekly salaries require managerial approval.",
+      evidence: [{ textUnitId: unit.id }],
+      links: [],
+    }, context);
+
+    assert.equal(result.complete, false, "an attached-but-unsupported UUID must prevent a complete result");
+    assert.equal(result.evidenceRejected, undefined, "zero containment is a warning, never a rejection");
+    assert.equal(result.evidenceUnsupported?.length, 1);
+    assert.equal(result.evidenceUnsupported?.[0]?.textUnitId, unit.id);
+    assert.match(result.evidenceUnsupported?.[0]?.reason ?? "", /supports only 0%/i);
+    assert.match(result.evidenceUnsupported?.[0]?.reason ?? "", /\{ quote \}/i, "the warning must teach the repair");
+    const read = await store.read({ nodeId: result.node.id }, context, { trackAccess: false });
+    assert.ok(read, "the node mutation still lands when its evidence warns");
+    assert.equal(
+      read.annotations.some((annotation) => annotation.motivation === "supports" && annotation.textUnitId === unit.id),
+      true,
+      "zero-containment UUID evidence warns but still attaches",
+    );
+  });
+
+  it("#7 warns on weak nonzero UUID containment while still attaching the citation", async () => {
+    const ingested = await store.ingest({
+      kind: "agent_note",
+      title: `Weak-containment integrity source ${stamp}`,
+      contentText: "Orchid.",
+      metadata: {},
+    }, context);
+    const unit = ingested.textUnits[0];
+    assert.ok(unit, "the weak-containment fixture must produce a served text unit");
+
+    const result = await remember(store, {
+      title: `Orchid procurement forecast ${stamp}`,
+      type: "claim",
+      summary: "Quarterly logistics budgets require regional supplier audits, insurance reviews, warehouse forecasts, and executive approvals.",
+      evidence: [{ textUnitId: unit.id }],
+      links: [],
+    }, context);
+
+    assert.equal(result.complete, false, "an attached-but-unsupported UUID must prevent a complete result");
+    assert.equal(result.evidenceRejected, undefined, "nonzero containment remains non-breaking");
+    assert.equal(result.evidenceUnsupported?.length, 1);
+    assert.equal(result.evidenceUnsupported?.[0]?.textUnitId, unit.id);
+    assert.match(result.evidenceUnsupported?.[0]?.reason ?? "", /weak|containment|support/i);
+    assert.match(result.evidenceUnsupported?.[0]?.reason ?? "", /\{ quote \}/i, "the warning must teach the repair");
+    const read = await store.read({ nodeId: result.node.id }, context, { trackAccess: false });
+    assert.ok(read);
+    assert.equal(
+      read.annotations.some((annotation) => annotation.motivation === "supports" && annotation.textUnitId === unit.id),
+      true,
+      "weak nonzero containment warns but still attaches",
+    );
+  });
+
+  it("#8 uses best-of-all UUID citations so one strong unit suppresses a weak-unit warning", async () => {
+    const strong = await store.ingest({
+      kind: "agent_note",
+      title: `Strong evidence source ${stamp}`,
+      contentText: `Strong support alpha ${stamp}. Orion protocol rotates encryption keys weekly.`,
+      metadata: {},
+    }, context);
+    const weak = await store.ingest({
+      kind: "agent_note",
+      title: `Weak evidence source ${stamp}`,
+      contentText: "Quartz lantern calibrates nebula sextants.",
+      metadata: {},
+    }, context);
+    const strongUnit = strong.textUnits[0];
+    const weakUnit = weak.textUnits[0];
+    assert.ok(strongUnit && weakUnit, "both evidence fixtures must produce served text units");
+
+    const result = await remember(store, {
+      title: `Strong support alpha ${stamp}`,
+      type: "claim",
+      summary: "Orion protocol rotates encryption keys weekly.",
+      evidence: [{ textUnitId: strongUnit.id }, { textUnitId: weakUnit.id }],
+      links: [],
+    }, context);
+
+    assert.equal(result.evidenceRejected, undefined, "both resolvable UUID citations must attach");
+    assert.equal(result.evidenceUnsupported, undefined, "the strongest cited unit clears the note-level floor");
+    assert.equal(result.complete, true, "strong best-of-N support leaves no partial-result warning");
+    const read = await store.read({ nodeId: result.node.id }, context, { trackAccess: false });
+    assert.ok(read);
+    const attachedUnitIds = new Set(
+      read.annotations
+        .filter((annotation) => annotation.motivation === "supports")
+        .map((annotation) => annotation.textUnitId),
+    );
+    assert.equal(attachedUnitIds.has(strongUnit.id), true, "the strong UUID citation attaches");
+    assert.equal(attachedUnitIds.has(weakUnit.id), true, "the weak UUID citation also attaches");
+  });
+
 });

@@ -14,7 +14,8 @@
  * - Semantic search dual-embeds raw + normalized and takes the min distance,
  *   like the pg driver; vectors come from the deterministic fake provider
  *   unless a real one is configured.
- * - No owner enforcement, no real embedding backfill, heuristic-only
+ * - Owner enforcement is limited to security-sensitive parity seams such as
+ *   raw evidence lookup; no real embedding backfill, heuristic-only
  *   reconciliation judge by default (tests must not make network calls).
  *
  * When a behavior matters, assert it against Postgres too — a green run on
@@ -104,6 +105,8 @@ const GIANT_CONTENT_CHARS = 12_000;
 
 export class InMemoryGraphStore implements GraphStore {
   private sourceRows = new Map<string, GraphSource & { contentText: string; metadata: Record<string, unknown> }>();
+  /** Owner scope is internal metadata, mirroring source.owner_id in Postgres. */
+  private sourceOwnerIds = new Map<string, string | null>();
   private textUnits = new Map<string, TextUnit>();
   private nodes = new Map<string, GraphNode>();
   private slugIndex = new Map<string, string>();
@@ -166,6 +169,7 @@ export class InMemoryGraphStore implements GraphStore {
     const units = splitTextUnits(source.id, input.contentText);
 
     this.sourceRows.set(source.id, source);
+    this.sourceOwnerIds.set(source.id, ownerScope(context).ownerId);
     for (const unit of units) {
       this.textUnits.set(unit.id, unit);
     }
@@ -503,6 +507,14 @@ export class InMemoryGraphStore implements GraphStore {
       .filter((match) => match.score >= FUZZY_QUOTE_CANDIDATE_FLOOR)
       .sort((left, right) => right.score - left.score || left.unit.id.localeCompare(right.unit.id))
       .slice(0, limit);
+  }
+
+  textUnitText(input: { textUnitId: string }, context?: GraphOperationContext): string | null {
+    const unit = this.textUnits.get(input.textUnitId);
+    if (!unit) return null;
+    const scope = ownerScope(context);
+    if (scope.scoped && this.sourceOwnerIds.get(unit.sourceId) !== scope.ownerId) return null;
+    return unit.text;
   }
 
   markTextUnitsServed(textUnitIds: string[], context?: GraphOperationContext): void {

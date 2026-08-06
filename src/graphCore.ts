@@ -435,6 +435,12 @@ export type GraphStore = {
    */
   resolveTextQuote(input: { quote: string; sourceId?: string; textUnitId?: string; limit?: number }, context?: GraphOperationContext): MaybePromise<TextQuoteMatch[]>;
   /**
+   * Return one text unit's text when it resolves in the caller's owner scope.
+   * Raw-UUID evidence uses this fail-closed lookup before attaching so it can
+   * apply the same support score as the weak-evidence lint.
+   */
+  textUnitText(input: { textUnitId: string }, context?: GraphOperationContext): MaybePromise<string | null>;
+  /**
    * Record units as served to this session. Internal plumbing — drivers call
    * it from their own read paths (ingest/search/grep/read/project), and
    * performRecall calls it for the evidence that actually made the pack.
