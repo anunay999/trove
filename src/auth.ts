@@ -29,7 +29,12 @@ export type AuthContext = {
   ownerId?: string | undefined;
   /** Auth disabled (local/CI): bypass owner scoping, see the whole graph. */
   superuser?: boolean | undefined;
+  /** Admin "view as": the account being impersonated. `identity` stays the real admin. */
+  impersonating?: AuthIdentity | undefined;
 };
+
+/** Header an admin sends to read/write another member's graph: a Clerk user id. */
+export const IMPERSONATE_HEADER = "x-trove-impersonate";
 
 /**
  * Pluggable async credential resolvers. `resolveApiKey` handles DB-backed
@@ -48,7 +53,12 @@ export type AuthResolvers = {
 export class AuthError extends Error {
   constructor(
     public readonly status: 401 | 403,
-    public readonly code: "missing_token" | "invalid_token" | "insufficient_scope",
+    public readonly code:
+      | "missing_token"
+      | "invalid_token"
+      | "insufficient_scope"
+      | "unknown_user"
+      | "inactive_user",
     message: string,
   ) {
     super(message);
@@ -165,6 +175,47 @@ export async function requireAuthFromHeaders(
   }
 
   throw new AuthError(401, "invalid_token", "Invalid Bearer token.");
+}
+
+/**
+ * Admin "view as user". An active admin (or the local-dev superuser) may send
+ * `X-Trove-Impersonate: <clerkUserId>` to work inside another member's graph.
+ * Only the graph owner changes: `identity` stays the real admin, so admin
+ * routes — including the control that switches back — keep working, the audit
+ * log still names the human who acted, and the credential routes (`/v1/keys`)
+ * stay pointed at the caller's own account. Impersonation is a lens on the
+ * graph, never a way to read or mint someone else's API keys.
+ */
+export async function applyImpersonation(
+  context: AuthContext,
+  headers: Headers,
+  lookup: (clerkUserId: string) => Promise<AuthIdentity | null>,
+): Promise<AuthContext> {
+  const target = headers.get(IMPERSONATE_HEADER)?.trim();
+  if (!target) return context;
+
+  // Admin dashboard sessions, the local-dev superuser, and env service tokens
+  // (the only credentials that ever carry graph:admin — per-user API keys top
+  // out at read/write/export) may act as someone else.
+  const isAdmin = context.identity?.role === "admin" && context.identity.status === "active";
+  if (!isAdmin && !context.superuser && !context.scopes.includes("graph:admin")) {
+    throw new AuthError(403, "insufficient_scope", "Only admins can view Trove as another user.");
+  }
+  // Impersonating yourself is just being yourself.
+  if (context.identity && target === context.identity.clerkUserId) return context;
+
+  const impersonated = await lookup(target);
+  if (!impersonated) {
+    throw new AuthError(403, "unknown_user", `No Trove user with Clerk id ${target}.`);
+  }
+  // Suspending or waitlisting an account zeroes its own scopes. Viewing as one
+  // would hand it the admin's scopes instead and thaw a deliberately frozen
+  // graph, so a target must be active — same bar as issuing them a key.
+  if (impersonated.status !== "active") {
+    throw new AuthError(403, "inactive_user", `${target} is ${impersonated.status}; only active users can be viewed as.`);
+  }
+
+  return { ...context, impersonating: impersonated, ownerId: impersonated.userId, superuser: false };
 }
 
 /**

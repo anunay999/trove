@@ -39,6 +39,7 @@ import {
 import { forget, remember } from "./agentOps.js";
 import {
   AuthError,
+  applyImpersonation,
   authErrorBody,
   listServiceTokenSummaries,
   operationContextFromAuth,
@@ -560,17 +561,26 @@ app.get("/v1/me", async (context) => {
     mode: auth.mode,
     scopes: auth.scopes,
     identity: auth.identity ?? null,
+    // Set while an admin is viewing Trove as someone else; the dashboard shows
+    // this account's graph and keys, and offers the way back.
+    impersonating: auth.impersonating ?? null,
   });
 });
 
+/**
+ * Always the real caller, never an impersonated account: API keys are bearer
+ * credentials that outlive the "view as" session, so viewing as a member must
+ * not read, mint or revoke their keys.
+ */
 function requireIdentity(auth: AuthContext): Response | NonNullable<AuthContext["identity"]> {
-  if (!auth.identity || !userStore) {
+  const identity = auth.identity;
+  if (!identity || !userStore) {
     return new Response(
       JSON.stringify({ error: "clerk_required", message: "Sign in with Clerk to manage API keys." }),
       { status: 403, headers: { "content-type": "application/json" } },
     );
   }
-  return auth.identity;
+  return identity;
 }
 
 app.get("/v1/keys", async (context) => {
@@ -654,7 +664,16 @@ app.post("/v1/admin/users/status", async (context) => {
 
 async function authorizeRequest(headers: Headers, scopes: TroveScope[]): Promise<AuthContext | Response> {
   try {
-    return await requireAuthFromHeaders(headers, scopes, "http", authResolvers);
+    const auth = await requireAuthFromHeaders(headers, scopes, "http", authResolvers);
+    // With no user directory (no DATABASE_URL) nothing resolves, so the header
+    // is refused rather than ignored — a silently dropped impersonation would
+    // write into the caller's own graph while the caller believed otherwise.
+    return await applyImpersonation(auth, headers, async (clerkUserId) => {
+      const user = await userStore?.userByClerkId(clerkUserId);
+      return user
+        ? { userId: user.id, clerkUserId: user.clerkUserId, email: user.email, role: user.role, status: user.status }
+        : null;
+    });
   } catch (error) {
     if (error instanceof AuthError) return new Response(JSON.stringify(authErrorBody(error)), {
       status: error.status,
