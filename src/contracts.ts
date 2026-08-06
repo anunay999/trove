@@ -109,6 +109,7 @@ export const searchInputSchema = z.object({
 export const readInputSchema = z.object({
   nodeId: z.string().uuid().optional(),
   slug: z.string().min(1).optional(),
+  asOf: z.iso.datetime().optional(),
 }).refine((value) => value.nodeId || value.slug, {
   message: "Provide nodeId or slug.",
 });
@@ -252,6 +253,7 @@ export const forgetInputSchema = z.object({
 export const readAnyInputSchema = z.object({
   id: z.string().uuid().optional(),
   slug: z.string().min(1).optional(),
+  asOf: z.iso.datetime().optional(),
 }).refine((value) => value.id || value.slug, {
   message: "Provide id or slug.",
 });

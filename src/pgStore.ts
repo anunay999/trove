@@ -610,13 +610,27 @@ export class PgGraphStore implements GraphStore {
   async read(input: ReadInput, context?: GraphOperationContext, opts?: { trackAccess?: boolean }): Promise<ReadResult | null> {
     const scope = ownerScope(context);
     const predicate = input.nodeId ? "n.id = $1" : "n.slug = $1";
+    const revisionJoin = input.asOf
+      ? `join lateral (
+           select id, title, summary, content, created_at
+           from node_revision
+           where node_id = n.id and created_at <= $4::timestamptz
+           order by created_at desc, revision_number desc
+           limit 1
+         ) nr on true`
+      : "left join node_revision nr on nr.id = n.current_revision_id";
     const nodeResult = await this.pool.query(
-      `select n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id, n.updated_at, n.access_count, n.last_accessed_at
+      `select n.id, n.type, n.slug,
+              coalesce(nr.title, n.title) as title,
+              case when nr.title is null then n.summary else nr.summary end as summary,
+              nr.content, nr.id as current_revision_id,
+              case when $4::timestamptz is null then n.updated_at else nr.created_at end as updated_at,
+              n.access_count, n.last_accessed_at
        from node n
-       left join node_revision nr on nr.id = n.current_revision_id
+       ${revisionJoin}
        where n.deleted_at is null and ${predicate} and ($2 or n.owner_id = $3)
        limit 1`,
-      [input.nodeId ?? input.slug, !scope.scoped, scope.ownerId],
+      [input.nodeId ?? input.slug, !scope.scoped, scope.ownerId, input.asOf ?? null],
     );
     if (nodeResult.rowCount === 0) return null;
 
@@ -636,8 +650,9 @@ export class PgGraphStore implements GraphStore {
       }
     }
 
-    // Evidence fetch is constant-query: one for annotations, one batched for
-    // text units, one batched for source-only references (no per-unit loop).
+    // Evidence and annotations intentionally remain current for historical fact
+    // reads; only title/summary/content are revision-scoped in backlog #18.
+    // Fetch stays constant-query: annotations, batched text units, then sources.
     const annotations = await this.annotationsForNode(node.id);
     const unitsById = new Map(
       (await this.getEvidenceForNodes([node.id], context)).get(node.id)?.map((unit) => [unit.id, unit] as const) ?? [],
@@ -1144,10 +1159,10 @@ export class PgGraphStore implements GraphStore {
       );
       await client.query(
         `insert into node_revision (
-           id, node_id, revision_number, content, projection_markdown, frontmatter, content_sha256, created_by
+           id, node_id, revision_number, title, summary, content, projection_markdown, frontmatter, content_sha256, created_by
          )
-         values ($1, $2, 1, $3, null, '{}'::jsonb, $4, $5)`,
-        [revisionId, id, content, sha256(content ?? ""), actorUuid],
+         values ($1, $2, 1, $3, $4, $5, null, '{}'::jsonb, $6, $7)`,
+        [revisionId, id, input.title, input.summary, content, sha256(content ?? ""), actorUuid],
       );
       await client.query("update node set current_revision_id = $1 where id = $2", [revisionId, id]);
 
@@ -1228,7 +1243,7 @@ export class PgGraphStore implements GraphStore {
       const actorUuid = await this.actorUuidForContext(client, context);
       const uScope = ownerScope(context);
       const current = await client.query(
-        `select n.id, n.current_revision_id, nr.content
+        `select n.id, n.title, n.summary, n.current_revision_id, nr.content
          from node n
          left join node_revision nr on nr.id = n.current_revision_id
          where n.id = $1 and n.deleted_at is null and ($2 or n.owner_id = $3)
@@ -1245,12 +1260,18 @@ export class PgGraphStore implements GraphStore {
         return { conflict: true, currentRevisionId };
       }
 
-      // Title/summary/slug are node-level metadata; only a real content change
-      // mints a revision (the (node_id, content_sha256) unique key forbids
-      // duplicates anyway).
+      const currentTitle = String(current.rows[0].title);
+      const currentSummary = current.rows[0].summary == null ? null : String(current.rows[0].summary);
       const currentContent = current.rows[0].content ?? null;
+      const nextTitle = input.title ?? currentTitle;
+      const nextSummary = input.summary ?? currentSummary;
+      const nextContent = input.content ?? currentContent;
+      const titleChanged = input.title !== undefined && input.title !== currentTitle;
+      const summaryChanged = input.summary !== undefined && input.summary !== currentSummary;
+      const contentChanged = input.content !== undefined && input.content !== currentContent;
+      const factChanged = titleChanged || summaryChanged || contentChanged;
       let revisionId = currentRevisionId;
-      if (input.content !== undefined && input.content !== currentContent) {
+      if (factChanged) {
         const revisionNumberResult = await client.query(
           "select coalesce(max(revision_number), 0) + 1 as next_revision from node_revision where node_id = $1",
           [input.nodeId],
@@ -1258,10 +1279,19 @@ export class PgGraphStore implements GraphStore {
         revisionId = randomUUID();
         await client.query(
           `insert into node_revision (
-             id, node_id, revision_number, content, projection_markdown, frontmatter, content_sha256, created_by
+             id, node_id, revision_number, title, summary, content, projection_markdown, frontmatter, content_sha256, created_by
            )
-           values ($1, $2, $3, $4, null, '{}'::jsonb, $5, $6)`,
-          [revisionId, input.nodeId, revisionNumberResult.rows[0].next_revision, input.content, sha256(input.content), actorUuid],
+           values ($1, $2, $3, $4, $5, $6, null, '{}'::jsonb, $7, $8)`,
+          [
+            revisionId,
+            input.nodeId,
+            revisionNumberResult.rows[0].next_revision,
+            nextTitle,
+            nextSummary,
+            nextContent,
+            sha256(nextContent ?? ""),
+            actorUuid,
+          ],
         );
       }
 
@@ -1311,9 +1341,9 @@ export class PgGraphStore implements GraphStore {
         "lint_graph",
         "refresh_embeddings",
       ]);
-      // Reconcile only when content actually changed — a title/summary-only
-      // revise carries no new claims to judge.
-      if (revisionId !== currentRevisionId) {
+      // Preserve reconcile cadence: title/summary revisions refresh search,
+      // but only body changes introduce claims for the reconcile judge.
+      if (contentChanged) {
         await this.enqueueReconcileJob(client, context, actorUuid, input.nodeId);
       }
       await client.query("commit");
@@ -2043,12 +2073,12 @@ export class PgGraphStore implements GraphStore {
     // batched embed calls and made a 20k-row import take ~800 queue round trips.
     const boundedLimit = Math.max(1, Math.min(1000, Math.trunc(limit)));
     const nodeRevisionRows = await this.pool.query(
-      `select nr.id, nr.content_sha256, concat_ws(E'\n', n.title, n.summary, nr.content) as text
+      `select nr.id, nr.content_sha256, concat_ws(E'\n', nr.title, nr.summary, nr.content) as text
        from node n
        join node_revision nr on nr.id = n.current_revision_id
        where n.deleted_at is null
          and ($3::uuid is null or n.owner_id = $3)
-         and length(trim(concat_ws(E'\n', n.title, n.summary, nr.content))) > 0
+         and length(trim(concat_ws(E'\n', nr.title, nr.summary, nr.content))) > 0
          and not exists (
            select 1 from embedding e
            where e.owner_table = 'node_revision'

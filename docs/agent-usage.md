@@ -63,7 +63,7 @@ If your host strips instructions, pin `trove://doctrine` or paste the [system-pr
 | Exact string | **`grep`** → optional **`read`** | `INV-1042`, `ECONNRESET`, `FEATURE_DARK_MODE` |
 | Known note name | **`read`** | `billing-pricing-rules`, `onboarding-checklist` |
 | Open question | **`recall`** (~8000 tokens) → **`read`** if thin | “How do we handle refunds for annual plans?” |
-| History of a belief | **`neighborhood`** | What did we believe last month? (`asOf`) |
+| History of a fact / relationship | **`read`** / **`neighborhood`** | Fact snapshot or edge graph at `asOf` |
 
 ### Rules of thumb
 
@@ -145,7 +145,8 @@ remember({ title: "Deploy freezes start Friday noon", type: "decision", links: [
 | Note text is wrong | `remember` same slug (new revision) |
 | Link is wrong | `connect` with `supersedesEdgeId` |
 | No longer true | `forget` (preview with query first) |
-| “What did we believe then?” | `neighborhood` with `asOf` |
+| “What did this fact say then?” | `read` with `asOf` |
+| “Which relationships did we believe then?” | `neighborhood` with `asOf` |
 
 ---
 

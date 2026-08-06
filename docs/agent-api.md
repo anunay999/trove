@@ -58,9 +58,9 @@ Visibility is tiered by credential scope: **core** tools are shown to every cred
 
 `read`
 
-- Input: `id` or `slug`
-- Output: a memory node (latest revision, **full content body**, evidence, annotations, revision token) or, when the id belongs to a source, the raw source document
-- One read door: node lookup first, source fallback. Use for known note names and for full text after `grep`/`recall` found the right atom.
+- Input: `id` or `slug`, plus optional ISO `asOf`
+- Output: a memory node (latest revision by default, or newest revision recorded by `asOf`) with **full content body**, evidence, annotations, and revision token; or, when the id belongs to a source, the current raw source document
+- A historical node read snapshots title, summary, and content; it returns `null` before the first revision. Evidence and annotations remain current. Node lookup runs first, then source fallback.
 
 `remember`
 

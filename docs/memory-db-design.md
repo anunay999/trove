@@ -42,7 +42,7 @@ Also verified: memory interop is greenfeld — no framework's wire format has be
 If "MemDB" were a product, its data model and query surface would be:
 
 ### 1. Bitemporal belief atoms
-Every claim and edge carries `valid_from`, `valid_until` (world time) and `recorded_at`, `expired_at` (system time), plus `invalidated_by` pointing at the superseding atom. Supersession = setting `valid_until`/`expired_at`, never `DELETE`. Queries default to "currently believed" (`expired_at IS NULL AND valid_until IS NULL`) but can time-travel on either axis: *"what did I believe about the sync worker on May 3?"*
+The target model gives facts and relationships both world time and recorded time, with supersession represented by expiry rather than deletion. Trove's shipped model is deliberately narrower: edges carry `valid_from`/`valid_until`, `created_at`/`expired_at`, and `invalidated_by`; node revisions snapshot title, summary, and content on recorded time only. `read({ asOf })` reconstructs a node fact from `node_revision`, while `neighborhood`/`recall` apply recorded-time visibility to edges. Historical node reads currently keep evidence and annotations at their present state.
 
 ### 2. Mandatory provenance
 No semantic atom without a path back to an episode/span (or an explicit `agent_inference` marker). Trove already has this via `annotation` + `text_unit`; it is the right call and rarer than it should be — Graphiti's episode subgraph is the only major production analogue.
@@ -63,17 +63,18 @@ graph.recall({ query, token_budget, as_of?, mode? })
 
 Internally: hybrid retrieval (FTS + pgvector fused with RRF) seeds a 1–2-hop traversal; candidates are activation-ranked; the packer greedily fills the budget with claims-first-then-evidence, always carrying citations. This is the operator that makes the store "agent-native" rather than "a database an agent can use."
 
-Index-side lessons to adopt from LongMemEval (all three verified to measurably improve recall): index extracted facts alongside raw text (fact-augmented keys — Trove's claims already are this; embed them), decompose long sources into session/section-granular units (already done via `text_unit`), and expand queries with temporal scoping (needs the bitemporal columns to exist).
+Index-side lessons to adopt from LongMemEval (all three verified to measurably improve recall): index extracted facts alongside raw text (Trove embeds the current `node_revision`), decompose long sources into session/section-granular units (already done via `text_unit`), and expand queries with temporal scoping (recorded-time fact reads now use `node_revision.created_at`).
 
 ## Trove v2 Delta
 
 Ordered by leverage; the schema is already ~70% of the way there.
 
-> Status (2026-07-04): items 1, 3, and 4 below are implemented — bitemporal edges with
-> `supersedesEdgeId`/`graph.invalidate_edge` (migration `003_bitemporal_activation.sql`),
+> Status (updated 2026-08-06): items 1, 3, and 4 below are implemented — bitemporal edges with
+> `supersedesEdgeId`/`graph.invalidate_edge` (migration `003_bitemporal_activation.sql`) plus
+> recorded-time node fact snapshots and `read({ asOf })` (migration `012_fact_revision_snapshots.sql`),
 > `graph.recall` with `tokenBudget`, and activation columns bumped on read. Covered by
-> the `bitemporal` and `recall` suites (`npm test`) on both drivers. Reconciliation in
-> the write path (2) and claim embeddings (5) remain open.
+> the `bitemporal`, `fact-time-travel`, and `recall` suites on both drivers. Reconciliation
+> is shipped (status below); embeddings index only the current node revision by design.
 
 > Shipped vs designed (2026-07-19): hybrid retrieval fuses lexical and semantic rankings
 > with RRF. Activation ranking uses recency, frequency, graph degree, and semantic
@@ -96,13 +97,13 @@ Ordered by leverage; the schema is already ~70% of the way there.
 > edge and recall marks the replaced atom `SUPERSEDED by <title>`; contradictions and
 > duplicates are flagged in the job result for an agent to resolve — auto-invalidation
 > of genuine contradictions is deliberately not automated. See `src/reconcile.ts` and
-> `tests/reconcile.test.ts` (both drivers). Claim embeddings (5) remain open.
+> `tests/reconcile.test.ts` (both drivers). Current node-revision embeddings (5) are live and current-only.
 
-1. **Bitemporalize edges and finish claims.** `claim` already has `valid_from`/`valid_until`/`status`; add `expired_at` + `invalidated_by`, and add the four temporal columns to `edge`. Default all reads to current-belief. (Small migration, unlocks #2, #5, time-travel.)
-2. **Reconciliation in the write path.** On `capture`/`ingest` extraction: candidate-match against existing nodes/claims (slug, FTS, embedding), auto-link or flag, and generate contradiction candidates for temporally overlapping claims on the same node. Wire the invalidation primitive into `graph.lint`'s contradiction pass.
-3. **`graph.recall` with `token_budget`.** Compose the pieces that already exist (hybrid search, `neighborhood`, claims, annotations) into one budgeted context-pack operator. This replaces "agent calls search then read then neighborhood" with one call — and it is the single biggest agent-UX win.
-4. **Activation columns.** `access_count`, `last_accessed_at` on `node`/`claim`; bump on read (batched); fold into ranking. Add a nightly `graph_job` that computes decay and tags dormant atoms.
-5. **Embed claims, not just text units.** Fact-augmented keys are the cheapest verified retrieval win.
+1. **Bitemporalize relationships and facts.** Shipped for edges on both time axes and for node facts on recorded time: title, summary, and content are immutable revision snapshots, and `read({ asOf })` selects the newest eligible revision. The former `claim` table was removed; valid-time intervals for node facts and historical annotation filtering remain out of scope.
+2. **Reconciliation in the write path.** On `capture`/`ingest` extraction: candidate-match against existing node facts (slug, FTS, embedding), auto-link or flag, and generate contradiction candidates for temporally overlapping facts. Wire the invalidation primitive into `graph.lint`'s contradiction pass.
+3. **`graph.recall` with `token_budget`.** Compose the pieces that already exist (hybrid search, `neighborhood`, nodes, annotations) into one budgeted context-pack operator. This replaces "agent calls search then read then neighborhood" with one call — and it is the single biggest agent-UX win.
+4. **Activation columns.** `access_count`, `last_accessed_at` on `node`; bump on read (batched); fold into ranking. Add a nightly `graph_job` that computes decay and tags dormant atoms.
+5. **Embed facts, not just text units.** Shipped for the current `node_revision`: the searchable vector covers revision title, summary, and content. Superseded revision vectors are pruned so search cannot resurrect stale facts.
 6. **Keep deferring Kuzu** until multi-hop traversal is demonstrably the bottleneck — the step-back research strengthened, not weakened, that call. Same for a separate vector DB.
 
 ## What Stays True From v1
