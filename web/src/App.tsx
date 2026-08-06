@@ -11,7 +11,17 @@ import { Admin } from "@/pages/Admin";
 import { WaitlistGate } from "@/pages/WaitlistGate";
 import { AuthControls } from "@/components/AuthControls";
 import { LoginDrawer } from "@/components/LoginDrawer";
-import { fetchGraph, fetchMe, fetchStats, type GraphSnapshot, type Me, type Stats } from "@/lib/api";
+import { UserSwitcher, switchToUser, userLabel } from "@/components/UserSwitcher";
+import {
+  fetchGraph,
+  fetchMe,
+  fetchStats,
+  getImpersonation,
+  setImpersonation,
+  type GraphSnapshot,
+  type Me,
+  type Stats,
+} from "@/lib/api";
 
 type Tab = "overview" | "graph" | "keys" | "admin";
 
@@ -78,10 +88,16 @@ export default function App() {
       void load();
     } else {
       setMe(null);
+      // A "view as" choice belongs to the admin who made it, not to the
+      // browser. Once Clerk has settled on signed-out, drop it so the next
+      // person to sign in here starts in their own account. Gated on `loaded`
+      // because Clerk reports signed-out while it is still restoring.
+      if (loaded && getImpersonation()) setImpersonation(null);
     }
   }, [load]);
 
   const identity = me?.identity ?? null;
+  const impersonating = me?.impersonating ?? null;
   const isWaitlisted = signedIn && identity != null && identity.status !== "active";
   const isAdmin = identity?.role === "admin" && identity.status === "active";
   const hasApiToken = !!window.localStorage.getItem("trove_token");
@@ -93,6 +109,7 @@ export default function App() {
 
   const disconnectKey = useCallback(() => {
     window.localStorage.removeItem("trove_token");
+    setImpersonation(null);
     setTokenDashboard(false);
     setSignedOutView("landing");
     setStats(null);
@@ -100,9 +117,12 @@ export default function App() {
     setError(null);
   }, []);
 
-  const tabs: Tab[] = signedIn && identity?.status === "active"
+  const allTabs: Tab[] = signedIn && identity?.status === "active"
     ? (isAdmin ? ["overview", "graph", "keys", "admin"] : ["overview", "graph", "keys"])
     : ["overview", "graph"];
+  // "View as" is a lens on the graph; API keys always belong to your own
+  // account. Hiding the tab keeps the page from contradicting the banner.
+  const tabs: Tab[] = impersonating ? allTabs.filter((candidate) => candidate !== "keys") : allTabs;
   const activeTab: Tab = tabs.includes(tab) ? tab : "overview";
 
   const openLogin = useCallback(() => setDrawer({ open: true, mode: "sign-in" }), []);
@@ -190,10 +210,32 @@ export default function App() {
                 </svg>
               </button>
             )}
+            {isAdmin && identity && dashboardReady && (
+              <UserSwitcher self={identity} impersonating={impersonating} />
+            )}
             {clerkEnabled && <AuthControls onOpenLogin={openLogin} onSessionChange={onSessionChange} dark={dark} />}
           </div>
         </div>
       </header>
+
+      {impersonating && (
+        <div className="shrink-0 border-b border-amber-600/30 bg-amber-500/10">
+          <div className="mx-auto flex h-9 w-full max-w-7xl items-center gap-3 px-6 text-[13px] 2xl:max-w-[88rem]">
+            <span className="size-1.5 shrink-0 rounded-full bg-amber-500" />
+            <span className="truncate">
+              Viewing Trove as <strong className="font-medium">{userLabel(impersonating)}</strong>. Anything you
+              write lands in their graph, recorded as you.
+            </span>
+            <button
+              type="button"
+              onClick={() => switchToUser(null)}
+              className="ml-auto shrink-0 font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground transition-colors hover:text-foreground"
+            >
+              Back to my account
+            </button>
+          </div>
+        </div>
+      )}
 
       {clerkSettling ? (
         <div className="flex flex-1 items-center justify-center">

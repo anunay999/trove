@@ -94,10 +94,28 @@ export function setSessionTokenProvider(provider: (() => Promise<string | null>)
   sessionTokenProvider = provider;
 }
 
+// Admin "view as user": while set, every request carries the target's Clerk id
+// and the API answers with that account's graph and keys. Kept in localStorage
+// so the choice survives a reload — switching users reloads the dashboard.
+const IMPERSONATE_KEY = "trove_impersonate";
+
+export function getImpersonation(): string | null {
+  return window.localStorage.getItem(IMPERSONATE_KEY);
+}
+
+export function setImpersonation(clerkUserId: string | null): void {
+  if (clerkUserId) window.localStorage.setItem(IMPERSONATE_KEY, clerkUserId);
+  else window.localStorage.removeItem(IMPERSONATE_KEY);
+}
+
 async function authHeaders(): Promise<Record<string, string>> {
   const session = sessionTokenProvider ? await sessionTokenProvider().catch(() => null) : null;
   const token = session ?? window.localStorage.getItem("trove_token");
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  const impersonate = getImpersonation();
+  return {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(impersonate ? { "X-Trove-Impersonate": impersonate } : {}),
+  };
 }
 
 async function getJson<T>(path: string): Promise<T> {
@@ -159,17 +177,22 @@ export async function fetchNode(nodeId: string): Promise<NodeDetail> {
 
 // ---- Identity, API keys, admin ----
 
+export type Identity = {
+  userId: string;
+  clerkUserId: string;
+  email: string | null;
+  role: "admin" | "member";
+  status: "waitlisted" | "active" | "suspended";
+};
+
 export type Me = {
   actorId: string;
   mode: "disabled" | "token" | "api_key" | "clerk";
   scopes: string[];
-  identity: {
-    userId: string;
-    clerkUserId: string;
-    email: string | null;
-    role: "admin" | "member";
-    status: "waitlisted" | "active" | "suspended";
-  } | null;
+  /** Always the signed-in human, even while viewing as someone else. */
+  identity: Identity | null;
+  /** The account being viewed, when an admin is impersonating. */
+  impersonating: Identity | null;
 };
 
 export type ApiKeySummary = {
@@ -194,7 +217,23 @@ export type AppUser = {
   approvedAt: string | null;
 };
 
-export const fetchMe = (): Promise<Me> => getJson<Me>("/v1/me");
+/**
+ * `/v1/me` answers for everyone, waitlisted included, so a failure while a
+ * "view as" header is attached indicts the header — and leaves the dashboard
+ * with no identity, hence no banner and no way back. Drop it and reload as
+ * yourself rather than wedging the session behind a devtools-only fix.
+ */
+export async function fetchMe(): Promise<Me> {
+  try {
+    return await getJson<Me>("/v1/me");
+  } catch (cause) {
+    if (getImpersonation()) {
+      setImpersonation(null);
+      window.location.reload();
+    }
+    throw cause;
+  }
+}
 export type ServiceTokenSummary = { actorId: string; scopes: string[]; tokenPreview: string; token: string };
 export const fetchKeys = (): Promise<{ keys: ApiKeySummary[]; serviceTokens?: ServiceTokenSummary[] }> =>
   getJson<{ keys: ApiKeySummary[]; serviceTokens?: ServiceTokenSummary[] }>("/v1/keys");

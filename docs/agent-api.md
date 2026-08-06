@@ -196,6 +196,30 @@ Do not give every agent broad write access. Most agents need search/read plus ca
 
 Development mode may run without `TROVE_SERVICE_TOKENS`. Hosted mode should set scoped service tokens or OAuth. Service-token entries use `token|actor_id|scope,scope`; callers send `Authorization: Bearer <token>`.
 
+### Acting as another user (`X-Trove-Impersonate`)
+
+An active admin — a Clerk admin session, an env service token holding
+`graph:admin`, or the auth-disabled local superuser — may add
+`X-Trove-Impersonate: <clerkUserId>` to any `/v1` request. The request then
+reads and writes that member's graph (`owner_id` follows the target), while
+`actor_id` stays the caller, so the audit log names the human who acted.
+
+It is a lens on the graph and nothing more. `identity` stays the real caller, so
+`/v1/keys` and `/v1/admin/*` always answer for the account that authenticated —
+viewing as a member never exposes, mints or revokes their API keys, and never
+widens who can read `TROVE_SERVICE_TOKENS`.
+
+Rejections: a non-admin gets `403 insufficient_scope`; an unrecognized target
+(including any target on an instance with no user directory) gets
+`403 unknown_user`; a waitlisted or suspended target gets `403 inactive_user` —
+freezing an account must not be undone by an admin borrowing their own scopes
+into it.
+
+`/v1/me` echoes the target back as `impersonating`, which is what the
+dashboard's account switcher and its "back to my account" control use. Per-user
+API keys never carry `graph:admin`, so they can never impersonate. The header is
+honored on `/v1` only, not on `/mcp`.
+
 ## Prompt Injection Boundary
 
 Raw sources are untrusted. The service should store them as source material, but agent tools should clearly separate:

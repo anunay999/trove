@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { fetchUsers, setUserStatus, type AppUser } from "@/lib/api";
+import { fetchUsers, getImpersonation, setUserStatus, type AppUser } from "@/lib/api";
+import { switchToUser } from "@/components/UserSwitcher";
 import {
   Select,
   SelectContent,
@@ -36,6 +37,7 @@ export function Admin({ selfClerkUserId }: { selfClerkUserId?: string }) {
   const [users, setUsers] = useState<AppUser[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const viewingAs = getImpersonation();
 
   const load = useCallback(async () => {
     try {
@@ -70,6 +72,7 @@ export function Admin({ selfClerkUserId }: { selfClerkUserId?: string }) {
       <h2 className="font-serif text-2xl tracking-tight">Admin</h2>
       <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">
         Every sign-up lands on the waitlist. Grant access to let a member create API keys and use the graph, or revoke it at any time.
+        “View as” opens the dashboard inside that member's account; the switcher in the header brings you back.
       </p>
 
       {error && <p className="mt-4 text-[13px] text-red-600 dark:text-red-400">{error}</p>}
@@ -89,15 +92,17 @@ export function Admin({ selfClerkUserId }: { selfClerkUserId?: string }) {
               <th className="px-5 py-3 font-medium">Status</th>
               <th className="px-5 py-3 font-medium">Joined</th>
               <th className="px-5 py-3 font-medium">Access</th>
+              <th className="px-5 py-3 font-medium">View as</th>
             </tr>
           </thead>
           <tbody className="divide-y">
             {users === null ? (
-              <tr><td colSpan={5} className="px-5 py-6 text-[13px] text-muted-foreground">Loading…</td></tr>
+              <tr><td colSpan={6} className="px-5 py-6 text-[13px] text-muted-foreground">Loading…</td></tr>
             ) : users.length === 0 ? (
-              <tr><td colSpan={5} className="px-5 py-6 text-[13px] text-muted-foreground">No users yet.</td></tr>
+              <tr><td colSpan={6} className="px-5 py-6 text-[13px] text-muted-foreground">No users yet.</td></tr>
             ) : users.map((user) => {
               const isSelf = !!selfClerkUserId && user.clerkUserId === selfClerkUserId;
+              const isViewing = viewingAs === user.clerkUserId;
               return (
                 <tr key={user.id}>
                   <td className="px-5 py-3">
@@ -142,6 +147,21 @@ export function Admin({ selfClerkUserId }: { selfClerkUserId?: string }) {
                           ))}
                         </SelectContent>
                       </Select>
+                    )}
+                  </td>
+                  <td className="px-5 py-3">
+                    {isSelf || user.status !== "active" ? (
+                      // Frozen accounts can't be viewed as — the API refuses a
+                      // waitlisted or suspended target.
+                      <span className="text-[12px] text-muted-foreground">—</span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => switchToUser(isViewing ? null : user.clerkUserId)}
+                        className="h-7 rounded-md border px-2.5 text-[12px] text-muted-foreground transition-colors hover:text-foreground"
+                      >
+                        {isViewing ? "Stop viewing" : "View as"}
+                      </button>
                     )}
                   </td>
                 </tr>
