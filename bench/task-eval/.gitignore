@@ -1,0 +1,4 @@
+# Regenerable run artifacts — the findings live in RESULTS.md
+*.out
+results*.json
+smoke-*.out
