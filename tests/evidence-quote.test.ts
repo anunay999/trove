@@ -13,8 +13,9 @@ await isolateDatabase("evidence_quote");
  * Backlog #9 follow-through: cite-by-quote ({ quote } resolved to a text unit,
  * exact then fuzzy, W3C TextQuoteSelector stored) and the session-served
  * provenance check (a cited unit the session never received is flagged in
- * evidenceUnserved — attached, never silently dropped). Runs on BOTH drivers
- * via suiteStore; every assertion must hold for memory and Postgres alike.
+ * evidenceUnserved — attached, never silently dropped). Raw UUID-only fixtures
+ * clear backlog #17's gate unless a test intentionally exercises its warning;
+ * quote-grounded mixed evidence remains exempt. Runs on BOTH drivers.
  */
 describe("cite-by-quote evidence (backlog #9)", () => {
   const { store, context, stamp } = suiteStore("evidence-quote");
@@ -103,6 +104,7 @@ describe("cite-by-quote evidence (backlog #9)", () => {
     }, context);
     assert.equal(result.evidenceRejected, undefined, `exact quote must resolve: ${JSON.stringify(result.evidenceRejected)}`);
     assert.equal(result.evidenceUnserved, undefined, "quote-resolved refs are grounded, never unserved");
+    assert.equal(result.evidenceUnsupported, undefined, "quote-resolved refs are exempt from the raw-UUID support gate");
     const annotations = await annotationsFor(store, result.node.id);
     assert.equal(annotations.length, 1);
     assert.equal(annotations[0]?.textUnitId, widget.id, "must cite the unit containing the quote (case-insensitively)");
@@ -219,7 +221,7 @@ describe("cite-by-quote evidence (backlog #9)", () => {
     const result = await remember(store, {
       title: `Quote mixed ${stamp}`,
       type: "claim",
-      summary: "Mixed citation forms.",
+      summary: "The widget service uses port 9191.",
       evidence: [
         { quote: "the widget service listens on port 9191 after the migration." },
         { textUnitId: ferris.id },
@@ -228,6 +230,7 @@ describe("cite-by-quote evidence (backlog #9)", () => {
     }, context);
     assert.equal(result.evidenceRejected, undefined);
     assert.equal(result.evidenceUnserved, undefined, "the ingest response served the UUID unit");
+    assert.equal(result.evidenceUnsupported, undefined, "a resolved quote grounds the note and suppresses the raw-UUID warning");
     const annotations = await annotationsFor(store, result.node.id);
     assert.equal(annotations.length, 2);
     assert.ok(annotations.some((annotation) => annotation.textUnitId === widget.id));
@@ -240,7 +243,7 @@ describe("cite-by-quote evidence (backlog #9)", () => {
     const result = await remember(store, {
       title: `Unserved uuid ${stamp}`,
       type: "claim",
-      summary: "Citing a unit this session never received.",
+      summary: "Persephone's telescope lives in the garden observatory dome.",
       evidence: [{ textUnitId: other.id }],
       links: [],
     }, context);
@@ -259,7 +262,7 @@ describe("cite-by-quote evidence (backlog #9)", () => {
     const result = await remember(store, {
       title: `Grep-served uuid ${stamp}`,
       type: "claim",
-      summary: "Citing a unit grep returned.",
+      summary: "Ferris takes gabapentin twice daily with food.",
       evidence: [{ textUnitId: ferris.id }],
       links: [],
     }, context);
@@ -273,7 +276,7 @@ describe("cite-by-quote evidence (backlog #9)", () => {
     const result = await remember(store, {
       title: `Recall-served uuid ${stamp}`,
       type: "claim",
-      summary: "Citing a unit recall packed.",
+      summary: "The widget service listens on port 9191 after the migration.",
       evidence: [{ textUnitId: widget.id }],
       links: [],
     }, context);
@@ -298,4 +301,23 @@ describe("cite-by-quote evidence (backlog #9)", () => {
       "an owner-scoped quote must fail closed against text it cannot see",
     );
   });
+
+  it("raw UUID evidence fails closed as unknown across owner scopes on both drivers", async () => {
+    const widget = unitWithText(s1Units, "widget service");
+    const result = await remember(store, {
+      title: `Cross-owner UUID ${stamp}`,
+      type: "claim",
+      summary: "The widget service listens on port 9191 after the migration.",
+      evidence: [{ textUnitId: widget.id }],
+      links: [],
+    }, otherContext);
+
+    assert.equal(result.complete, false, "an invisible UUID citation leaves a partial result");
+    assert.equal(result.evidenceRejected?.length, 1);
+    assert.equal(result.evidenceRejected?.[0]?.textUnitId, widget.id);
+    assert.match(result.evidenceRejected?.[0]?.reason ?? "", /unknown text unit/i);
+    assert.equal(result.evidenceUnsupported, undefined, "an invisible unit is rejected before support scoring");
+    assert.equal((await store.read({ nodeId: result.node.id }, otherContext, { trackAccess: false }))?.annotations.length, 0);
+  });
+
 });

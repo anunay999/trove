@@ -1,6 +1,6 @@
 import type { ForgetInput, GraphEdge, GraphNode, QuoteEvidenceRef, ReadAnyInput, RememberInput } from "./contracts.js";
 import type { GraphOperationContext, GraphSourceDocument, GraphStore, ReadResult, TextQuoteMatch } from "./graphCore.js";
-import { UnknownEvidenceReferenceError } from "./graphCore.js";
+import { evidenceSupportScore, UnknownEvidenceReferenceError, WEAK_EVIDENCE_FLOOR } from "./graphCore.js";
 import { slugify } from "./slug.js";
 
 export type RememberResult = {
@@ -28,6 +28,14 @@ export type RememberResult = {
    * construction. Present only when at least one ref was unserved.
    */
   evidenceUnserved?: Array<{ sourceId: string | null; textUnitId: string | null; reason: string }>;
+  /**
+   * Raw-UUID refs that ATTACHED but collectively weakly support the note
+   * (backlog #17). Additive and non-breaking — every resolvable citation
+   * lands, while one note-level warning tells the agent to re-cite as
+   * { quote } so the actual span grounds the claim. Any successfully attached
+   * quote citation exempts the note. Present only when support is weak.
+   */
+  evidenceUnsupported?: Array<{ sourceId: string | null; textUnitId: string | null; reason: string }>;
   /** Requested links that could not be attached after the node mutation landed. */
   linkRejected?: Array<{ toSlug: string; predicate: string; reason: string }>;
 };
@@ -185,12 +193,17 @@ export async function remember(
   // (loud, actionable), and any other failure still throws — the old catch-all
   // made a bogus citation indistinguishable from a database on fire.
   // { quote } refs are resolved to units BEFORE attaching (cite-by-quote);
-  // UUID refs that attach but were never served this session come back in
-  // `evidenceUnserved` — attached (non-breaking), but visibly suspect.
+  // raw UUID refs are resolved and attached individually, then support-scored
+  // together; attached-but-weak or unserved refs remain visible warnings.
   const evidenceRejected: NonNullable<RememberResult["evidenceRejected"]> = [];
   const evidenceUnserved: NonNullable<RememberResult["evidenceUnserved"]> = [];
+  const evidenceUnsupported: NonNullable<RememberResult["evidenceUnsupported"]> = [];
   const linkRejected: NonNullable<RememberResult["linkRejected"]> = [];
-  const attachEvidence = async (nodeId: string): Promise<void> => {
+  const attachEvidence = async (node: GraphNode): Promise<void> => {
+    const nodeText = `${node.title}\n${node.summary ?? ""}\n${(node.content ?? "").slice(0, 2000)}`;
+    const nodeId = node.id;
+    const attachedRawUnits: Array<{ sourceId: string | null; textUnitId: string; text: string }> = [];
+    let hasAttachedQuote = false;
     for (const evidence of input.evidence ?? []) {
       if (evidence.quote) {
         const resolved = await resolveQuoteRef(store, evidence, context);
@@ -231,6 +244,7 @@ export async function remember(
           }
           throw error;
         }
+        hasAttachedQuote = true;
         continue;
       }
 
@@ -246,6 +260,24 @@ export async function remember(
             "Add a textUnitId from served output, or cite { quote } (optionally narrowed with sourceId).",
         });
         continue;
+      }
+
+      let rawUnit: { sourceId: string | null; textUnitId: string; text: string } | null = null;
+      if (evidence.textUnitId) {
+        const unitText = await store.textUnitText({ textUnitId: evidence.textUnitId }, context);
+        if (unitText === null) {
+          evidenceRejected.push({
+            sourceId: evidence.sourceId ?? null,
+            textUnitId: evidence.textUnitId,
+            reason: `annotation references an unknown text unit: ${evidence.textUnitId}`,
+          });
+          continue;
+        }
+        rawUnit = {
+          sourceId: evidence.sourceId ?? null,
+          textUnitId: evidence.textUnitId,
+          text: unitText,
+        };
       }
 
       try {
@@ -269,6 +301,8 @@ export async function remember(
         throw error;
       }
 
+      if (rawUnit) attachedRawUnits.push(rawUnit);
+
       // (b) A UUID ref that attached but was never served to this session is a
       // hallucination by definition — flag it (warning, not rejection).
       if (evidence.textUnitId) {
@@ -283,6 +317,27 @@ export async function remember(
               "otherwise fetch the span first (grep/read the source) and cite again.",
           });
         }
+      }
+    }
+
+    if (!hasAttachedQuote && attachedRawUnits.length > 0) {
+      let bestUnit = attachedRawUnits[0]!;
+      let bestScore = evidenceSupportScore(nodeText, [bestUnit.text]);
+      for (const unit of attachedRawUnits.slice(1)) {
+        const score = evidenceSupportScore(nodeText, [unit.text]);
+        if (score > bestScore) {
+          bestUnit = unit;
+          bestScore = score;
+        }
+      }
+      if (bestScore < WEAK_EVIDENCE_FLOOR) {
+        evidenceUnsupported.push({
+          sourceId: bestUnit.sourceId,
+          textUnitId: bestUnit.textUnitId,
+          reason:
+            `This note's raw-UUID evidence supports only ${(bestScore * 100).toFixed(0)}% of its content terms ` +
+            `(floor ${WEAK_EVIDENCE_FLOOR * 100}%). Re-cite the supporting span as { quote } so it grounds the note by construction, or use stronger evidence.`,
+        });
       }
     }
   };
@@ -313,12 +368,13 @@ export async function remember(
     }
   };
   const finish = (
-    result: Omit<RememberResult, "complete" | "evidenceRejected" | "evidenceUnserved" | "linkRejected">,
+    result: Omit<RememberResult, "complete" | "evidenceRejected" | "evidenceUnserved" | "evidenceUnsupported" | "linkRejected">,
   ): RememberResult => ({
     ...result,
-    complete: evidenceRejected.length === 0 && evidenceUnserved.length === 0 && linkRejected.length === 0,
+    complete: evidenceRejected.length === 0 && evidenceUnserved.length === 0 && evidenceUnsupported.length === 0 && linkRejected.length === 0,
     ...(evidenceRejected.length > 0 ? { evidenceRejected } : {}),
     ...(evidenceUnserved.length > 0 ? { evidenceUnserved } : {}),
+    ...(evidenceUnsupported.length > 0 ? { evidenceUnsupported } : {}),
     ...(linkRejected.length > 0 ? { linkRejected } : {}),
   });
 
@@ -332,7 +388,7 @@ export async function remember(
       links: [],
     }, context);
     await attachLinks(node.id);
-    await attachEvidence(node.id);
+    await attachEvidence(node);
     return finish({ action: "created", node, similar });
   }
 
@@ -353,7 +409,7 @@ export async function remember(
   }
 
   await attachLinks(target.id);
-  await attachEvidence(target.id);
+  await attachEvidence(updated);
 
   return finish({ action: "updated", node: updated, similar });
 }
