@@ -89,14 +89,15 @@ create table node_revision (
   node_id uuid not null references node(id),
   source_id uuid references source(id),
   revision_number bigint not null,
+  title text,
+  summary text,
   content text,
   projection_markdown text,
   frontmatter jsonb not null default '{}'::jsonb,
   content_sha256 text not null,
   created_by uuid references actor(id),
   created_at timestamptz not null default now(),
-  unique (node_id, revision_number),
-  unique (node_id, content_sha256)
+  unique (node_id, revision_number)
 );
 
 alter table node
@@ -214,6 +215,8 @@ create index annotation_text_unit_idx on annotation(text_unit_id);
 create index graph_event_entity_idx on graph_event(entity_table, entity_id, created_at desc);
 create index graph_job_status_idx on graph_job(status, priority desc, created_at);
 create index graph_job_kind_idx on graph_job(kind, created_at desc);
+create index node_revision_as_of_idx
+  on node_revision(node_id, created_at desc, revision_number desc);
 
 create index node_search_idx on node using gin(
   to_tsvector('english', coalesce(title, '') || ' ' || coalesce(summary, ''))

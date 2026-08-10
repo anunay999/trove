@@ -498,11 +498,11 @@ export async function forget(
 /** Read anything by id or slug: nodes first, then raw sources. */
 export async function readAny(store: GraphStore, input: ReadAnyInput, context?: GraphOperationContext): Promise<ReadAnyResult | null> {
   if (input.slug) {
-    const node = await store.read({ slug: input.slug }, context);
+    const node = await store.read({ slug: input.slug, ...(input.asOf ? { asOf: input.asOf } : {}) }, context);
     return node ? { kind: "node", node } : null;
   }
   if (!input.id) return null;
-  const node = await store.read({ nodeId: input.id }, context);
+  const node = await store.read({ nodeId: input.id, ...(input.asOf ? { asOf: input.asOf } : {}) }, context);
   if (node) return { kind: "node", node };
   const source = await store.readSource({ sourceId: input.id }, context);
   if (source) return { kind: "source", source };

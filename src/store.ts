@@ -96,6 +96,9 @@ import { slugify } from "./slug.js";
 type Revision = {
   id: string;
   nodeId: string;
+  revisionNumber: number;
+  title: string | null;
+  summary: string | null;
   content: string | null;
   createdAt: string;
 };
@@ -411,16 +414,41 @@ export class InMemoryGraphStore implements GraphStore {
     const stored = this.nodes.get(nodeId);
     if (!stored) return null;
 
-    let node = stored;
+    const revision = input.asOf
+      ? [...this.revisions.values()]
+        .filter((candidate) =>
+          candidate.nodeId === stored.id &&
+          Date.parse(candidate.createdAt) <= Date.parse(input.asOf as string)
+        )
+        .sort((left, right) =>
+          Date.parse(right.createdAt) - Date.parse(left.createdAt) ||
+          right.revisionNumber - left.revisionNumber
+        )[0]
+      : undefined;
+    if (input.asOf && !revision) return null;
+
+    let node: GraphNode = revision
+      ? {
+        ...stored,
+        title: revision.title ?? stored.title,
+        summary: revision.summary,
+        content: revision.content,
+        revisionId: revision.id,
+        updatedAt: revision.createdAt,
+      }
+      : stored;
     if (opts?.trackAccess ?? true) {
-      node = {
+      const activated = {
         ...stored,
         accessCount: stored.accessCount + 1,
         lastAccessedAt: new Date().toISOString(),
       };
-      this.nodes.set(node.id, node);
+      this.nodes.set(activated.id, activated);
+      node = { ...node, accessCount: activated.accessCount, lastAccessedAt: activated.lastAccessedAt };
     }
 
+    // Evidence and annotations intentionally remain current for historical fact
+    // reads; only title/summary/content are revision-scoped in backlog #18.
     const annotations = [...this.annotations.values()].filter((annotation) => annotation.nodeId === node.id);
     const unitsById = new Map(
       (this.getEvidenceForNodes([node.id]).get(node.id) ?? []).map((unit) => [unit.id, unit] as const),
@@ -717,7 +745,15 @@ export class InMemoryGraphStore implements GraphStore {
 
     this.nodes.set(id, node);
     this.slugIndex.set(slug, id);
-    this.revisions.set(revisionId, { id: revisionId, nodeId: id, content: node.content, createdAt: now });
+    this.revisions.set(revisionId, {
+      id: revisionId,
+      nodeId: id,
+      revisionNumber: 1,
+      title: node.title,
+      summary: node.summary,
+      content: node.content,
+      createdAt: now,
+    });
     this.recordEvent("capture", id, context, now);
     this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
     this.enqueueReconcileJob(context, id);
@@ -781,8 +817,11 @@ export class InMemoryGraphStore implements GraphStore {
     }
 
     const now = new Date().toISOString();
+    const titleChanged = input.title !== undefined && input.title !== existing.title;
+    const summaryChanged = input.summary !== undefined && input.summary !== existing.summary;
     const contentChanged = input.content !== undefined && input.content !== existing.content;
-    const revisionId = contentChanged ? randomUUID() : existing.revisionId;
+    const factChanged = titleChanged || summaryChanged || contentChanged;
+    const revisionId = factChanged ? randomUUID() : existing.revisionId;
     let slug = existing.slug;
     if (input.slug) {
       const base = slugify(input.slug);
@@ -803,12 +842,26 @@ export class InMemoryGraphStore implements GraphStore {
       this.slugIndex.delete(existing.slug);
       this.slugIndex.set(slug, updated.id);
     }
-    if (contentChanged) {
-      this.revisions.set(revisionId, { id: revisionId, nodeId: updated.id, content: updated.content, createdAt: now });
+    if (factChanged) {
+      const revisionNumber = 1 + Math.max(
+        0,
+        ...[...this.revisions.values()]
+          .filter((revision) => revision.nodeId === updated.id)
+          .map((revision) => revision.revisionNumber),
+      );
+      this.revisions.set(revisionId, {
+        id: revisionId,
+        nodeId: updated.id,
+        revisionNumber,
+        title: updated.title,
+        summary: updated.summary,
+        content: updated.content,
+        createdAt: now,
+      });
     }
     this.recordEvent("update", updated.id, context, now);
     this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
-    // Reconcile only when content actually changed — new claims, new judgement.
+    // Preserve reconcile cadence: only body changes introduce claims to judge.
     if (contentChanged) this.enqueueReconcileJob(context, updated.id);
     return updated;
   }

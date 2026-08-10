@@ -89,6 +89,7 @@ describe("per-user isolation", { skip: databaseUrl ? false : "requires a Postgre
 
   it("returns null for Bob's direct reads of Alice's data", async () => {
     assert.equal(await store.read({ nodeId: aliceNode.id }, B), null, "read-by-id leaked Alice's node to Bob");
+    assert.equal(await store.read({ nodeId: aliceNode.id, asOf: new Date().toISOString() }, B), null, "historical read leaked Alice's node to Bob");
     assert.equal(await store.read({ slug: aliceNode.slug }, B), null, "read-by-slug leaked Alice's node to Bob");
     assert.equal(await store.readSource({ sourceId: aliceSource.source.id }, B), null, "readSource leaked Alice's source to Bob");
 

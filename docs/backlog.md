@@ -102,8 +102,8 @@ next to the number, and be disbelieved if it does not.
 
 | | | |
 |---|---|---|
-| ⚠️ | `read` may not fetch an older revision — time travel may be edges-only, making the README's fact-level claim an overstatement | #18 |
-| ⚠️ | README copy on bitemporal history | #22 |
+| ✅ | `read({ asOf })` selects the newest fact revision at that time; title, summary, and content are snapshotted | #18 |
+| ✅ | README distinguishes node recorded-time history from edge bitemporality | #22 |
 
 ### A note on how these numbers were produced
 
@@ -477,11 +477,11 @@ scribe-vault import produces a flood of 0%-containment findings, i.e. the
 signal immediately found suspicious citations in production data. Covered by
 `tests/lint.test.ts`.
 
-### 18. Node-level time travel ⚠️
+### 18. Node-level time travel ✅
 
-**Reported** — `read` cannot request an older node revision; time travel covers
-edges only. **Not verified.** If true, the README's fact-level bitemporal history
-claim overstates the implementation.
+**Fixed 2026-08-06** — `node_revision` snapshots title, summary, and content;
+`read({ asOf })` selects the newest revision recorded by that time and returns
+`null` before creation. Evidence and annotations deliberately remain current.
 
 ### 19. Broader query-plan coverage ✅
 
@@ -511,7 +511,7 @@ job cadence.
   `remember` performs node update, links and annotations as separate operations.
 - `docs/deployment.md` says production needs an external scheduled worker, while
   `src/server.ts:686` starts one automatically. ⚠️ reported.
-- `README.md` advertises fact-level bitemporal history. ⚠️ reported (see #18).
+- `README.md` now documents recorded-time node snapshots separately from edge bitemporality. ✅ fixed with #18.
 - `README.md` says "nothing is a free-floating fact". ⚠️ reported (see #9).
 
 ### 23. `repro-eval` reports `18/17 PASS` ✅ **fixed 2026-07-19**

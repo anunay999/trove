@@ -111,7 +111,7 @@ export const troveTools = [
     name: "read",
     tier: "core",
     description:
-      "Open one note or raw source by id or name (slug) — full body, not a short brief. Use when you know the name (e.g. billing-pricing-rules) or after grep/recall found the right note and you need everything.",
+      "Open one note or raw source by id or name (slug) — full body, not a short brief. For nodes, pass asOf to recover the title, summary, and content recorded at that time. Evidence and annotations remain current. Use when you know the name or after grep/recall found it.",
     inputSchema: readAnyInputSchema,
   },
   {
