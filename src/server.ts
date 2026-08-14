@@ -55,6 +55,7 @@ import {
   resourceMetadataUrl,
 } from "./oauthMetadata.js";
 import { createGraphStore } from "./createStore.js";
+import { isSmokeEvent } from "./graphCore.js";
 import { startJobWorker } from "./jobWorker.js";
 import { createTroveMcpServer } from "./mcpTools.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
@@ -211,22 +212,11 @@ app.get("/v1/stats", async (context) => {
     sourcesPerDay.set(date, entry);
   }
 
-  // Test suites tag their writes with "-smoke" actors; the audit log keeps
-  // them forever, but the dashboard should reflect real memory activity.
-  const isSmokeEvent = (event: (typeof latest)[number]): boolean =>
-    (event.actorHandle ?? "").endsWith("-smoke") ||
-    (event.actorId ?? "").endsWith("-smoke") ||
-    (event.interfaceId ?? "").endsWith("-smoke");
-
-  const allEvents: Awaited<ReturnType<typeof store.timeline>> = [];
-  let cursor: string | undefined;
-  for (let page = 0; page < 20; page += 1) {
-    const feedPage = await store.events(cursor ? { afterCursor: cursor, limit: 500 } : { limit: 500 }, owner);
-    allEvents.push(...feedPage.events.filter((event) => !isSmokeEvent(event)));
-    if (!feedPage.hasMore || !feedPage.nextCursor) break;
-    cursor = feedPage.nextCursor;
-  }
-  const feed = { events: allEvents, hasMore: allEvents.length >= 10_000 };
+  // Whole-log rollups come from an aggregate, not from paging the feed. The
+  // paged version stopped after 10,000 events and reported zero for every day
+  // it never reached, so the cadence chart went blank for the most recent week
+  // while writes were still landing.
+  const eventStats = await store.eventStats(owner);
 
   const countBy = <T>(items: T[], key: (item: T) => string): Array<{ key: string; count: number }> => {
     const counts = new Map<string, number>();
@@ -238,17 +228,6 @@ app.get("/v1/stats", async (context) => {
       .map(([k, count]) => ({ key: k, count }))
       .sort((left, right) => right.count - left.count || left.key.localeCompare(right.key));
   };
-
-  const eventsPerDay = new Map<string, { date: string; total: number; writes: number }>();
-  for (const event of feed.events) {
-    const date = event.createdAt.slice(0, 10);
-    const entry = eventsPerDay.get(date) ?? { date, total: 0, writes: 0 };
-    entry.total += 1;
-    if (["capture", "update", "link", "ingest", "annotate", "invalidate_edge"].includes(event.action)) {
-      entry.writes += 1;
-    }
-    eventsPerDay.set(date, entry);
-  }
 
   const topAccessed = [...snapshot.nodes]
     .filter((node) => node.accessCount > 0)
@@ -264,10 +243,10 @@ app.get("/v1/stats", async (context) => {
     }));
 
   // Job-queue churn is summarized on the health card; the activity feed shows
-  // memory writes. Read newest-first so recency never depends on how far the
-  // forward aggregate walk got (the log outgrew that window once already).
+  // memory writes. Read newest-first so recency never depends on how far any
+  // forward walk got (the log outgrew that window once already).
   const JOB_ACTIONS = new Set(["enqueue_job", "run_job", "fail_job"]);
-  const recentEvents: typeof feed.events = [];
+  const recentEvents: typeof latest = [];
   let recentCursor: string | undefined;
   for (let page = 0; page < 5 && recentEvents.length < 12; page += 1) {
     const recentPage = await store.events({
@@ -287,15 +266,16 @@ app.get("/v1/stats", async (context) => {
       nodes: snapshot.nodes.length,
       edges: snapshot.edges.length,
       views: snapshot.views?.length ?? 0,
-      events: feed.events.length,
-      eventsTruncated: feed.hasMore,
-      ingests: feed.events.filter((event) => event.action === "ingest").length,
+      events: eventStats.total,
+      // The rollup covers the whole log now; nothing is dropped for size.
+      eventsTruncated: false,
+      ingests: eventStats.actions.find((row) => row.key === "ingest")?.count ?? 0,
       totalRecalls: snapshot.nodes.reduce((sum, node) => sum + node.accessCount, 0),
     },
     nodeTypes: countBy(snapshot.nodes, (node) => node.type),
     predicates: countBy(snapshot.edges, (edge) => edge.predicate),
-    actions: countBy(feed.events, (event) => event.action),
-    eventsPerDay: [...eventsPerDay.values()].sort((left, right) => left.date.localeCompare(right.date)),
+    actions: eventStats.actions,
+    eventsPerDay: eventStats.perDay,
     sourcesPerDay: [...sourcesPerDay.values()].sort((left, right) => left.date.localeCompare(right.date)),
     topAccessed,
     recentEvents,

@@ -49,6 +49,8 @@ import {
   WEAK_EVIDENCE_FLOOR,
   type GraphEvent,
   type GraphEventFeed,
+  type GraphEventStats,
+  WRITE_ACTIONS,
   type GraphJob,
   type GraphOperationContext,
   type GraphLintFinding,
@@ -1419,9 +1421,16 @@ export class PgGraphStore implements GraphStore {
     const after = input.afterCursor ? decodeEventCursor(input.afterCursor) : null;
     const descending = input.order === "desc";
     const scope = ownerScope(context);
+    // The cursor carries `cursor_at`, not the event's `createdAt`. Postgres
+    // keeps created_at to the microsecond while a JS ISO string stops at the
+    // millisecond, so a cursor built from the mapped event pointed at a moment
+    // just BEFORE the row it was meant to resume after — and the keyset
+    // predicate handed that row back on the next page. Every page boundary
+    // re-served its last row to anything syncing through the feed.
     const result = await this.pool.query(
       `select ge.id, ge.action, ge.entity_table, ge.entity_id, ge.actor_id, a.handle as actor_handle,
-              ge.interface_id, ge.request_id, ge.created_at
+              ge.interface_id, ge.request_id, ge.created_at,
+              to_char(ge.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor_at
        from graph_event ge
        left join actor a on a.id = ge.actor_id
        where ($4 or ge.owner_id = $5) and ($1::timestamptz is null or ${descending
@@ -1433,11 +1442,67 @@ export class PgGraphStore implements GraphStore {
     );
     const rows = result.rows.slice(0, input.limit);
     const events = rows.map(mapEvent);
-    const last = events.at(-1);
+    const last = rows.at(-1);
     return {
       events,
-      nextCursor: last ? encodeEventCursor(last) : input.afterCursor ?? null,
+      nextCursor: last
+        ? encodeEventCursor({ createdAt: String(last.cursor_at), id: String(last.id) })
+        : input.afterCursor ?? null,
       hasMore: result.rows.length > rows.length,
+    };
+  }
+
+  /**
+   * Day and action rollups, aggregated in the database.
+   *
+   * The dashboard used to build these by paging the feed oldest-first, capped
+   * at 20 pages of 500. Once the log passed 10,000 events the walk ran out
+   * before it reached the newest days, so the cadence chart read zero for
+   * everything after the cutoff while the graph itself was plainly growing —
+   * and the truncation flag compared the post-smoke-filter count against the
+   * raw cap, so it never fired. Aggregate; never paginate a whole-log rollup.
+   */
+  async eventStats(context?: GraphOperationContext): Promise<GraphEventStats> {
+    const scope = ownerScope(context);
+    // Bucket in UTC to match the ISO dates the rest of the API reports.
+    // actor_id is a uuid here, so the "-smoke" check that the feed applies to
+    // it can never match; handle and interface are the ones that carry the tag.
+    const result = await this.pool.query(
+      `select to_char(ge.created_at at time zone 'UTC', 'YYYY-MM-DD') as date,
+              ge.action as action,
+              count(*)::int as count
+       from graph_event ge
+       left join actor a on a.id = ge.actor_id
+       where ($1 or ge.owner_id = $2)
+         and coalesce(a.handle, '') not like '%-smoke'
+         and coalesce(ge.interface_id, '') not like '%-smoke'
+       group by 1, 2
+       order by 1`,
+      [!scope.scoped, scope.ownerId],
+    );
+
+    const writeActions = new Set(WRITE_ACTIONS);
+    const perDay = new Map<string, { date: string; total: number; writes: number }>();
+    const actions = new Map<string, number>();
+    let total = 0;
+    for (const row of result.rows) {
+      const date = String(row.date);
+      const action = String(row.action);
+      const count = Number(row.count);
+      const entry = perDay.get(date) ?? { date, total: 0, writes: 0 };
+      entry.total += count;
+      if (writeActions.has(action)) entry.writes += count;
+      perDay.set(date, entry);
+      actions.set(action, (actions.get(action) ?? 0) + count);
+      total += count;
+    }
+
+    return {
+      total,
+      perDay: [...perDay.values()].sort((left, right) => left.date.localeCompare(right.date)),
+      actions: [...actions.entries()]
+        .map(([key, count]) => ({ key, count }))
+        .sort((left, right) => right.count - left.count || left.key.localeCompare(right.key)),
     };
   }
 

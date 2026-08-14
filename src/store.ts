@@ -69,6 +69,9 @@ import {
   WEAK_EVIDENCE_FLOOR,
   type GraphEvent,
   type GraphEventFeed,
+  type GraphEventStats,
+  isSmokeEvent,
+  WRITE_ACTIONS,
   type GraphJob,
   type GraphOperationContext,
   type GraphLintFinding,
@@ -914,6 +917,30 @@ export class InMemoryGraphStore implements GraphStore {
       events: page,
       nextCursor: last ? encodeEventCursor(last) : input.afterCursor ?? null,
       hasMore: filtered.length > page.length,
+    };
+  }
+
+  eventStats(): GraphEventStats {
+    const writeActions = new Set(WRITE_ACTIONS);
+    const perDay = new Map<string, { date: string; total: number; writes: number }>();
+    const actions = new Map<string, number>();
+    let total = 0;
+    for (const event of this.eventLog) {
+      if (isSmokeEvent(event)) continue;
+      const date = event.createdAt.slice(0, 10);
+      const entry = perDay.get(date) ?? { date, total: 0, writes: 0 };
+      entry.total += 1;
+      if (writeActions.has(event.action)) entry.writes += 1;
+      perDay.set(date, entry);
+      actions.set(event.action, (actions.get(event.action) ?? 0) + 1);
+      total += 1;
+    }
+    return {
+      total,
+      perDay: [...perDay.values()].sort((left, right) => left.date.localeCompare(right.date)),
+      actions: [...actions.entries()]
+        .map(([key, count]) => ({ key, count }))
+        .sort((left, right) => right.count - left.count || left.key.localeCompare(right.key)),
     };
   }
 

@@ -99,6 +99,33 @@ export type GraphEventFeed = {
   hasMore: boolean;
 };
 
+/** Actions the dashboard counts as a write on the cadence chart. */
+export const WRITE_ACTIONS = ["capture", "update", "link", "ingest", "annotate", "invalidate_edge"];
+
+/**
+ * Test suites tag their writes with a "-smoke" actor or interface. The audit
+ * log keeps them forever, but the dashboard should reflect real memory
+ * activity, so every rollup drops them.
+ */
+export function isSmokeEvent(event: Pick<GraphEvent, "actorHandle" | "actorId" | "interfaceId">): boolean {
+  return (event.actorHandle ?? "").endsWith("-smoke") ||
+    (event.actorId ?? "").endsWith("-smoke") ||
+    (event.interfaceId ?? "").endsWith("-smoke");
+}
+
+/**
+ * Whole-log rollups for the dashboard. Computed by aggregation, never by
+ * paging the feed: the log outgrows any page budget, and a walk that stops
+ * early silently reports zero for the days it never reached.
+ */
+export type GraphEventStats = {
+  /** Every non-smoke event for this owner — not a page of them. */
+  total: number;
+  /** UTC day buckets, ascending. Days with no events are absent, not zero. */
+  perDay: Array<{ date: string; total: number; writes: number }>;
+  actions: Array<{ key: string; count: number }>;
+};
+
 /**
  * Row counts for the two owner types the embedding backfill touches.
  *
@@ -468,6 +495,7 @@ export type GraphStore = {
   project(input: ProjectInput, context?: GraphOperationContext): MaybePromise<ProjectResult | null>;
   timeline(context?: GraphOperationContext): MaybePromise<GraphEvent[]>;
   events(input?: EventFeedInput, context?: GraphOperationContext): MaybePromise<GraphEventFeed>;
+  eventStats(context?: GraphOperationContext): MaybePromise<GraphEventStats>;
   lint(context?: GraphOperationContext): MaybePromise<GraphLintReport>;
   createView(input: CreateViewInput, context?: GraphOperationContext): MaybePromise<GraphViewSnapshot>;
   views(input?: ListViewsInput, context?: GraphOperationContext): MaybePromise<GraphView[]>;
