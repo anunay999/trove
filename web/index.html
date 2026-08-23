@@ -10,6 +10,44 @@
     <meta property="og:description" content="One memory graph your agents read and write over MCP. Every fact traced to its source, every belief change on the record." />
     <meta property="og:type" content="website" />
     <title>Trove | Evidence-backed memory for AI agents</title>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "What exactly is an evidence graph?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Each memory in Trove cites the exact source text that justifies it; conclusions without a source stay marked as agent inference, and a linter flags evidence-free nodes." }
+          },
+          {
+            "@type": "Question",
+            "name": "Which agents can use Trove?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Anything that speaks MCP: Claude Code, Codex, Cursor, or claude.ai via the OAuth connector. Tools are remember, recall, grep, read, connect, forget." }
+          },
+          {
+            "@type": "Question",
+            "name": "What happens when a fact changes?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Old beliefs are superseded, never overwritten. Edges expire with recorded history, so you can ask what the graph believed at any point in time." }
+          },
+          {
+            "@type": "Question",
+            "name": "Do I have to trust the hosted service?",
+            "acceptedAnswer": { "@type": "Answer", "text": "No. Trove is AGPL-3.0 open source with a production Dockerfile; self-host on Railway plus Supabase Postgres and export your graph to Obsidian anytime." }
+          },
+          {
+            "@type": "Question",
+            "name": "Can several agents share one graph safely?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Every credential is scoped to its own private graph automatically, keys are tiered read-only/write/admin, and every call is scope-checked server-side." }
+          },
+          {
+            "@type": "Question",
+            "name": "How does recall stay within my token budget?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Hybrid lexical and semantic search seeds a one-hop graph expansion; candidates ranked by relevance plus recency and frequency fill the budget you set." }
+          }
+        ]
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
