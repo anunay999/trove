@@ -2,8 +2,10 @@ import { useRef } from "react";
 import { motion, useReducedMotion, useScroll, useTransform, type MotionValue } from "motion/react";
 import { AgentLogos } from "@/components/AgentLogos";
 import { DashboardProof } from "@/components/DashboardProof";
+import { FaqSection } from "@/components/FaqSection";
 import { GrepSection } from "@/components/GrepSection";
 import { HeroStream } from "@/components/hero/HeroStream";
+import { HowItWorks } from "@/components/HowItWorks";
 import { WaitlistForm } from "@/components/WaitlistForm";
 
 type LandingProps = {
@@ -13,9 +15,9 @@ type LandingProps = {
 };
 
 const PRIMITIVES: Array<[string, string, string]> = [
-  ["01", "Evidence first", "Nothing is a free-floating fact. Every memory cites the exact source span that justifies it — or is marked as agent inference."],
-  ["02", "Time aware", "Beliefs change by supersession, never deletion. Ask what is true now, or what the graph believed at any point in the past."],
-  ["03", "Agent native", "One MCP endpoint for Claude, Codex, Cursor, and your scripts. Scoped keys per agent, one private graph per account."],
+  ["01", "Recall you can trust", "Every memory cites the exact source span that justifies it — or is visibly marked as agent inference. Audit any fact down to its quote."],
+  ["02", "History that never rewrites itself", "Beliefs change by supersession, never deletion. Ask what's true now — or what the graph believed last March."],
+  ["03", "Five minutes to first recall", "One MCP endpoint for Claude, Codex, Cursor, and your scripts. Scoped keys per agent, a private graph per account, nothing else to wire up."],
 ];
 
 /** One word of a scroll-driven reveal: opacity tied to its slice of the scroll range. */
@@ -86,7 +88,8 @@ export function Landing({ onJoin, onLogin, onConnectKey }: LandingProps) {
           useful the longer your agents work.
         </motion.p>
 
-        <div className="mt-20 border-t">
+        <p className="mt-16 font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">What that buys you</p>
+        <div className="mt-6 border-t">
           {PRIMITIVES.map(([index, title, body], i) => (
             <motion.div
               key={index}
@@ -104,9 +107,13 @@ export function Landing({ onJoin, onLogin, onConnectKey }: LandingProps) {
         </div>
       </section>
 
+      <HowItWorks />
+
       <GrepSection />
 
       <DashboardProof />
+
+      <FaqSection />
 
       {/* Closer: one claim, one action, nothing else. */}
       <section className="border-t border-border px-6 py-28 md:py-40 lg:px-10">
@@ -120,6 +127,9 @@ export function Landing({ onJoin, onLogin, onConnectKey }: LandingProps) {
           <div className="mt-10 w-full max-w-md">
             <WaitlistForm onJoin={onJoin} idPrefix="footer" />
           </div>
+          <p className="mt-6 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+            Open source (AGPL-3.0) · Self-host anytime · Export to Obsidian
+          </p>
         </div>
       </section>
 

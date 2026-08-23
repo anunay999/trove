@@ -73,6 +73,9 @@ export function HeroStream({ onJoin, onLogin, onConnectKey }: HeroStreamProps) {
                 Use an API key
               </button>
             </div>
+            <p className="mt-6 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+              Open source · Self-hostable · Works with any MCP client
+            </p>
           </motion.div>
         </div>
 
