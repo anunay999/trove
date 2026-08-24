@@ -24,4 +24,21 @@ declare module "d3-force-3d" {
   export function forceCollide(radius?: Accessor<number>): CollideForce;
   export function forceX(x?: Accessor<number>): PositionForce;
   export function forceY(y?: Accessor<number>): PositionForce;
+  export function forceZ(z?: Accessor<number>): PositionForce;
+  export function forceCenter(): Force;
+  export function forceManyBody(): Force;
+  export function forceLink(links?: any[]): LinkForce;
+
+  interface LinkForce extends Force {
+    id(id: (node: any, i: number, nodes: any[]) => string): this;
+    distance(distance: Accessor<number>): this;
+  }
+
+  interface Simulation {
+    force(name: string, force: Force): this;
+    stop(): this;
+    tick(iterations?: number): this;
+  }
+
+  export function forceSimulation(nodes?: any[], numDimensions?: 1 | 2 | 3): Simulation;
 }
