@@ -7,14 +7,13 @@ import { LINKS, SEEDS, degreeOf } from "@/lib/seed-graph";
 import { typeColor } from "@/lib/viz";
 
 /**
- * The hero's right column: the memory graph itself, alive.
+ * The hero's right column: agents collaborating through the memory graph.
  *
- * The same seed data the inspectable MiniGraph draws, laid out once by a
- * frozen force simulation. One moment at a time plays: an amber pulse travels
- * an edge while the rest of the graph dims, labels name the two nodes
- * involved, and the caption below cites the source. A recall pulls evidence
- * toward a memory; a supersede retires a belief without deleting it. The
- * graph is the product; the moment is the product's verb.
+ * Four named agents sit around a constellation of memories. The pulses are
+ * the story — an agent writes what it learned into the graph, a different
+ * agent in a different session recalls it with evidence attached, and a
+ * supersede retires a belief without deleting it. Parallel sessions share
+ * one graph: what one agent learns, every agent knows.
  *
  * Perf contract mirrors the rest of the page: frames stop when the hero
  * leaves the viewport or the tab hides, prefers-reduced-motion freezes the
@@ -82,7 +81,7 @@ function computeLayout(): Map<string, THREE.Vector3> {
   });
   let newMax = 0;
   positions.forEach((v) => (newMax = Math.max(newMax, v.length())));
-  positions.forEach((v) => v.multiplyScalar(3.3 / newMax));
+  positions.forEach((v) => v.multiplyScalar(2.85 / newMax));
   return positions;
 }
 
@@ -90,65 +89,105 @@ const LAYOUT = computeLayout();
 const NODE_INDEX = new Map(SEEDS.map((s, i) => [s.id, i]));
 
 /* ------------------------------------------------------------------ */
-/* The moments: a curated loop of recalls and one supersede             */
+/* The agents: four sessions around one shared graph                    */
+/* ------------------------------------------------------------------ */
+
+const AGENT_RADIUS = 4.0;
+
+const AGENTS = [
+  { id: "claude-code", color: "#e0784f", pos: new THREE.Vector3(Math.cos(3.7) * AGENT_RADIUS, Math.sin(3.7) * AGENT_RADIUS, 0.15) },
+  { id: "codex", color: "#3fa87c", pos: new THREE.Vector3(Math.cos(5.85) * AGENT_RADIUS, Math.sin(5.85) * AGENT_RADIUS, -0.1) },
+  { id: "cursor", color: "#8b7ce8", pos: new THREE.Vector3(Math.cos(0.75) * AGENT_RADIUS, Math.sin(0.75) * AGENT_RADIUS, 0.05) },
+  { id: "gemini", color: "#4a90d9", pos: new THREE.Vector3(Math.cos(2.3) * AGENT_RADIUS, Math.sin(2.3) * AGENT_RADIUS, -0.15) },
+];
+
+const AGENT_INDEX = new Map(AGENTS.map((a, i) => [a.id, i]));
+
+/* ------------------------------------------------------------------ */
+/* The moments: agents writing, recalling, retiring — in parallel       */
 /* ------------------------------------------------------------------ */
 
 type Moment = {
-  kind: "recall" | "supersede";
-  from: string;
-  to: string;
+  kind: "write" | "recall" | "supersede";
   agent: string;
+  node: string;
+  /** For recalls: the evidence that travels with the memory. */
+  evidence?: string;
+  agentName: string;
   text: string;
   source: string;
-  /** Why this beats a plain vector store — the moment's argument. */
   kicker: string;
+  /** Marks the recall half of a write→recall pair: parallel collaboration. */
+  collab?: boolean;
 };
 
 const MOMENTS: Moment[] = [
   {
-    kind: "recall",
-    from: "adr-003",
-    to: "clerk",
+    kind: "write",
     agent: "claude-code",
-    text: "Clerk owns auth",
-    source: "adr-003.md",
-    kicker: "Every fact carries its source — audit any recall down to the quote.",
+    node: "pnpm",
+    agentName: "claude-code",
+    text: "Always pnpm, never npm",
+    source: "CONTRIBUTING.md",
+    kicker: "Session one hit the lockfile war once. The graph remembers so no session pays it again.",
   },
   {
     kind: "recall",
-    from: "railway-json",
-    to: "railway",
     agent: "cursor",
-    text: "Moved to Railway",
-    source: "railway.json",
-    kicker: "Sources are first-class nodes, not metadata on a chunk.",
+    node: "pnpm",
+    evidence: "contributing",
+    agentName: "cursor",
+    text: "Always pnpm, never npm",
+    source: "CONTRIBUTING.md",
+    kicker: "Different agent, different day — the convention just holds.",
+  },
+  {
+    kind: "write",
+    agent: "codex",
+    node: "vercel",
+    agentName: "codex",
+    text: "Moved to Vercel",
+    source: "vercel.json",
+    kicker: "Decisions land with their source attached, ready to be cited later.",
   },
   {
     kind: "supersede",
-    from: "railway",
-    to: "fly",
     agent: "codex",
-    text: "Deploys go to Fly.io — retired by Moved to Railway",
-    source: "railway.json",
-    kicker: "Nothing overwritten. Ask what the graph believed last March.",
+    node: "heroku",
+    agentName: "codex",
+    text: "Hosted on Heroku — retired by Moved to Vercel",
+    source: "adr-004.md",
+    kicker: "Nothing overwritten. Ask what the team believed last March.",
   },
   {
     kind: "recall",
-    from: "schema-sql",
-    to: "hnsw",
     agent: "gemini",
-    text: "HNSW index still off",
-    source: "db/schema.sql",
-    kicker: "Known limitations live in the graph, so no agent re-debugs them.",
+    node: "errors",
+    evidence: "errors-ts",
+    agentName: "gemini",
+    text: "Errors are { code, message }",
+    source: "src/errors.ts",
+    kicker: "Conventions hold across sessions, projects, and machines.",
+  },
+  {
+    kind: "write",
+    agent: "claude-code",
+    node: "pool",
+    agentName: "claude-code",
+    text: "Free tier caps the pool at 10",
+    source: "runbook.md",
+    kicker: "Operational facts stop living in one person's head.",
   },
   {
     kind: "recall",
-    from: "pr-12",
-    to: "node-test",
-    agent: "claude-code",
-    text: "Moved to node:test",
-    source: "pr-12.md",
-    kicker: "Decisions keep their receipts — no archaeology in old threads.",
+    agent: "gemini",
+    node: "pool",
+    evidence: "runbook",
+    agentName: "gemini",
+    text: "Free tier caps the pool at 10",
+    source: "runbook.md",
+    collab: true,
+    kicker: "claude-code learned this moments ago. Parallel sessions, one shared graph.",
   },
 ];
 
@@ -161,10 +200,11 @@ type SceneProps = {
   /** Live label anchors, written per frame in screen space. */
   labelFromRef: React.RefObject<HTMLDivElement | null>;
   labelToRef: React.RefObject<HTMLDivElement | null>;
+  agentLabelRefs: React.RefObject<(HTMLDivElement | null)[]>;
   reduced: boolean;
 };
 
-function GraphScene({ onMoment, labelFromRef, labelToRef, reduced }: SceneProps) {
+function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduced }: SceneProps) {
   const root = useRef<THREE.Group>(null);
   const field = useRef<THREE.InstancedMesh>(null);
   const pulse = useRef<THREE.Mesh>(null);
@@ -172,6 +212,7 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, reduced }: SceneProps)
   const activeLine = useRef<THREE.LineSegments>(null);
   const stars = useRef<THREE.Points>(null);
   const superLines = useRef<THREE.LineSegments>(null);
+  const agentMeshes = useRef<(THREE.Mesh | null)[]>([]);
 
   const camera = useThree((s) => s.camera);
   const size = useThree((s) => s.size);
@@ -196,11 +237,28 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, reduced }: SceneProps)
     [],
   );
   const glow = useRef<number[]>(SEEDS.map(() => 0));
+  const agentGlow = useRef<number[]>(AGENTS.map(() => 0));
   /** 1 = in focus, 0 = dimmed while another moment plays. */
   const focus = useRef<number[]>(SEEDS.map(() => 1));
 
+  const agentMats = useMemo(
+    () =>
+      AGENTS.map(
+        (a) =>
+          new THREE.MeshStandardMaterial({
+            color: a.color,
+            emissive: a.color,
+            emissiveIntensity: 0.22,
+            roughness: 0.35,
+            metalness: 0.05,
+          }),
+      ),
+    [],
+  );
+  useEffect(() => () => agentMats.forEach((m) => m.dispose()), [agentMats]);
+
   const nodeRadius = useMemo(
-    () => SEEDS.map((s) => (0.085 + Math.sqrt(degreeOf(s.id)) * 0.042) * 1.15),
+    () => SEEDS.map((s) => (0.085 + Math.sqrt(degreeOf(s.id)) * 0.042) * 1.12),
     [],
   );
 
@@ -256,7 +314,7 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, reduced }: SceneProps)
     const rand = mulberry32(29);
     for (let i = 0; i < n; i++) {
       const v = new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).normalize();
-      const r = 7 + rand() * 6;
+      const r = 7.5 + rand() * 6;
       pos.set([v.x * r, v.y * r, v.z * r - 3], i * 3);
     }
     const g = new THREE.BufferGeometry();
@@ -291,18 +349,17 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, reduced }: SceneProps)
     return () => window.removeEventListener("pointermove", move);
   }, [reduced]);
 
-  /* Moment machine: dwell at a node, travel the edge, flash the arrival. */
+  /* Moment machine: an agent acts, the pulse carries it, the graph answers. */
   const journey = useRef({ phase: "dwell" as "dwell" | "travel", timer: 0.9, index: -1, t: 0 });
   const lastMoment = useRef(-1);
   const labelAlpha = useRef(0);
 
   const easeInOut = (x: number) => (x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2);
 
-  /** Project a node's world position to the canvas' screen space. */
+  /** Project a world position to the canvas' screen space. */
   const toScreen = useMemo(() => {
     const v = new THREE.Vector3();
-    return (nodeId: string) => {
-      const world = LAYOUT.get(nodeId)!;
+    return (world: THREE.Vector3) => {
       v.copy(world).applyMatrix4(root.current?.matrixWorld ?? new THREE.Matrix4());
       v.project(camera);
       return {
@@ -311,6 +368,13 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, reduced }: SceneProps)
       };
     };
   }, [camera, size]);
+
+  /** Where a moment's pulse starts and ends. Writes go in, recalls come out. */
+  const route = (m: Moment) => {
+    const node = LAYOUT.get(m.node)!;
+    const agent = AGENTS[AGENT_INDEX.get(m.agent)!].pos;
+    return m.kind === "recall" ? { a: node, b: agent } : { a: agent, b: node };
+  };
 
   useFrame((_, rawDelta) => {
     const delta = Math.min(rawDelta, 0.05);
@@ -324,8 +388,8 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, reduced }: SceneProps)
     if (root.current) {
       /* Sway around the canonical orientation; the constellation never
          spins away from the shape the 2D explorer draws. */
-      root.current.rotation.y = Math.sin(t * 0.13) * 0.16 + p.x * 0.2;
-      root.current.rotation.x = -p.y * 0.14 + Math.sin(t * 0.11) * 0.03;
+      root.current.rotation.y = Math.sin(t * 0.13) * 0.14 + p.x * 0.16;
+      root.current.rotation.x = -p.y * 0.12 + Math.sin(t * 0.11) * 0.03;
     }
     if (stars.current) stars.current.rotation.y = t * 0.006;
 
@@ -337,17 +401,16 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, reduced }: SceneProps)
 
     const j = journey.current;
     const moment = j.index >= 0 ? MOMENTS[j.index] : null;
+    const nodeIdx = moment ? (NODE_INDEX.get(moment.node) ?? 0) : 0;
 
-    /* Focus: nodes and edges of the current moment stay lit, the rest dims. */
-    const fromIdx = moment ? (NODE_INDEX.get(moment.from) ?? 0) : 0;
-    const toIdx = moment ? (NODE_INDEX.get(moment.to) ?? 0) : 0;
+    /* Node focus + flash decay. */
     const mesh = field.current;
     if (mesh) {
       let dirty = false;
       for (let i = 0; i < nodeCount; i++) {
-        const focused = !moment || i === fromIdx || i === toIdx ? 1 : 0.3;
+        const focused = !moment || i === nodeIdx || i === (moment.evidence ? (NODE_INDEX.get(moment.evidence) ?? 0) : -1) ? 1 : 0.32;
         focus.current[i] += (focused - focus.current[i]) * Math.min(1, delta * 7);
-        if (glow.current[i] > 0) glow.current[i] = Math.max(0, glow.current[i] - delta * 1.15);
+        if (glow.current[i] > 0) glow.current[i] = Math.max(0, glow.current[i] - delta * 1.3);
         tmp.copy(baseColors[i]).multiplyScalar(0.35 + 0.65 * focus.current[i]);
         tmp.lerp(signal, glow.current[i]);
         mesh.setColorAt(i, tmp);
@@ -356,10 +419,19 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, reduced }: SceneProps)
       if (dirty && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
 
+    /* Agents breathe faintly; the acting agent flashes on arrival. */
+    agentMats.forEach((mat, i) => {
+      if (agentGlow.current[i] > 0) agentGlow.current[i] = Math.max(0, agentGlow.current[i] - delta * 1.3);
+      const idle = 0.18 + Math.sin(t * 1.6 + i * 1.7) * 0.06;
+      mat.emissiveIntensity = idle + agentGlow.current[i] * 1.1;
+    });
+
     /* Edge dimming via vertex colors; the active edge is drawn separately. */
     const colorAttr = edgeGeo.getAttribute("color") as THREE.BufferAttribute;
     if (colorAttr) {
-      const activeIsNormal = moment ? LINKS.findIndex((l) => l.source === moment.from && l.target === moment.to) : -1;
+      const activeIsNormal = moment
+        ? normalLinks.findIndex((l) => l.source === moment.node || l.target === moment.node)
+        : -1;
       const arr = colorAttr.array as Float32Array;
       for (let e = 0; e < normalLinks.length; e++) {
         const lit = !moment || e === activeIsNormal ? 1 : 0.32;
@@ -378,8 +450,7 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, reduced }: SceneProps)
     }
     if (superLines.current) {
       const mat = superLines.current.material as THREE.LineDashedMaterial;
-      const activeIsSuper = moment?.kind === "supersede";
-      const target = activeIsSuper ? 0.95 : 0.22;
+      const target = moment?.kind === "supersede" ? 0.95 : 0.22;
       mat.opacity += (target - mat.opacity) * Math.min(1, delta * 5);
     }
 
@@ -395,29 +466,27 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, reduced }: SceneProps)
           lastMoment.current = j.index;
           onMoment(m, j.index);
         }
-        glow.current[NODE_INDEX.get(m.from) ?? 0] = Math.max(glow.current[NODE_INDEX.get(m.from) ?? 0], 0.55);
+        glow.current[NODE_INDEX.get(m.node) ?? 0] = Math.max(glow.current[NODE_INDEX.get(m.node) ?? 0], 0.5);
         /* Point the active-edge overlay at this moment's edge. */
         const attr = activeGeo.getAttribute("position") as THREE.BufferAttribute;
-        const a = LAYOUT.get(m.from)!;
-        const b = LAYOUT.get(m.to)!;
-        attr.set([a.x, a.y, a.z, b.x, b.y, b.z]);
+        const r = route(m);
+        attr.set([r.a.x, r.a.y, r.a.z, r.b.x, r.b.y, r.b.z]);
         attr.needsUpdate = true;
       }
     } else {
       j.t += delta / 0.95;
       const m = MOMENTS[j.index];
-      const a = LAYOUT.get(m.from)!;
-      const b = LAYOUT.get(m.to)!;
+      const r = route(m);
       const e = easeInOut(Math.min(1, j.t));
       const envelope = Math.min(1, j.t / 0.16, (1 - j.t) / 0.16);
       if (pulse.current) {
         pulse.current.visible = true;
-        pulse.current.position.lerpVectors(a, b, e);
+        pulse.current.position.lerpVectors(r.a, r.b, e);
         pulse.current.scale.setScalar(Math.max(0.02, 0.075 * envelope));
       }
       if (halo.current) {
         halo.current.visible = true;
-        halo.current.position.copy(pulse.current?.position ?? a);
+        halo.current.position.copy(pulse.current?.position ?? r.a);
         halo.current.scale.setScalar(Math.max(0.02, 0.19 * envelope));
         const hmat = halo.current.material as THREE.MeshBasicMaterial;
         hmat.opacity = 0.22 * envelope;
@@ -427,28 +496,35 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, reduced }: SceneProps)
       if (j.t >= 1) {
         j.phase = "dwell";
         j.timer = 0.85 + Math.random() * 0.45;
-        glow.current[NODE_INDEX.get(m.to) ?? 0] = 1;
+        if (m.kind === "recall") agentGlow.current[AGENT_INDEX.get(m.agent) ?? 0] = 1;
+        else glow.current[nodeIdx] = 1;
       }
     }
 
-    /* Labels: pinned to their nodes in screen space, fading with the moment. */
+    /* Labels: the acting node, its evidence, and every agent, in screen space. */
     if (moment) {
-      labelAlpha.current = Math.min(1, labelAlpha.current + delta * 3);
-      const from = toScreen(moment.from);
-      const to = toScreen(moment.to);
-      if (labelFromRef.current) {
-        labelFromRef.current.style.opacity = String(labelAlpha.current * 0.95);
-        labelFromRef.current.style.transform = `translate(${from.x + 14}px, ${from.y + 8}px)`;
-      }
+      labelAlpha.current = Math.min(1, labelAlpha.current + delta * 4);
+      const to = toScreen(LAYOUT.get(moment.node)!);
       if (labelToRef.current) {
         labelToRef.current.style.opacity = String(labelAlpha.current * 0.95);
         labelToRef.current.style.transform = `translate(${to.x + 14}px, ${to.y - 26}px)`;
       }
-    } else if (labelAlpha.current > 0) {
-      labelAlpha.current = Math.max(0, labelAlpha.current - delta * 3);
-      if (labelFromRef.current) labelFromRef.current.style.opacity = String(labelAlpha.current);
-      if (labelToRef.current) labelToRef.current.style.opacity = String(labelAlpha.current);
+      if (moment.evidence) {
+        const from = toScreen(LAYOUT.get(moment.evidence)!);
+        if (labelFromRef.current) {
+          labelFromRef.current.style.opacity = String(labelAlpha.current * 0.95);
+          labelFromRef.current.style.transform = `translate(${from.x + 14}px, ${from.y + 8}px)`;
+        }
+      } else if (labelFromRef.current) {
+        labelFromRef.current.style.opacity = "0";
+      }
     }
+    AGENTS.forEach((agent, i) => {
+      const el = agentLabelRefs.current[i];
+      if (!el) return;
+      const s = toScreen(agent.pos);
+      el.style.transform = `translate(${s.x + 13}px, ${s.y - 7}px)`;
+    });
   });
 
   return (
@@ -493,7 +569,21 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, reduced }: SceneProps)
           <meshStandardMaterial roughness={0.38} metalness={0.08} />
         </instancedMesh>
 
-        {/* The recall signal, with a soft halo so it reads at a glance. */}
+        {/* The agents: four sessions around one graph. */}
+        {AGENTS.map((agent, i) => (
+          <mesh
+            key={agent.id}
+            ref={(m) => {
+              agentMeshes.current[i] = m;
+            }}
+            material={agentMats[i]}
+            position={agent.pos}
+          >
+            <sphereGeometry args={[0.17, 20, 20]} />
+          </mesh>
+        ))}
+
+        {/* The signal in flight, with a soft halo so it reads at a glance. */}
         <mesh ref={pulse} visible={false}>
           <sphereGeometry args={[1, 12, 12]} />
           <meshBasicMaterial color={SIGNAL} />
@@ -526,6 +616,7 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
   const wrap = useRef<HTMLDivElement>(null);
   const labelFromRef = useRef<HTMLDivElement>(null);
   const labelToRef = useRef<HTMLDivElement>(null);
+  const agentLabelRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   useEffect(() => setMounted(true), []);
 
@@ -544,10 +635,12 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
 
   const running = mounted && !hidden && active;
   const opClass =
-    moment?.m.kind === "supersede" ? "text-[var(--signal)]" : moment?.m.kind === "recall" ? "text-muted-foreground" : "text-foreground/80";
+    moment?.m.kind === "supersede" ? "text-[var(--signal)]" : moment?.m.kind === "write" ? "text-foreground/80" : "text-muted-foreground";
 
   const labelBase =
     "pointer-events-none absolute left-0 top-0 z-10 whitespace-nowrap rounded border px-1.5 py-0.5 font-mono text-[10px] leading-none opacity-0 will-change-transform";
+  const agentLabelBase =
+    "pointer-events-none absolute left-0 top-0 z-10 whitespace-nowrap rounded-full border bg-[var(--card)]/90 px-2 py-0.5 font-mono text-[9px] leading-none text-muted-foreground";
 
   return (
     <div ref={wrap} className={`overflow-hidden rounded-2xl border bg-[var(--card)]/70 backdrop-blur ${className}`}>
@@ -567,25 +660,43 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
             frameloop={reduceMotion ? "demand" : running ? "always" : "never"}
             dpr={[1, 1.75]}
             gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
-            camera={{ fov: 40, position: [0, 0.15, 9.6] }}
+            camera={{ fov: 40, position: [0, 0.15, 10.1] }}
           >
             <GraphScene
               reduced={!!reduceMotion}
               onMoment={(m, key) => setMoment({ m, key })}
               labelFromRef={labelFromRef}
               labelToRef={labelToRef}
+              agentLabelRefs={agentLabelRefs}
             />
           </Canvas>
         ) : null}
 
-        {/* Node labels, pinned per frame to the two nodes in the moment. */}
+        {/* Agent tags, pinned per frame to the four sessions. */}
+        {AGENTS.map((agent, i) => (
+          <div
+            key={agent.id}
+            ref={(el) => {
+              agentLabelRefs.current[i] = el;
+            }}
+            className={agentLabelBase}
+          >
+            <span
+              className="mr-1.5 inline-block size-1.5 rounded-full align-middle"
+              style={{ background: agent.color }}
+            />
+            {agent.id}
+          </div>
+        ))}
+
+        {/* The acting node + its evidence, pinned per frame. */}
         <div ref={labelFromRef} className={`${labelBase} bg-[var(--card)]/90 text-muted-foreground`}>
           <span className="text-[var(--signal)]">← </span>
-          {moment ? seedTitle(moment.m.from) : ""}
+          {moment?.m.evidence ? seedTitle(moment.m.evidence) : ""}
         </div>
         <div ref={labelToRef} className={`${labelBase} bg-[var(--card)]/90 text-foreground`}>
           <span className={moment?.m.kind === "supersede" ? "superseded-line" : undefined}>
-            {moment ? seedTitle(moment.m.to) : ""}
+            {moment ? seedTitle(moment.m.node) : ""}
           </span>
           {moment?.m.kind === "supersede" && <span className="ml-1.5 text-[var(--signal)]">retired</span>}
         </div>
@@ -613,8 +724,8 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
         </div>
       </div>
 
-      {/* The citation line plus the moment's argument: what happened, and
-          why a graph that keeps receipts beats a store that overwrites. */}
+      {/* The citation line plus the moment's argument: which agent did what,
+          and why a graph that keeps receipts beats a store that overwrites. */}
       <div className="flex min-h-14 flex-col justify-start border-t px-5 py-2.5 2xl:min-h-16">
         <AnimatePresence mode="wait" initial={false}>
           {moment && (
@@ -626,7 +737,13 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
               transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
             >
               <p className="font-mono text-[10px] leading-relaxed text-muted-foreground">
-                <span className="tnum">{moment.m.agent}</span>
+                {moment.m.collab && (
+                  <>
+                    <span className="text-[var(--signal)]">parallel sessions</span>
+                    <span className="mx-2 text-border">·</span>
+                  </>
+                )}
+                <span className="tnum">{moment.m.agentName}</span>
                 <span className="mx-2 text-border">·</span>
                 <span className={opClass}>{moment.m.kind}</span>
                 <span className="mx-2 text-border">·</span>
