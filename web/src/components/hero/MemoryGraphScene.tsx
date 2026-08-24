@@ -1,4 +1,4 @@
-import { Canvas, useFrame } from "@react-three/fiber";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as THREE from "three";
@@ -10,11 +10,11 @@ import { typeColor } from "@/lib/viz";
  * The hero's right column: the memory graph itself, alive.
  *
  * The same seed data the inspectable MiniGraph draws, laid out once by a
- * frozen force simulation and rendered as a quiet constellation. One amber
- * pulse at a time travels an edge — a recall pulling evidence toward a
- * memory, or a supersede retiring a belief — while the caption below names
- * the act and cites the source. The graph is the product; the pulse is the
- * product's verb.
+ * frozen force simulation. One moment at a time plays: an amber pulse travels
+ * an edge while the rest of the graph dims, labels name the two nodes
+ * involved, and the caption below cites the source. A recall pulls evidence
+ * toward a memory; a supersede retires a belief without deleting it. The
+ * graph is the product; the moment is the product's verb.
  *
  * Perf contract mirrors the rest of the page: frames stop when the hero
  * leaves the viewport or the tab hides, prefers-reduced-motion freezes the
@@ -100,14 +100,56 @@ type Moment = {
   agent: string;
   text: string;
   source: string;
+  /** Why this beats a plain vector store — the moment's argument. */
+  kicker: string;
 };
 
 const MOMENTS: Moment[] = [
-  { kind: "recall", from: "adr-003", to: "clerk", agent: "claude-code", text: "Clerk owns auth", source: "adr-003.md" },
-  { kind: "recall", from: "railway-json", to: "railway", agent: "cursor", text: "Moved to Railway", source: "railway.json" },
-  { kind: "supersede", from: "railway", to: "fly", agent: "codex", text: "Deploys go to Fly.io — retired, still on the record", source: "railway.json" },
-  { kind: "recall", from: "schema-sql", to: "hnsw", agent: "gemini", text: "HNSW index still off", source: "db/schema.sql" },
-  { kind: "recall", from: "pr-12", to: "node-test", agent: "claude-code", text: "Moved to node:test", source: "pr-12.md" },
+  {
+    kind: "recall",
+    from: "adr-003",
+    to: "clerk",
+    agent: "claude-code",
+    text: "Clerk owns auth",
+    source: "adr-003.md",
+    kicker: "Every fact carries its source — audit any recall down to the quote.",
+  },
+  {
+    kind: "recall",
+    from: "railway-json",
+    to: "railway",
+    agent: "cursor",
+    text: "Moved to Railway",
+    source: "railway.json",
+    kicker: "Sources are first-class nodes, not metadata on a chunk.",
+  },
+  {
+    kind: "supersede",
+    from: "railway",
+    to: "fly",
+    agent: "codex",
+    text: "Deploys go to Fly.io — retired by Moved to Railway",
+    source: "railway.json",
+    kicker: "Nothing overwritten. Ask what the graph believed last March.",
+  },
+  {
+    kind: "recall",
+    from: "schema-sql",
+    to: "hnsw",
+    agent: "gemini",
+    text: "HNSW index still off",
+    source: "db/schema.sql",
+    kicker: "Known limitations live in the graph, so no agent re-debugs them.",
+  },
+  {
+    kind: "recall",
+    from: "pr-12",
+    to: "node-test",
+    agent: "claude-code",
+    text: "Moved to node:test",
+    source: "pr-12.md",
+    kicker: "Decisions keep their receipts — no archaeology in old threads.",
+  },
 ];
 
 /* ------------------------------------------------------------------ */
@@ -116,18 +158,28 @@ const MOMENTS: Moment[] = [
 
 type SceneProps = {
   onMoment: (moment: Moment, index: number) => void;
+  /** Live label anchors, written per frame in screen space. */
+  labelFromRef: React.RefObject<HTMLDivElement | null>;
+  labelToRef: React.RefObject<HTMLDivElement | null>;
   reduced: boolean;
 };
 
-function GraphScene({ onMoment, reduced }: SceneProps) {
+function GraphScene({ onMoment, labelFromRef, labelToRef, reduced }: SceneProps) {
   const root = useRef<THREE.Group>(null);
   const field = useRef<THREE.InstancedMesh>(null);
   const pulse = useRef<THREE.Mesh>(null);
+  const halo = useRef<THREE.Mesh>(null);
+  const activeLine = useRef<THREE.LineSegments>(null);
   const stars = useRef<THREE.Points>(null);
+  const superLines = useRef<THREE.LineSegments>(null);
+
+  const camera = useThree((s) => s.camera);
+  const size = useThree((s) => s.size);
 
   const dummy = useMemo(() => new THREE.Object3D(), []);
   const tmp = useMemo(() => new THREE.Color(), []);
   const signal = useMemo(() => new THREE.Color(SIGNAL), []);
+  const edgeBase = useMemo(() => new THREE.Color(EDGE), []);
   const pointer = useRef({ tx: 0, ty: 0, x: 0, y: 0 });
   const clock = useRef(0);
 
@@ -144,16 +196,35 @@ function GraphScene({ onMoment, reduced }: SceneProps) {
     [],
   );
   const glow = useRef<number[]>(SEEDS.map(() => 0));
+  /** 1 = in focus, 0 = dimmed while another moment plays. */
+  const focus = useRef<number[]>(SEEDS.map(() => 1));
 
   const nodeRadius = useMemo(
     () => SEEDS.map((s) => (0.085 + Math.sqrt(degreeOf(s.id)) * 0.042) * 1.15),
     [],
   );
 
+  /* Ordinary edges, with a vertex-color attribute so the moment can dim
+     every edge that isn't playing. */
+  const normalLinks = useMemo(() => LINKS.filter((l) => l.predicate !== "supersedes"), []);
+  const superLinks = useMemo(() => LINKS.filter((l) => l.predicate === "supersedes"), []);
+
   const edgeGeo = useMemo(() => {
     const pts: number[] = [];
-    for (const l of LINKS) {
-      if (l.predicate === "supersedes") continue;
+    for (const l of normalLinks) {
+      const a = LAYOUT.get(l.source);
+      const b = LAYOUT.get(l.target);
+      if (a && b) pts.push(a.x, a.y, a.z, b.x, b.y, b.z);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+    g.setAttribute("color", new THREE.Float32BufferAttribute(new Float32Array(pts.length), 3));
+    return g;
+  }, [normalLinks]);
+
+  const superGeo = useMemo(() => {
+    const pts: number[] = [];
+    for (const l of superLinks) {
       const a = LAYOUT.get(l.source);
       const b = LAYOUT.get(l.target);
       if (a && b) pts.push(a.x, a.y, a.z, b.x, b.y, b.z);
@@ -161,18 +232,12 @@ function GraphScene({ onMoment, reduced }: SceneProps) {
     const g = new THREE.BufferGeometry();
     g.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
     return g;
-  }, []);
+  }, [superLinks]);
 
-  const superGeo = useMemo(() => {
-    const pts: number[] = [];
-    for (const l of LINKS) {
-      if (l.predicate !== "supersedes") continue;
-      const a = LAYOUT.get(l.source);
-      const b = LAYOUT.get(l.target);
-      if (a && b) pts.push(a.x, a.y, a.z, b.x, b.y, b.z);
-    }
+  /* The one edge currently playing, drawn bright above the dimmed rest. */
+  const activeGeo = useMemo(() => {
     const g = new THREE.BufferGeometry();
-    g.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+    g.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(6), 3));
     return g;
   }, []);
 
@@ -180,8 +245,9 @@ function GraphScene({ onMoment, reduced }: SceneProps) {
     () => () => {
       edgeGeo.dispose();
       superGeo.dispose();
+      activeGeo.dispose();
     },
-    [edgeGeo, superGeo],
+    [edgeGeo, superGeo, activeGeo],
   );
 
   const starGeo = useMemo(() => {
@@ -226,10 +292,25 @@ function GraphScene({ onMoment, reduced }: SceneProps) {
   }, [reduced]);
 
   /* Moment machine: dwell at a node, travel the edge, flash the arrival. */
-  const journey = useRef({ phase: "dwell" as "dwell" | "travel", timer: 1.2, index: -1, t: 0 });
+  const journey = useRef({ phase: "dwell" as "dwell" | "travel", timer: 0.9, index: -1, t: 0 });
   const lastMoment = useRef(-1);
+  const labelAlpha = useRef(0);
 
   const easeInOut = (x: number) => (x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2);
+
+  /** Project a node's world position to the canvas' screen space. */
+  const toScreen = useMemo(() => {
+    const v = new THREE.Vector3();
+    return (nodeId: string) => {
+      const world = LAYOUT.get(nodeId)!;
+      v.copy(world).applyMatrix4(root.current?.matrixWorld ?? new THREE.Matrix4());
+      v.project(camera);
+      return {
+        x: (v.x * 0.5 + 0.5) * size.width,
+        y: (-v.y * 0.5 + 0.5) * size.height,
+      };
+    };
+  }, [camera, size]);
 
   useFrame((_, rawDelta) => {
     const delta = Math.min(rawDelta, 0.05);
@@ -250,58 +331,124 @@ function GraphScene({ onMoment, reduced }: SceneProps) {
 
     if (reduced) {
       if (pulse.current) pulse.current.visible = false;
+      if (halo.current) halo.current.visible = false;
       return;
     }
 
-    /* Node flashes decay toward their base color. */
+    const j = journey.current;
+    const moment = j.index >= 0 ? MOMENTS[j.index] : null;
+
+    /* Focus: nodes and edges of the current moment stay lit, the rest dims. */
+    const fromIdx = moment ? (NODE_INDEX.get(moment.from) ?? 0) : 0;
+    const toIdx = moment ? (NODE_INDEX.get(moment.to) ?? 0) : 0;
     const mesh = field.current;
     if (mesh) {
       let dirty = false;
       for (let i = 0; i < nodeCount; i++) {
-        if (glow.current[i] <= 0) continue;
-        glow.current[i] = Math.max(0, glow.current[i] - delta * 1.15);
-        tmp.copy(baseColors[i]).lerp(signal, glow.current[i] * 0.85);
+        const focused = !moment || i === fromIdx || i === toIdx ? 1 : 0.3;
+        focus.current[i] += (focused - focus.current[i]) * Math.min(1, delta * 7);
+        if (glow.current[i] > 0) glow.current[i] = Math.max(0, glow.current[i] - delta * 1.15);
+        tmp.copy(baseColors[i]).multiplyScalar(0.35 + 0.65 * focus.current[i]);
+        tmp.lerp(signal, glow.current[i]);
         mesh.setColorAt(i, tmp);
         dirty = true;
       }
       if (dirty && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
 
-    const j = journey.current;
+    /* Edge dimming via vertex colors; the active edge is drawn separately. */
+    const colorAttr = edgeGeo.getAttribute("color") as THREE.BufferAttribute;
+    if (colorAttr) {
+      const activeIsNormal = moment ? LINKS.findIndex((l) => l.source === moment.from && l.target === moment.to) : -1;
+      const arr = colorAttr.array as Float32Array;
+      for (let e = 0; e < normalLinks.length; e++) {
+        const lit = !moment || e === activeIsNormal ? 1 : 0.32;
+        const r = edgeBase.r * lit;
+        const g = edgeBase.g * lit;
+        const b = edgeBase.b * lit;
+        const k = e * 6;
+        arr[k] += (r - arr[k]) * Math.min(1, delta * 5);
+        arr[k + 1] += (g - arr[k + 1]) * Math.min(1, delta * 5);
+        arr[k + 2] += (b - arr[k + 2]) * Math.min(1, delta * 5);
+        arr[k + 3] = arr[k];
+        arr[k + 4] = arr[k + 1];
+        arr[k + 5] = arr[k + 2];
+      }
+      colorAttr.needsUpdate = true;
+    }
+    if (superLines.current) {
+      const mat = superLines.current.material as THREE.LineDashedMaterial;
+      const activeIsSuper = moment?.kind === "supersede";
+      const target = activeIsSuper ? 0.95 : 0.22;
+      mat.opacity += (target - mat.opacity) * Math.min(1, delta * 5);
+    }
+
+    /* The moment machine. */
     if (j.phase === "dwell") {
       j.timer -= delta;
-      if (pulse.current) pulse.current.visible = false;
       if (j.timer <= 0) {
         j.index = (j.index + 1) % MOMENTS.length;
         j.phase = "travel";
         j.t = 0;
+        const m = MOMENTS[j.index];
         if (lastMoment.current !== j.index) {
           lastMoment.current = j.index;
-          onMoment(MOMENTS[j.index], j.index);
+          onMoment(m, j.index);
         }
-        const m = MOMENTS[j.index];
         glow.current[NODE_INDEX.get(m.from) ?? 0] = Math.max(glow.current[NODE_INDEX.get(m.from) ?? 0], 0.55);
+        /* Point the active-edge overlay at this moment's edge. */
+        const attr = activeGeo.getAttribute("position") as THREE.BufferAttribute;
+        const a = LAYOUT.get(m.from)!;
+        const b = LAYOUT.get(m.to)!;
+        attr.set([a.x, a.y, a.z, b.x, b.y, b.z]);
+        attr.needsUpdate = true;
       }
     } else {
-      j.t += delta / 1.5;
+      j.t += delta / 0.95;
       const m = MOMENTS[j.index];
       const a = LAYOUT.get(m.from)!;
       const b = LAYOUT.get(m.to)!;
+      const e = easeInOut(Math.min(1, j.t));
+      const envelope = Math.min(1, j.t / 0.16, (1 - j.t) / 0.16);
       if (pulse.current) {
         pulse.current.visible = true;
-        const e = easeInOut(Math.min(1, j.t));
         pulse.current.position.lerpVectors(a, b, e);
-        /* Grows as it leaves, is absorbed as it arrives. */
-        const envelope = Math.min(1, j.t / 0.16, (1 - j.t) / 0.16);
-        pulse.current.scale.setScalar(Math.max(0.02, 0.06 * envelope));
+        pulse.current.scale.setScalar(Math.max(0.02, 0.075 * envelope));
       }
+      if (halo.current) {
+        halo.current.visible = true;
+        halo.current.position.copy(pulse.current?.position ?? a);
+        halo.current.scale.setScalar(Math.max(0.02, 0.19 * envelope));
+        const hmat = halo.current.material as THREE.MeshBasicMaterial;
+        hmat.opacity = 0.22 * envelope;
+      }
+      const lineMat = activeLine.current?.material as THREE.LineBasicMaterial | null;
+      if (lineMat) lineMat.opacity = 0.85 * Math.min(1, j.t / 0.12, (1 - j.t) / 0.12 + 0.4);
       if (j.t >= 1) {
         j.phase = "dwell";
-        j.timer = 1.5 + Math.random() * 0.7;
+        j.timer = 0.85 + Math.random() * 0.45;
         glow.current[NODE_INDEX.get(m.to) ?? 0] = 1;
       }
     }
-    if (pulse.current) pulse.current.rotation.y = t * 1.4;
+
+    /* Labels: pinned to their nodes in screen space, fading with the moment. */
+    if (moment) {
+      labelAlpha.current = Math.min(1, labelAlpha.current + delta * 3);
+      const from = toScreen(moment.from);
+      const to = toScreen(moment.to);
+      if (labelFromRef.current) {
+        labelFromRef.current.style.opacity = String(labelAlpha.current * 0.95);
+        labelFromRef.current.style.transform = `translate(${from.x + 14}px, ${from.y + 8}px)`;
+      }
+      if (labelToRef.current) {
+        labelToRef.current.style.opacity = String(labelAlpha.current * 0.95);
+        labelToRef.current.style.transform = `translate(${to.x + 14}px, ${to.y - 26}px)`;
+      }
+    } else if (labelAlpha.current > 0) {
+      labelAlpha.current = Math.max(0, labelAlpha.current - delta * 3);
+      if (labelFromRef.current) labelFromRef.current.style.opacity = String(labelAlpha.current);
+      if (labelToRef.current) labelToRef.current.style.opacity = String(labelAlpha.current);
+    }
   });
 
   return (
@@ -311,14 +458,15 @@ function GraphScene({ onMoment, reduced }: SceneProps) {
       <directionalLight position={[-4, -2, -5]} intensity={0.4} color="#dfe8ff" />
 
       <group ref={root}>
-        {/* Ordinary edges: hairlines that stay out of the story. */}
+        {/* Ordinary edges: vertex-colored so the moment can dim the rest. */}
         <lineSegments geometry={edgeGeo}>
-          <lineBasicMaterial color={EDGE} transparent opacity={0.22} depthWrite={false} />
+          <lineBasicMaterial vertexColors transparent opacity={0.9} depthWrite={false} />
         </lineSegments>
 
         {/* Supersede edges: the signal color, dashed — retirement is visible.
             Dashing needs the line distances computed once the geometry lands. */}
         <lineSegments
+          ref={superLines}
           geometry={superGeo}
           onUpdate={(self) => {
             self.computeLineDistances();
@@ -328,11 +476,16 @@ function GraphScene({ onMoment, reduced }: SceneProps) {
           <lineDashedMaterial
             color={SIGNAL}
             transparent
-            opacity={0.6}
+            opacity={0.22}
             dashSize={0.16}
             gapSize={0.1}
             depthWrite={false}
           />
+        </lineSegments>
+
+        {/* The edge currently playing, drawn bright above the dimmed rest. */}
+        <lineSegments ref={activeLine} geometry={activeGeo}>
+          <lineBasicMaterial color={SIGNAL} transparent opacity={0} depthWrite={false} />
         </lineSegments>
 
         <instancedMesh ref={field} args={[undefined, undefined, nodeCount]} frustumCulled={false}>
@@ -340,10 +493,14 @@ function GraphScene({ onMoment, reduced }: SceneProps) {
           <meshStandardMaterial roughness={0.38} metalness={0.08} />
         </instancedMesh>
 
-        {/* The recall signal. */}
+        {/* The recall signal, with a soft halo so it reads at a glance. */}
         <mesh ref={pulse} visible={false}>
           <sphereGeometry args={[1, 12, 12]} />
           <meshBasicMaterial color={SIGNAL} />
+        </mesh>
+        <mesh ref={halo} visible={false}>
+          <sphereGeometry args={[1, 12, 12]} />
+          <meshBasicMaterial color={SIGNAL} transparent opacity={0.2} depthWrite={false} />
         </mesh>
       </group>
 
@@ -355,7 +512,7 @@ function GraphScene({ onMoment, reduced }: SceneProps) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Wrapper: canvas + the synced citation caption                       */
+/* Wrapper: canvas + labels + the synced citation caption               */
 /* ------------------------------------------------------------------ */
 
 export function MemoryGraphScene({ className = "" }: { className?: string }) {
@@ -367,6 +524,8 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
     reduceMotion ? { m: MOMENTS[0], key: 0 } : null,
   );
   const wrap = useRef<HTMLDivElement>(null);
+  const labelFromRef = useRef<HTMLDivElement>(null);
+  const labelToRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => setMounted(true), []);
 
@@ -387,6 +546,9 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
   const opClass =
     moment?.m.kind === "supersede" ? "text-[var(--signal)]" : moment?.m.kind === "recall" ? "text-muted-foreground" : "text-foreground/80";
 
+  const labelBase =
+    "pointer-events-none absolute left-0 top-0 z-10 whitespace-nowrap rounded border px-1.5 py-0.5 font-mono text-[10px] leading-none opacity-0 will-change-transform";
+
   return (
     <div ref={wrap} className={`overflow-hidden rounded-2xl border bg-[var(--card)]/70 backdrop-blur ${className}`}>
       <div className="flex h-11 items-center justify-between border-b px-5 2xl:h-12">
@@ -399,10 +561,7 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
         </span>
       </div>
 
-      <div
-        aria-hidden="true"
-        className="relative h-[23rem] w-full md:h-[25rem] 2xl:h-[31rem]"
-      >
+      <div aria-hidden="true" className="relative h-[23rem] w-full md:h-[25rem] 2xl:h-[31rem]">
         {mounted ? (
           <Canvas
             frameloop={reduceMotion ? "demand" : running ? "always" : "never"}
@@ -413,34 +572,77 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
             <GraphScene
               reduced={!!reduceMotion}
               onMoment={(m, key) => setMoment({ m, key })}
+              labelFromRef={labelFromRef}
+              labelToRef={labelToRef}
             />
           </Canvas>
         ) : null}
+
+        {/* Node labels, pinned per frame to the two nodes in the moment. */}
+        <div ref={labelFromRef} className={`${labelBase} bg-[var(--card)]/90 text-muted-foreground`}>
+          <span className="text-[var(--signal)]">← </span>
+          {moment ? seedTitle(moment.m.from) : ""}
+        </div>
+        <div ref={labelToRef} className={`${labelBase} bg-[var(--card)]/90 text-foreground`}>
+          <span className={moment?.m.kind === "supersede" ? "superseded-line" : undefined}>
+            {moment ? seedTitle(moment.m.to) : ""}
+          </span>
+          {moment?.m.kind === "supersede" && <span className="ml-1.5 text-[var(--signal)]">retired</span>}
+        </div>
+
+        {/* The visual grammar, taught in one glance. */}
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute bottom-3 right-4 flex items-center gap-3 font-mono text-[9px] uppercase tracking-[0.08em] text-muted-foreground/80"
+        >
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-px w-4 bg-foreground/40" />
+            edge
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="inline-block h-px w-4"
+              style={{ backgroundImage: "repeating-linear-gradient(90deg, var(--signal) 0 3px, transparent 3px 6px)" }}
+            />
+            superseded
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block size-1.5 rounded-full bg-[var(--signal)]" />
+            recall
+          </span>
+        </div>
       </div>
 
-      {/* The citation line: whatever the pulse is doing, named and sourced. */}
-      <div className="flex h-14 items-start border-t px-5 py-3 2xl:h-16">
+      {/* The citation line plus the moment's argument: what happened, and
+          why a graph that keeps receipts beats a store that overwrites. */}
+      <div className="flex min-h-14 flex-col justify-start border-t px-5 py-2.5 2xl:min-h-16">
         <AnimatePresence mode="wait" initial={false}>
           {moment && (
-            <motion.p
+            <motion.div
               key={moment.key}
               initial={reduceMotion ? false : { opacity: 0, y: 6 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, transition: { duration: 0.18 } }}
               transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-              className="font-mono text-[10px] leading-relaxed text-muted-foreground"
             >
-              <span className="tnum">{moment.m.agent}</span>
-              <span className="mx-2 text-border">·</span>
-              <span className={opClass}>{moment.m.kind}</span>
-              <span className="mx-2 text-border">·</span>
-              <span className="text-foreground/90">{moment.m.text}</span>
-              <span className="mx-2 text-border">·</span>
-              <span className="text-[var(--signal)]">←</span> {moment.m.source}
-            </motion.p>
+              <p className="font-mono text-[10px] leading-relaxed text-muted-foreground">
+                <span className="tnum">{moment.m.agent}</span>
+                <span className="mx-2 text-border">·</span>
+                <span className={opClass}>{moment.m.kind}</span>
+                <span className="mx-2 text-border">·</span>
+                <span className="text-foreground/90">{moment.m.text}</span>
+                <span className="mx-2 text-border">·</span>
+                <span className="text-[var(--signal)]">←</span> {moment.m.source}
+              </p>
+              <p className="mt-1 text-[11px] leading-snug text-foreground/70">{moment.m.kicker}</p>
+            </motion.div>
           )}
         </AnimatePresence>
       </div>
     </div>
   );
+}
+
+function seedTitle(id: string) {
+  return SEEDS.find((s) => s.id === id)?.title ?? id;
 }

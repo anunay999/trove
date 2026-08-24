@@ -15,7 +15,7 @@ function GraphSceneSkeleton() {
     <div className="overflow-hidden rounded-2xl border bg-[var(--card)]/70">
       <div className="h-11 border-b 2xl:h-12" />
       <div className="h-[23rem] md:h-[25rem] 2xl:h-[31rem]" />
-      <div className="h-14 border-t 2xl:h-16" />
+      <div className="h-[3.75rem] border-t" />
     </div>
   );
 }
