@@ -2,194 +2,184 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as THREE from "three";
-import { forceLink, forceManyBody, forceSimulation, forceX, forceY, forceZ } from "d3-force-3d";
 import { LINKS, SEEDS, degreeOf } from "@/lib/seed-graph";
 import { typeColor } from "@/lib/viz";
 
 /**
- * The hero's right column: agents collaborating through the memory graph.
+ * The hero's right column: the memory lifecycle, run by the agents themselves.
  *
- * Four named agents sit around a constellation of memories. The pulses are
- * the story — an agent writes what it learned into the graph, a different
- * agent in a different session recalls it with evidence attached, and a
- * supersede retires a belief without deleting it. Parallel sessions share
- * one graph: what one agent learns, every agent knows.
+ * Three claude sessions and a codex orbit one shared graph, and the loop they
+ * run is Trove's whole argument — a session adds what it learned, another
+ * consumes it cold, an edit supersedes a belief without erasing it, noise
+ * gets pruned on the record. Then the loop turns again. The graph is never
+ * finished: it is maintained, and the maintenance is visible.
  *
- * Perf contract mirrors the rest of the page: frames stop when the hero
- * leaves the viewport or the tab hides, prefers-reduced-motion freezes the
- * constellation, DPR is capped.
+ * Layout is hand-placed — hub in the middle, decisions around it, sources on
+ * the rim — so the structure reads at a glance. Perf contract mirrors the
+ * rest of the page: frames stop when the hero leaves the viewport or the tab
+ * hides, prefers-reduced-motion freezes the scene, DPR is capped.
  */
 
 const SIGNAL = "#f2c46b"; // the signal amber, brightened for WebGL
 const EDGE = "#edebe4";
 
 /* ------------------------------------------------------------------ */
-/* Layout: one frozen force simulation, deterministic across loads      */
+/* Layout: hand-placed clusters so the structure reads at a glance —    */
+/* launch (top right), repo rules (top left), Stripe migration (bottom  */
+/* right), hosting + learned rules (bottom left), acme at the hub.      */
 /* ------------------------------------------------------------------ */
 
-function mulberry32(seed: number) {
-  let a = seed;
-  return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+const HAND_LAYOUT: Record<string, [number, number, number]> = {
+  acme: [0, 0.2, 0],
 
-type LayoutNode = { id: string; x: number; y: number; z: number };
+  // Launch cluster, top right.
+  "launch-date-current": [1.9, 1.5, 0.1],
+  "launch-date-old": [3.0, 2.1, -0.1],
+  "onboarding-friction": [2.6, 0.7, 0.05],
+  research: [3.5, 1.2, -0.15],
+  "launch-plan": [2.9, 2.6, 0.1],
+  "pricing-update": [1.35, 2.45, -0.05],
+  priya: [0.5, 2.95, 0.05],
 
-function computeLayout(): Map<string, THREE.Vector3> {
-  const rand = mulberry32(11);
-  const nodes: LayoutNode[] = SEEDS.map((seed) => ({
-    id: seed.id,
-    x: (rand() - 0.5) * 16,
-    y: (rand() - 0.5) * 16,
-    z: (rand() - 0.5) * 8,
-  }));
-  const simulation = forceSimulation(nodes, 3)
-    .force(
-      "link",
-      forceLink(LINKS.map((l) => ({ source: l.source, target: l.target })))
-        .id((d) => d.id)
-        .distance(4.5)
-        .strength(0.55),
-    )
-    .force("charge", forceManyBody().strength(-22))
-    .force("x", forceX(0).strength(0.09))
-    .force("y", forceY(0).strength(0.09))
-    .force("z", forceZ(0).strength(0.09))
-    .stop();
-  simulation.tick(300);
+  // Repository rules, top left.
+  "repo-rules": [-2.2, 2.2, 0],
+  pnpm: [-3.3, 2.6, 0.05],
+  "no-legacy": [-3.6, 1.6, -0.1],
+  playwright: [-2.95, 3.3, 0.05],
+  contributing: [-4.0, 2.3, -0.15],
+  "agents-md": [-2.2, 3.35, 0.1],
 
-  const positions = new Map<string, THREE.Vector3>(
-    nodes.map((n) => [n.id, new THREE.Vector3(n.x, n.y, n.z)]),
-  );
-  // Center on the centroid, compress the radial spread (outliers would
-  // otherwise define the radius and shrink the bulk), then normalize to a
-  // fixed world radius so the constellation always fills the column.
-  const centroid = new THREE.Vector3();
-  positions.forEach((v) => centroid.add(v));
-  centroid.divideScalar(positions.size);
-  positions.forEach((v) => v.sub(centroid));
-  let maxR = 0;
-  positions.forEach((v) => (maxR = Math.max(maxR, v.length())));
-  positions.forEach((v) => {
-    const r = v.length();
-    if (r > 0) v.multiplyScalar(Math.pow(r / maxR, -0.2));
-  });
-  let newMax = 0;
-  positions.forEach((v) => (newMax = Math.max(newMax, v.length())));
-  positions.forEach((v) => v.multiplyScalar(2.85 / newMax));
-  return positions;
-}
+  // Stripe migration, bottom right — with the session handoff.
+  "stripe-migration": [2.0, -1.4, 0],
+  "duplicate-event": [3.1, -1.9, 0.1],
+  incident: [3.6, -2.7, -0.1],
+  "webhook-fix": [2.4, -2.6, 0.05],
+  staging: [1.3, -3.0, -0.1],
+  "previous-agent": [0.7, -0.9, 0.1],
+  "current-agent": [3.2, -0.8, -0.05],
+  "scratch-note": [1.05, -2.15, 0.1],
 
-const LAYOUT = computeLayout();
+  // Hosting + personal rules, bottom left.
+  heroku: [-2.0, -1.5, 0.05],
+  vercel: [-1.1, -2.3, -0.1],
+  anunay: [-3.3, -1.2, 0.1],
+  "concise-slack": [-3.9, -2.1, -0.05],
+  "no-auto-push": [-2.9, -2.9, 0.1],
+
+  // The learning arc, center bottom.
+  "agent-failure": [-0.6, -1.6, 0.1],
+  "agent-runs": [-1.5, -3.0, 0.05],
+  "routing-rule": [0.4, -2.4, -0.05],
+  "tool-order": [-0.5, -3.1, -0.1],
+};
+
+const LAYOUT = new Map(Object.entries(HAND_LAYOUT).map(([id, [x, y, z]]) => [id, new THREE.Vector3(x, y, z)]));
 const NODE_INDEX = new Map(SEEDS.map((s, i) => [s.id, i]));
 
 /* ------------------------------------------------------------------ */
-/* The agents: four sessions around one shared graph                    */
+/* The agents: three claude sessions and a codex, one shared graph      */
 /* ------------------------------------------------------------------ */
 
-const AGENT_RADIUS = 4.0;
-
 const AGENTS = [
-  { id: "claude-code", color: "#e0784f", pos: new THREE.Vector3(Math.cos(3.7) * AGENT_RADIUS, Math.sin(3.7) * AGENT_RADIUS, 0.15) },
-  { id: "codex", color: "#3fa87c", pos: new THREE.Vector3(Math.cos(5.85) * AGENT_RADIUS, Math.sin(5.85) * AGENT_RADIUS, -0.1) },
-  { id: "cursor", color: "#8b7ce8", pos: new THREE.Vector3(Math.cos(0.75) * AGENT_RADIUS, Math.sin(0.75) * AGENT_RADIUS, 0.05) },
-  { id: "gemini", color: "#4a90d9", pos: new THREE.Vector3(Math.cos(2.3) * AGENT_RADIUS, Math.sin(2.3) * AGENT_RADIUS, -0.15) },
+  { id: "s12", label: "claude · s12", color: "#e0784f", pos: new THREE.Vector3(-4.15, 0.5, 0.1), side: "left" as const },
+  { id: "s14", label: "claude · s14", color: "#e0784f", pos: new THREE.Vector3(-4.05, -1.0, -0.1), side: "left" as const },
+  { id: "s17", label: "claude · s17", color: "#e0784f", pos: new THREE.Vector3(4.15, 0.3, 0.15), side: "right" as const },
+  { id: "codex", label: "codex", color: "#3fa87c", pos: new THREE.Vector3(4.05, -1.6, -0.05), side: "right" as const },
 ];
 
 const AGENT_INDEX = new Map(AGENTS.map((a, i) => [a.id, i]));
 
 /* ------------------------------------------------------------------ */
-/* The moments: agents writing, recalling, retiring — in parallel       */
+/* The moments: the lifecycle loop — add, consume, edit, remove         */
 /* ------------------------------------------------------------------ */
 
 type Moment = {
-  kind: "write" | "recall" | "supersede";
+  kind: "add" | "consume" | "edit" | "remove";
   agent: string;
   node: string;
-  /** For recalls: the evidence that travels with the memory. */
+  /** For consumes: the evidence that travels with the memory. */
   evidence?: string;
   agentName: string;
   text: string;
   source: string;
   kicker: string;
-  /** Marks the recall half of a write→recall pair: parallel collaboration. */
+  /** Marks the consume half of an add→consume pair across sessions. */
   collab?: boolean;
 };
 
 const MOMENTS: Moment[] = [
   {
-    kind: "write",
-    agent: "claude-code",
-    node: "pnpm",
-    agentName: "claude-code",
-    text: "Always pnpm, never npm",
-    source: "CONTRIBUTING.md",
-    kicker: "Session one hit the lockfile war once. The graph remembers so no session pays it again.",
+    kind: "add",
+    agent: "s12",
+    node: "launch-date-current",
+    agentName: "claude · s12",
+    text: "Launch on September 12",
+    source: "launch-plan.md",
+    kicker: "Customer research moved the date. The graph gets the decision with its source attached.",
   },
   {
-    kind: "recall",
-    agent: "cursor",
+    kind: "edit",
+    agent: "codex",
+    node: "launch-date-old",
+    agentName: "codex",
+    text: "Launch on August 30 — retired by September 12",
+    source: "launch-plan-v1.md",
+    kicker: "The old date stays queryable — 'why did it slip?' always has an answer.",
+  },
+  {
+    kind: "consume",
+    agent: "s14",
     node: "pnpm",
     evidence: "contributing",
-    agentName: "cursor",
-    text: "Always pnpm, never npm",
+    agentName: "claude · s14",
+    text: "Use pnpm, never npm",
     source: "CONTRIBUTING.md",
-    kicker: "Different agent, different day — the convention just holds.",
+    kicker: "Session 14 cloned the repo cold and never broke the lockfile.",
   },
   {
-    kind: "write",
+    kind: "consume",
     agent: "codex",
-    node: "vercel",
+    node: "duplicate-event",
+    evidence: "incident",
     agentName: "codex",
-    text: "Moved to Vercel",
-    source: "vercel.json",
-    kicker: "Decisions land with their source attached, ready to be cited later.",
+    text: "Duplicate webhook event IDs",
+    source: "incident-2026-04-17.md",
+    kicker: "The previous session's incident is this session's head start.",
   },
   {
-    kind: "supersede",
+    kind: "add",
+    agent: "s17",
+    node: "webhook-fix",
+    agentName: "claude · s17",
+    text: "Webhook idempotency fix",
+    source: "github.com/acme/stripe-migration/issues/184",
+    kicker: "The fix lands citing the exact issue that demanded it.",
+  },
+  {
+    kind: "remove",
+    agent: "s14",
+    node: "scratch-note",
+    agentName: "claude · s14",
+    text: "'Try restarting the server' — scratch",
+    source: "session-12.md",
+    kicker: "Noise gets pruned on the record — the removal is itself a memory.",
+  },
+  {
+    kind: "consume",
     agent: "codex",
-    node: "heroku",
+    node: "staging",
     agentName: "codex",
-    text: "Hosted on Heroku — retired by Moved to Vercel",
-    source: "adr-004.md",
-    kicker: "Nothing overwritten. Ask what the team believed last March.",
-  },
-  {
-    kind: "recall",
-    agent: "gemini",
-    node: "errors",
-    evidence: "errors-ts",
-    agentName: "gemini",
-    text: "Errors are { code, message }",
-    source: "src/errors.ts",
-    kicker: "Conventions hold across sessions, projects, and machines.",
-  },
-  {
-    kind: "write",
-    agent: "claude-code",
-    node: "pool",
-    agentName: "claude-code",
-    text: "Free tier caps the pool at 10",
-    source: "runbook.md",
-    kicker: "Operational facts stop living in one person's head.",
-  },
-  {
-    kind: "recall",
-    agent: "gemini",
-    node: "pool",
-    evidence: "runbook",
-    agentName: "gemini",
-    text: "Free tier caps the pool at 10",
-    source: "runbook.md",
+    text: "Fix deployed to staging",
+    source: "deployment-2026-04-18.md",
     collab: true,
-    kicker: "claude-code learned this moments ago. Parallel sessions, one shared graph.",
+    kicker: "Session 17 landed it an hour ago. Codex walks into a solved problem.",
   },
 ];
+
+/* Nodes that enter the graph during the loop (they start at scale 0 and grow
+   when a session writes them); the pruned one shrinks away and stays gone
+   until the loop turns. */
+const ADDED_DURING_LOOP = new Set(["launch-date-current", "webhook-fix"]);
 
 /* ------------------------------------------------------------------ */
 /* Scene                                                               */
@@ -197,7 +187,6 @@ const MOMENTS: Moment[] = [
 
 type SceneProps = {
   onMoment: (moment: Moment, index: number) => void;
-  /** Live label anchors, written per frame in screen space. */
   labelFromRef: React.RefObject<HTMLDivElement | null>;
   labelToRef: React.RefObject<HTMLDivElement | null>;
   agentLabelRefs: React.RefObject<(HTMLDivElement | null)[]>;
@@ -212,7 +201,6 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
   const activeLine = useRef<THREE.LineSegments>(null);
   const stars = useRef<THREE.Points>(null);
   const superLines = useRef<THREE.LineSegments>(null);
-  const agentMeshes = useRef<(THREE.Mesh | null)[]>([]);
 
   const camera = useThree((s) => s.camera);
   const size = useThree((s) => s.size);
@@ -238,8 +226,12 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
   );
   const glow = useRef<number[]>(SEEDS.map(() => 0));
   const agentGlow = useRef<number[]>(AGENTS.map(() => 0));
-  /** 1 = in focus, 0 = dimmed while another moment plays. */
   const focus = useRef<number[]>(SEEDS.map(() => 1));
+  /** Lifecycle scale: 0 until written, 0 once pruned. */
+  const nodeScale = useRef<number[]>(
+    SEEDS.map((s) => (ADDED_DURING_LOOP.has(s.id) ? 0 : 1)),
+  );
+  const pruned = useRef<Set<string>>(new Set());
 
   const agentMats = useMemo(
     () =>
@@ -258,14 +250,12 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
   useEffect(() => () => agentMats.forEach((m) => m.dispose()), [agentMats]);
 
   const nodeRadius = useMemo(
-    () => SEEDS.map((s) => (0.085 + Math.sqrt(degreeOf(s.id)) * 0.042) * 1.12),
+    () => SEEDS.map((s) => (0.07 + Math.sqrt(degreeOf(s.id)) * 0.034) * 1.05),
     [],
   );
 
-  /* Ordinary edges, with a vertex-color attribute so the moment can dim
-     every edge that isn't playing. */
-  const normalLinks = useMemo(() => LINKS.filter((l) => l.predicate !== "supersedes"), []);
-  const superLinks = useMemo(() => LINKS.filter((l) => l.predicate === "supersedes"), []);
+  const normalLinks = useMemo(() => LINKS.filter((l) => l.predicate !== "superseded by"), []);
+  const superLinks = useMemo(() => LINKS.filter((l) => l.predicate === "superseded by"), []);
 
   const edgeGeo = useMemo(() => {
     const pts: number[] = [];
@@ -292,7 +282,6 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
     return g;
   }, [superLinks]);
 
-  /* The one edge currently playing, drawn bright above the dimmed rest. */
   const activeGeo = useMemo(() => {
     const g = new THREE.BufferGeometry();
     g.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(6), 3));
@@ -323,22 +312,6 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
   }, []);
   useEffect(() => () => starGeo.dispose(), [starGeo]);
 
-  /* Static node matrices + colors on mount. */
-  useEffect(() => {
-    const mesh = field.current;
-    if (!mesh) return;
-    SEEDS.forEach((seed, i) => {
-      const p = LAYOUT.get(seed.id)!;
-      dummy.position.copy(p);
-      dummy.scale.setScalar(nodeRadius[i]);
-      dummy.updateMatrix();
-      mesh.setMatrixAt(i, dummy.matrix);
-      mesh.setColorAt(i, baseColors[i]);
-    });
-    mesh.instanceMatrix.needsUpdate = true;
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-  }, [dummy, baseColors, nodeRadius]);
-
   useEffect(() => {
     if (reduced || !matchMedia("(pointer: fine)").matches) return;
     const move = (e: PointerEvent) => {
@@ -349,14 +322,12 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
     return () => window.removeEventListener("pointermove", move);
   }, [reduced]);
 
-  /* Moment machine: an agent acts, the pulse carries it, the graph answers. */
   const journey = useRef({ phase: "dwell" as "dwell" | "travel", timer: 0.9, index: -1, t: 0 });
   const lastMoment = useRef(-1);
   const labelAlpha = useRef(0);
 
   const easeInOut = (x: number) => (x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2);
 
-  /** Project a world position to the canvas' screen space. */
   const toScreen = useMemo(() => {
     const v = new THREE.Vector3();
     return (world: THREE.Vector3) => {
@@ -369,11 +340,11 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
     };
   }, [camera, size]);
 
-  /** Where a moment's pulse starts and ends. Writes go in, recalls come out. */
+  /** Writes go from the agent into the graph; consumes and prunes come out. */
   const route = (m: Moment) => {
     const node = LAYOUT.get(m.node)!;
     const agent = AGENTS[AGENT_INDEX.get(m.agent)!].pos;
-    return m.kind === "recall" ? { a: node, b: agent } : { a: agent, b: node };
+    return m.kind === "add" ? { a: agent, b: node } : { a: node, b: agent };
   };
 
   useFrame((_, rawDelta) => {
@@ -386,10 +357,8 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
     p.y += (p.ty - p.y) * Math.min(1, delta * 2.5);
 
     if (root.current) {
-      /* Sway around the canonical orientation; the constellation never
-         spins away from the shape the 2D explorer draws. */
-      root.current.rotation.y = Math.sin(t * 0.13) * 0.14 + p.x * 0.16;
-      root.current.rotation.x = -p.y * 0.12 + Math.sin(t * 0.11) * 0.03;
+      root.current.rotation.y = Math.sin(t * 0.13) * 0.12 + p.x * 0.14;
+      root.current.rotation.x = -p.y * 0.1 + Math.sin(t * 0.11) * 0.03;
     }
     if (stars.current) stars.current.rotation.y = t * 0.006;
 
@@ -403,38 +372,54 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
     const moment = j.index >= 0 ? MOMENTS[j.index] : null;
     const nodeIdx = moment ? (NODE_INDEX.get(moment.node) ?? 0) : 0;
 
-    /* Node focus + flash decay. */
+    /* Lifecycle scales ease toward their targets: added nodes grow in,
+       pruned nodes shrink away. */
     const mesh = field.current;
     if (mesh) {
       let dirty = false;
       for (let i = 0; i < nodeCount; i++) {
-        const focused = !moment || i === nodeIdx || i === (moment.evidence ? (NODE_INDEX.get(moment.evidence) ?? 0) : -1) ? 1 : 0.32;
+        const seed = SEEDS[i];
+        const target = pruned.current.has(seed.id) ? 0 : 1;
+        nodeScale.current[i] += (target - nodeScale.current[i]) * Math.min(1, delta * 5);
+        const focused =
+          !moment || i === nodeIdx || i === (moment.evidence ? (NODE_INDEX.get(moment.evidence) ?? 0) : -1)
+            ? 1
+            : 0.32;
         focus.current[i] += (focused - focus.current[i]) * Math.min(1, delta * 7);
         if (glow.current[i] > 0) glow.current[i] = Math.max(0, glow.current[i] - delta * 1.3);
+        const s = nodeRadius[i] * nodeScale.current[i];
+        dummy.position.copy(LAYOUT.get(seed.id)!);
+        dummy.scale.setScalar(Math.max(0.001, s));
+        dummy.updateMatrix();
+        mesh.setMatrixAt(i, dummy.matrix);
         tmp.copy(baseColors[i]).multiplyScalar(0.35 + 0.65 * focus.current[i]);
         tmp.lerp(signal, glow.current[i]);
         mesh.setColorAt(i, tmp);
         dirty = true;
       }
-      if (dirty && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      if (dirty) {
+        mesh.instanceMatrix.needsUpdate = true;
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      }
     }
 
-    /* Agents breathe faintly; the acting agent flashes on arrival. */
+    /* Agents breathe; the acting one flashes on arrival. */
     agentMats.forEach((mat, i) => {
       if (agentGlow.current[i] > 0) agentGlow.current[i] = Math.max(0, agentGlow.current[i] - delta * 1.3);
       const idle = 0.18 + Math.sin(t * 1.6 + i * 1.7) * 0.06;
       mat.emissiveIntensity = idle + agentGlow.current[i] * 1.1;
     });
 
-    /* Edge dimming via vertex colors; the active edge is drawn separately. */
+    /* Edge dimming; edges touching absent nodes fade to almost nothing. */
     const colorAttr = edgeGeo.getAttribute("color") as THREE.BufferAttribute;
     if (colorAttr) {
-      const activeIsNormal = moment
-        ? normalLinks.findIndex((l) => l.source === moment.node || l.target === moment.node)
-        : -1;
       const arr = colorAttr.array as Float32Array;
       for (let e = 0; e < normalLinks.length; e++) {
-        const lit = !moment || e === activeIsNormal ? 1 : 0.32;
+        const link = normalLinks[e];
+        const aIdx = NODE_INDEX.get(link.source) ?? 0;
+        const bIdx = NODE_INDEX.get(link.target) ?? 0;
+        const absent = nodeScale.current[aIdx] < 0.5 || nodeScale.current[bIdx] < 0.5;
+        const lit = absent ? 0.06 : !moment || link.source === moment.node || link.target === moment.node ? 1 : 0.32;
         const r = edgeBase.r * lit;
         const g = edgeBase.g * lit;
         const b = edgeBase.b * lit;
@@ -450,7 +435,7 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
     }
     if (superLines.current) {
       const mat = superLines.current.material as THREE.LineDashedMaterial;
-      const target = moment?.kind === "supersede" ? 0.95 : 0.22;
+      const target = moment?.kind === "edit" ? 0.95 : 0.22;
       mat.opacity += (target - mat.opacity) * Math.min(1, delta * 5);
     }
 
@@ -462,11 +447,15 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
         j.phase = "travel";
         j.t = 0;
         const m = MOMENTS[j.index];
+        if (j.index === 0) {
+          /* The loop turns: reset the lifecycle for the next pass. */
+          pruned.current.clear();
+        }
         if (lastMoment.current !== j.index) {
           lastMoment.current = j.index;
           onMoment(m, j.index);
         }
-        glow.current[NODE_INDEX.get(m.node) ?? 0] = Math.max(glow.current[NODE_INDEX.get(m.node) ?? 0], 0.5);
+        if (m.kind === "add") glow.current[NODE_INDEX.get(m.node) ?? 0] = 0.5;
         /* Point the active-edge overlay at this moment's edge. */
         const attr = activeGeo.getAttribute("position") as THREE.BufferAttribute;
         const r = route(m);
@@ -496,25 +485,36 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
       if (j.t >= 1) {
         j.phase = "dwell";
         j.timer = 0.85 + Math.random() * 0.45;
-        if (m.kind === "recall") agentGlow.current[AGENT_INDEX.get(m.agent) ?? 0] = 1;
-        else glow.current[nodeIdx] = 1;
+        if (m.kind === "consume") agentGlow.current[AGENT_INDEX.get(m.agent) ?? 0] = 1;
+        if (m.kind === "add") glow.current[NODE_INDEX.get(m.node) ?? 0] = 1;
+        if (m.kind === "remove") pruned.current.add(m.node);
       }
     }
 
-    /* Labels: the acting node, its evidence, and every agent, in screen space. */
+    /* Labels: the acting node, its evidence, and every agent. Labels flip
+       to the left of their node when they would cross the card edge —
+       measured, not guessed, because label lengths vary a lot. */
+    const placeLabel = (
+      el: HTMLDivElement | null,
+      x: number,
+      y: number,
+      alpha: number,
+    ) => {
+      if (!el) return;
+      const w = el.offsetWidth || 180;
+      const pastRight = x + 14 + w > size.width - 10;
+      el.style.opacity = String(alpha);
+      el.style.transform = pastRight
+        ? `translate(calc(${x - 14}px - 100%), ${y}px)`
+        : `translate(${x + 14}px, ${y}px)`;
+    };
     if (moment) {
       labelAlpha.current = Math.min(1, labelAlpha.current + delta * 4);
       const to = toScreen(LAYOUT.get(moment.node)!);
-      if (labelToRef.current) {
-        labelToRef.current.style.opacity = String(labelAlpha.current * 0.95);
-        labelToRef.current.style.transform = `translate(${to.x + 14}px, ${to.y - 26}px)`;
-      }
+      placeLabel(labelToRef.current, to.x, to.y - 26, labelAlpha.current * 0.95);
       if (moment.evidence) {
         const from = toScreen(LAYOUT.get(moment.evidence)!);
-        if (labelFromRef.current) {
-          labelFromRef.current.style.opacity = String(labelAlpha.current * 0.95);
-          labelFromRef.current.style.transform = `translate(${from.x + 14}px, ${from.y + 8}px)`;
-        }
+        placeLabel(labelFromRef.current, from.x, from.y + 8, labelAlpha.current * 0.95);
       } else if (labelFromRef.current) {
         labelFromRef.current.style.opacity = "0";
       }
@@ -523,7 +523,11 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
       const el = agentLabelRefs.current[i];
       if (!el) return;
       const s = toScreen(agent.pos);
-      el.style.transform = `translate(${s.x + 13}px, ${s.y - 7}px)`;
+      const shift = agent.side === "left" ? 13 : -13;
+      el.style.transform =
+        agent.side === "left"
+          ? `translate(${s.x + shift}px, ${s.y - 7}px)`
+          : `translate(calc(${s.x + shift}px - 100%), ${s.y - 7}px)`;
     });
   });
 
@@ -534,13 +538,11 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
       <directionalLight position={[-4, -2, -5]} intensity={0.4} color="#dfe8ff" />
 
       <group ref={root}>
-        {/* Ordinary edges: vertex-colored so the moment can dim the rest. */}
         <lineSegments geometry={edgeGeo}>
           <lineBasicMaterial vertexColors transparent opacity={0.9} depthWrite={false} />
         </lineSegments>
 
-        {/* Supersede edges: the signal color, dashed — retirement is visible.
-            Dashing needs the line distances computed once the geometry lands. */}
+        {/* Supersede edges: dashed signal — edits are visible, not silent. */}
         <lineSegments
           ref={superLines}
           geometry={superGeo}
@@ -559,7 +561,6 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
           />
         </lineSegments>
 
-        {/* The edge currently playing, drawn bright above the dimmed rest. */}
         <lineSegments ref={activeLine} geometry={activeGeo}>
           <lineBasicMaterial color={SIGNAL} transparent opacity={0} depthWrite={false} />
         </lineSegments>
@@ -569,13 +570,10 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
           <meshStandardMaterial roughness={0.38} metalness={0.08} />
         </instancedMesh>
 
-        {/* The agents: four sessions around one graph. */}
+        {/* The agents: three claude sessions and a codex, one shared graph. */}
         {AGENTS.map((agent, i) => (
           <mesh
             key={agent.id}
-            ref={(m) => {
-              agentMeshes.current[i] = m;
-            }}
             material={agentMats[i]}
             position={agent.pos}
           >
@@ -583,7 +581,6 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
           </mesh>
         ))}
 
-        {/* The signal in flight, with a soft halo so it reads at a glance. */}
         <mesh ref={pulse} visible={false}>
           <sphereGeometry args={[1, 12, 12]} />
           <meshBasicMaterial color={SIGNAL} />
@@ -635,7 +632,19 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
 
   const running = mounted && !hidden && active;
   const opClass =
-    moment?.m.kind === "supersede" ? "text-[var(--signal)]" : moment?.m.kind === "write" ? "text-foreground/80" : "text-muted-foreground";
+    moment?.m.kind === "edit" || moment?.m.kind === "remove"
+      ? "text-[var(--signal)]"
+      : moment?.m.kind === "add"
+        ? "text-foreground/80"
+        : "text-muted-foreground";
+  const opLabel =
+    moment?.m.kind === "add"
+      ? "remember"
+      : moment?.m.kind === "consume"
+        ? "recall"
+        : moment?.m.kind === "edit"
+          ? "supersede"
+          : "remove";
 
   const labelBase =
     "pointer-events-none absolute left-0 top-0 z-10 whitespace-nowrap rounded border px-1.5 py-0.5 font-mono text-[10px] leading-none opacity-0 will-change-transform";
@@ -646,7 +655,7 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
     <div ref={wrap} className={`overflow-hidden rounded-2xl border bg-[var(--card)]/70 backdrop-blur ${className}`}>
       <div className="flex h-11 items-center justify-between border-b px-5 2xl:h-12">
         <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-          trove · memory graph
+          trove · memory lifecycle
         </span>
         <span className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
           <span className="live-dot size-1.5 rounded-full bg-[var(--signal)]" />
@@ -660,7 +669,7 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
             frameloop={reduceMotion ? "demand" : running ? "always" : "never"}
             dpr={[1, 1.75]}
             gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
-            camera={{ fov: 40, position: [0, 0.15, 10.1] }}
+            camera={{ fov: 40, position: [0, 0.15, 10.4] }}
           >
             <GraphScene
               reduced={!!reduceMotion}
@@ -672,7 +681,6 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
           </Canvas>
         ) : null}
 
-        {/* Agent tags, pinned per frame to the four sessions. */}
         {AGENTS.map((agent, i) => (
           <div
             key={agent.id}
@@ -685,20 +693,24 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
               className="mr-1.5 inline-block size-1.5 rounded-full align-middle"
               style={{ background: agent.color }}
             />
-            {agent.id}
+            {agent.label}
           </div>
         ))}
 
-        {/* The acting node + its evidence, pinned per frame. */}
         <div ref={labelFromRef} className={`${labelBase} bg-[var(--card)]/90 text-muted-foreground`}>
           <span className="text-[var(--signal)]">← </span>
           {moment?.m.evidence ? seedTitle(moment.m.evidence) : ""}
         </div>
         <div ref={labelToRef} className={`${labelBase} bg-[var(--card)]/90 text-foreground`}>
-          <span className={moment?.m.kind === "supersede" ? "superseded-line" : undefined}>
+          <span
+            className={
+              moment?.m.kind === "edit" || moment?.m.kind === "remove" ? "superseded-line" : undefined
+            }
+          >
             {moment ? seedTitle(moment.m.node) : ""}
           </span>
-          {moment?.m.kind === "supersede" && <span className="ml-1.5 text-[var(--signal)]">retired</span>}
+          {moment?.m.kind === "edit" && <span className="ml-1.5 text-[var(--signal)]">retired</span>}
+          {moment?.m.kind === "remove" && <span className="ml-1.5 text-[var(--signal)]">pruned</span>}
         </div>
 
         {/* The visual grammar, taught in one glance. */}
@@ -724,8 +736,8 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
         </div>
       </div>
 
-      {/* The citation line plus the moment's argument: which agent did what,
-          and why a graph that keeps receipts beats a store that overwrites. */}
+      {/* The citation line plus the moment's argument: which session did what,
+          and why a maintained graph beats a store that only accumulates. */}
       <div className="flex min-h-14 flex-col justify-start border-t px-5 py-2.5 2xl:min-h-16">
         <AnimatePresence mode="wait" initial={false}>
           {moment && (
@@ -745,7 +757,7 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
                 )}
                 <span className="tnum">{moment.m.agentName}</span>
                 <span className="mx-2 text-border">·</span>
-                <span className={opClass}>{moment.m.kind}</span>
+                <span className={opClass}>{opLabel}</span>
                 <span className="mx-2 text-border">·</span>
                 <span className="text-foreground/90">{moment.m.text}</span>
                 <span className="mx-2 text-border">·</span>
@@ -762,4 +774,15 @@ export function MemoryGraphScene({ className = "" }: { className?: string }) {
 
 function seedTitle(id: string) {
   return SEEDS.find((s) => s.id === id)?.title ?? id;
+}
+
+function mulberry32(seed: number) {
+  let a = seed;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
