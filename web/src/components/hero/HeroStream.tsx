@@ -1,7 +1,24 @@
+import { Suspense, lazy } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { MemoryStream } from "@/components/hero/MemoryStream";
 import { StaggeredHeadline } from "@/components/hero/StaggeredHeadline";
 import { WaitlistForm } from "@/components/WaitlistForm";
+
+// Three.js is the heaviest thing on the page, and most visitors already have
+// what they came for. Split it out; the skeleton holds the card's exact
+// heights so nothing jumps when the scene streams in.
+const MemoryGraphScene = lazy(() =>
+  import("@/components/hero/MemoryGraphScene").then((m) => ({ default: m.MemoryGraphScene })),
+);
+
+function GraphSceneSkeleton() {
+  return (
+    <div className="overflow-hidden rounded-2xl border bg-[var(--card)]/70">
+      <div className="h-11 border-b 2xl:h-12" />
+      <div className="h-[23rem] md:h-[25rem] 2xl:h-[31rem]" />
+      <div className="h-[3.75rem] border-t" />
+    </div>
+  );
+}
 
 type HeroStreamProps = {
   onJoin: (email?: string) => void;
@@ -10,11 +27,12 @@ type HeroStreamProps = {
 };
 
 /**
- * The hero: the claim on the left, the proof running on the right.
+ * The hero: the claim on the left, the graph running on the right.
  *
- * The stream is not an illustration of the pitch — it is the pitch, scripted
- * from the same memory facts the page makes everywhere else. Copy stays
- * left-aligned and asymmetric; the centred-hero look was the generic one.
+ * The scene is not an illustration of the pitch — it is the pitch: the same
+ * seed graph the inspectable MiniGraph draws, with one recall pulse at a
+ * time tracing evidence toward memory. Copy stays left-aligned and
+ * asymmetric; the centred-hero look was the generic one.
  */
 export function HeroStream({ onJoin, onLogin, onConnectKey }: HeroStreamProps) {
   const reduceMotion = useReducedMotion();
@@ -84,7 +102,9 @@ export function HeroStream({ onJoin, onLogin, onConnectKey }: HeroStreamProps) {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.8, delay: 0.45, ease: [0.16, 1, 0.3, 1] }}
         >
-          <MemoryStream />
+          <Suspense fallback={<GraphSceneSkeleton />}>
+            <MemoryGraphScene />
+          </Suspense>
         </motion.div>
       </div>
     </section>

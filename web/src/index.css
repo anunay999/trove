@@ -146,7 +146,7 @@
 }
 
 ::selection {
-  background: color-mix(in srgb, var(--signal) 42%, transparent);
+  background: color-mix(in srgb, var(--signal) 26%, transparent);
 }
 
 /*
