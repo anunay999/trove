@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState, useEffect } from "react";
 import ForceGraph2D from "react-force-graph-2d";
+import { forceX, forceY } from "d3-force-3d";
 import type { NodeType } from "@/lib/api";
 import { typeColor } from "@/lib/viz";
 import { LINKS, SEEDS, degreeOf, seedById, type Seed } from "@/lib/seed-graph";
@@ -76,6 +77,20 @@ export default function MiniGraph({ className = "" }: { className?: string }) {
 
   const selected = selectedId ? seedById.get(selectedId) : undefined;
 
+  // Spread the layout, then keep it home: uncapped charge flings leaf
+  // nodes to the far field, which blows up the zoom-to-fit bounding box
+  // and shrinks the whole graph into a knot. distanceMax stops the
+  // repulsion from reaching that far, and gentle x/y springs pull any
+  // stretched chains back toward the center.
+  useEffect(() => {
+    const graph = graphRef.current;
+    if (!graph || size.width === 0) return;
+    graph.d3Force("charge")?.strength(-150).distanceMax?.(240);
+    graph.d3Force("link")?.distance(80).strength(0.55);
+    graph.d3Force("x", forceX(0).strength(0.09));
+    graph.d3Force("y", forceY(0).strength(0.09));
+  }, [data, size.width]);
+
   /** Dimming pass: when hovering, only the node and its neighbours stay lit. */
   const nodeAlpha = (id: string, retired: boolean) => {
     const base = retired ? 0.45 : 1;
@@ -87,7 +102,7 @@ export default function MiniGraph({ className = "" }: { className?: string }) {
     const sourceId = typeof link.source === "object" ? (link.source as Seed).id : String(link.source);
     const targetId = typeof link.target === "object" ? (link.target as Seed).id : String(link.target);
     const connected = hoverId != null && (sourceId === hoverId || targetId === hoverId);
-    if (link.predicate === "supersedes") return { color: "rgba(242, 196, 107, 0.55)", width: 1.2, dash: [4, 3] as number[] };
+    if (link.predicate === "superseded by") return { color: "rgba(242, 196, 107, 0.55)", width: 1.2, dash: [4, 3] as number[] };
     if (hoverId && !connected) return { color: "rgba(237, 235, 228, 0.04)", width: 1, dash: [] };
     if (connected) return { color: "rgba(237, 235, 228, 0.5)", width: 1.4, dash: [] };
     return { color: "rgba(237, 235, 228, 0.16)", width: 1, dash: [] };
@@ -109,8 +124,16 @@ export default function MiniGraph({ className = "" }: { className?: string }) {
           linkLineDash={(link) => linkState(link as { source: unknown; target: unknown; predicate: string }).dash}
           linkDirectionalArrowLength={2.5}
           linkDirectionalArrowRelPos={1}
-          cooldownTicks={90}
-          enableZoomInteraction={false}
+          cooldownTicks={320}
+          maxZoom={6}
+          nodePointerAreaPaint={(node, color, ctx) => {
+            // A generous invisible hit area — at this zoom a 3px node is
+            // a needle.
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(node.x ?? 0, node.y ?? 0, 12, 0, 2 * Math.PI);
+            ctx.fill();
+          }}
           onNodeHover={(node) => {
             setHoverId(node ? (node as Seed).id : null);
             if (containerRef.current) containerRef.current.style.cursor = node ? "pointer" : "";
@@ -120,13 +143,14 @@ export default function MiniGraph({ className = "" }: { className?: string }) {
           onEngineStop={() => {
             if (fitted.current || !graphRef.current) return;
             fitted.current = true;
-            graphRef.current.zoomToFit(600, 48);
+            graphRef.current.zoomToFit(600, 56);
           }}
           nodeCanvasObject={(rawNode, ctx, globalScale) => {
             const node = rawNode as Seed & { degree: number; x?: number; y?: number };
             const retired = Boolean(node.retiredBy);
             const alpha = nodeAlpha(node.id, retired);
-            const radius = 2.5 + Math.sqrt(node.degree + 1) * 1.3;
+            const radius = 3.2 + Math.sqrt(node.degree + 1) * 1.7;
+            const isHub = node.degree >= 4;
 
             ctx.globalAlpha = alpha;
             ctx.beginPath();
@@ -140,6 +164,15 @@ export default function MiniGraph({ className = "" }: { className?: string }) {
               ctx.strokeStyle = "rgba(242, 196, 107, 0.9)";
               ctx.lineWidth = 1 / globalScale;
               ctx.stroke();
+            }
+
+            /* Thirty always-on labels collide into static; label only the
+               hubs, the hovered node, and the selection. */
+            const showLabel =
+              isHub || node.id === hoverId || node.id === selectedId;
+            if (!showLabel) {
+              ctx.globalAlpha = 1;
+              return;
             }
 
             const label = node.title.length > 26 ? `${node.title.slice(0, 24)}…` : node.title;
