@@ -21,7 +21,7 @@ function Word({
   const isAccent = word.replace(/[^a-zA-Z']/g, "") === accent;
   return (
     <motion.span
-      className="relative inline-block px-[0.08em] leading-none"
+      className="relative mx-[0.07em] inline-block leading-none"
       initial={reduceMotion ? false : { opacity: 0, y: "70%", rotateX: "-28deg" }}
       animate={{ opacity: 1, y: "0%", rotateX: "0deg" }}
       transition={{ delay: reduceMotion ? 0 : delay, duration: 0.8, ease: [0.215, 0.61, 0.355, 1] }}
@@ -53,7 +53,7 @@ export function StaggeredHeadline({ lines, accent }: StaggeredHeadlineProps) {
 
   return (
     <h1
-      className="text-[clamp(2.6rem,5.8vw,5.25rem)] font-medium leading-[0.99] tracking-[-0.055em] text-foreground lg:text-[clamp(3rem,4.6vw,5.25rem)]"
+      className="select-none text-[clamp(2.6rem,5.8vw,5.25rem)] font-medium leading-[0.99] tracking-[-0.055em] text-foreground lg:text-[clamp(3rem,4.6vw,5.25rem)]"
       style={{ transformStyle: "preserve-3d", perspective: "600px" }}
     >
       {/* Small screens: flowing text, no masks — nothing to tear. */}
