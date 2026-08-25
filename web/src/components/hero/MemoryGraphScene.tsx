@@ -86,9 +86,9 @@ const NODE_INDEX = new Map(SEEDS.map((s, i) => [s.id, i]));
 /* ------------------------------------------------------------------ */
 
 const AGENTS = [
-  { id: "s12", label: "claude · s12", icon: "claude", color: "#e0784f", pos: new THREE.Vector3(-4.15, 0.5, 0.1), side: "left" as const },
-  { id: "s14", label: "claude · s14", icon: "claude", color: "#e0784f", pos: new THREE.Vector3(-4.05, -1.0, -0.1), side: "left" as const },
-  { id: "s17", label: "claude · s17", icon: "claude", color: "#e0784f", pos: new THREE.Vector3(4.15, 0.3, 0.15), side: "right" as const },
+  { id: "s12", label: "claude · s12", icon: "claude", color: "#d97757", pos: new THREE.Vector3(-4.15, 0.5, 0.1), side: "left" as const },
+  { id: "s14", label: "claude · s14", icon: "claude", color: "#d97757", pos: new THREE.Vector3(-4.05, -1.0, -0.1), side: "left" as const },
+  { id: "s17", label: "claude · s17", icon: "claude", color: "#d97757", pos: new THREE.Vector3(4.15, 0.3, 0.15), side: "right" as const },
   { id: "codex", label: "codex", icon: "codex", color: "#3fa87c", pos: new THREE.Vector3(4.05, -1.6, -0.05), side: "right" as const },
 ];
 
@@ -98,22 +98,38 @@ const AGENT_INDEX = new Map(AGENTS.map((a, i) => [a.id, i]));
 const CODEX_PATH =
   "M5 6.2 L11.2 12 L5 17.8 M13.5 17.8 L19 17.8";
 
+/** One texture per agent: a dark chip with a hairline ring, the mark drawn
+    on top. Compositing in the canvas keeps it a single quad in the scene. */
 function logoTexture(icon: "claude" | "codex", color: string): THREE.CanvasTexture {
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = 256;
   const ctx = canvas.getContext("2d")!;
+
+  /* The chip. */
+  ctx.fillStyle = "rgba(22, 21, 19, 0.94)";
+  ctx.beginPath();
+  ctx.arc(128, 128, 116, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(237, 235, 228, 0.14)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  /* The mark, centered at ~55% of the chip. */
+  ctx.save();
+  ctx.translate(128 - 70, 128 - 70);
+  ctx.scale(140 / 24, 140 / 24);
   if (icon === "claude") {
-    ctx.scale(256 / 24, 256 / 24);
     ctx.fillStyle = color;
     ctx.fill(new Path2D(siClaude.path));
   } else {
-    ctx.scale(256 / 24, 256 / 24);
     ctx.strokeStyle = color;
-    ctx.lineWidth = 2.6;
+    ctx.lineWidth = 3.2;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.stroke(new Path2D(CODEX_PATH));
   }
+  ctx.restore();
+
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;
@@ -245,12 +261,16 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
 
   const nodeCount = SEEDS.length;
 
-  /** Base color per node (retired nodes dimmed), flashed toward amber. */
+  /** Base color per node: type-tinted but pulled toward the page's warm
+      monochrome — the amber pulse stays the only loud color in the room.
+      Retired nodes sit dimmer. */
   const baseColors = useMemo(
     () =>
       SEEDS.map((seed) => {
         const c = new THREE.Color(typeColor(seed.type, true));
-        if (seed.retiredBy) c.multiplyScalar(0.5);
+        c.lerp(new THREE.Color("#8a8677"), 0.55);
+        c.multiplyScalar(0.92);
+        if (seed.retiredBy) c.multiplyScalar(0.55);
         return c;
       }),
     [],
@@ -470,7 +490,7 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
         const aIdx = NODE_INDEX.get(link.source) ?? 0;
         const bIdx = NODE_INDEX.get(link.target) ?? 0;
         const absent = nodeScale.current[aIdx] < 0.5 || nodeScale.current[bIdx] < 0.5;
-        const lit = absent ? 0.06 : !moment || link.source === moment.node || link.target === moment.node ? 1 : 0.32;
+        const lit = absent ? 0.05 : !moment || link.source === moment.node || link.target === moment.node ? 0.8 : 0.16;
         const r = edgeBase.r * lit;
         const g = edgeBase.g * lit;
         const b = edgeBase.b * lit;
@@ -628,12 +648,12 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
   return (
     <>
       <ambientLight intensity={0.85} />
-      <directionalLight position={[3, 5, 6]} intensity={1.1} color="#fff6e8" />
-      <directionalLight position={[-4, -2, -5]} intensity={0.4} color="#dfe8ff" />
+      <directionalLight position={[3, 5, 6]} intensity={0.9} color="#fff6e8" />
+      <directionalLight position={[-4, -2, -5]} intensity={0.3} color="#dfe8ff" />
 
       <group ref={root}>
         <lineSegments geometry={edgeGeo}>
-          <lineBasicMaterial vertexColors transparent opacity={0.9} depthWrite={false} />
+          <lineBasicMaterial vertexColors transparent opacity={0.6} depthWrite={false} />
         </lineSegments>
 
         {/* Supersede edges: dashed signal — edits are visible, not silent. */}
@@ -686,7 +706,7 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
           }}
           position={agent.pos}
         >
-          <planeGeometry args={[0.52, 0.52]} />
+          <planeGeometry args={[0.72, 0.72]} />
           <meshBasicMaterial
             map={agentTextures[i]}
             transparent
@@ -696,7 +716,7 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
       ))}
 
       <points ref={stars} geometry={starGeo}>
-        <pointsMaterial color="#8a8677" size={0.03} sizeAttenuation transparent opacity={0.26} depthWrite={false} />
+        <pointsMaterial color="#8a8677" size={0.03} sizeAttenuation transparent opacity={0.13} depthWrite={false} />
       </points>
     </>
   );
