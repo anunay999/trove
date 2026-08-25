@@ -400,6 +400,21 @@ export const LINKS: {
     target: "stripe-migration",
     predicate: "relates to",
   },
+  {
+    source: "stripe-migration",
+    target: "acme",
+    predicate: "part of",
+  },
+  {
+    source: "previous-agent",
+    target: "onboarding-friction",
+    predicate: "investigated",
+  },
+  {
+    source: "anunay",
+    target: "repo-rules",
+    predicate: "maintains",
+  },
 ];
 
 export const degreeOf = (id: string) =>

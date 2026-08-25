@@ -2,6 +2,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as THREE from "three";
+import { siClaude } from "simple-icons";
 import { LINKS, SEEDS, degreeOf } from "@/lib/seed-graph";
 import { typeColor } from "@/lib/viz";
 
@@ -9,15 +10,17 @@ import { typeColor } from "@/lib/viz";
  * The hero's right column: the memory lifecycle, run by the agents themselves.
  *
  * Three claude sessions and a codex orbit one shared graph, and the loop they
- * run is Trove's whole argument — a session adds what it learned, another
- * consumes it cold, an edit supersedes a belief without erasing it, noise
- * gets pruned on the record. Then the loop turns again. The graph is never
+ * run is Trove's whole argument — a session adds what it learned (the new
+ * memory flies in and attaches, edges and all), another consumes it cold, an
+ * edit supersedes a belief without erasing it, noise is pruned and the
+ * removal flies home. Then the loop turns again. The graph is never
  * finished: it is maintained, and the maintenance is visible.
  *
- * Layout is hand-placed — hub in the middle, decisions around it, sources on
- * the rim — so the structure reads at a glance. Perf contract mirrors the
- * rest of the page: frames stop when the hero leaves the viewport or the tab
- * hides, prefers-reduced-motion freezes the scene, DPR is capped.
+ * The graph is fully connected — no islands. Layout is hand-placed in themed
+ * clusters (launch, repo rules, Stripe migration, hosting, learned rules)
+ * around the acme hub. Perf contract: frames stop when the hero leaves the
+ * viewport or the tab hides, prefers-reduced-motion freezes the scene, DPR
+ * is capped, three.js ships in its own chunk.
  */
 
 const SIGNAL = "#f2c46b"; // the signal amber, brightened for WebGL
@@ -77,17 +80,45 @@ const LAYOUT = new Map(Object.entries(HAND_LAYOUT).map(([id, [x, y, z]]) => [id,
 const NODE_INDEX = new Map(SEEDS.map((s, i) => [s.id, i]));
 
 /* ------------------------------------------------------------------ */
-/* The agents: three claude sessions and a codex, one shared graph      */
+/* The agents: three claude sessions and a codex, one shared graph.     */
+/* Logos instead of bubbles — the claude starburst and the codex        */
+/* prompt, billboarded so they always face the camera.                  */
 /* ------------------------------------------------------------------ */
 
 const AGENTS = [
-  { id: "s12", label: "claude · s12", color: "#e0784f", pos: new THREE.Vector3(-4.15, 0.5, 0.1), side: "left" as const },
-  { id: "s14", label: "claude · s14", color: "#e0784f", pos: new THREE.Vector3(-4.05, -1.0, -0.1), side: "left" as const },
-  { id: "s17", label: "claude · s17", color: "#e0784f", pos: new THREE.Vector3(4.15, 0.3, 0.15), side: "right" as const },
-  { id: "codex", label: "codex", color: "#3fa87c", pos: new THREE.Vector3(4.05, -1.6, -0.05), side: "right" as const },
+  { id: "s12", label: "claude · s12", icon: "claude", color: "#e0784f", pos: new THREE.Vector3(-4.15, 0.5, 0.1), side: "left" as const },
+  { id: "s14", label: "claude · s14", icon: "claude", color: "#e0784f", pos: new THREE.Vector3(-4.05, -1.0, -0.1), side: "left" as const },
+  { id: "s17", label: "claude · s17", icon: "claude", color: "#e0784f", pos: new THREE.Vector3(4.15, 0.3, 0.15), side: "right" as const },
+  { id: "codex", label: "codex", icon: "codex", color: "#3fa87c", pos: new THREE.Vector3(4.05, -1.6, -0.05), side: "right" as const },
 ];
 
 const AGENT_INDEX = new Map(AGENTS.map((a, i) => [a.id, i]));
+
+/** Codex has no simple-icons mark, so the prompt glyph stands in. */
+const CODEX_PATH =
+  "M5 6.2 L11.2 12 L5 17.8 M13.5 17.8 L19 17.8";
+
+function logoTexture(icon: "claude" | "codex", color: string): THREE.CanvasTexture {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 256;
+  const ctx = canvas.getContext("2d")!;
+  if (icon === "claude") {
+    ctx.scale(256 / 24, 256 / 24);
+    ctx.fillStyle = color;
+    ctx.fill(new Path2D(siClaude.path));
+  } else {
+    ctx.scale(256 / 24, 256 / 24);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2.6;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.stroke(new Path2D(CODEX_PATH));
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
 
 /* ------------------------------------------------------------------ */
 /* The moments: the lifecycle loop — add, consume, edit, remove         */
@@ -176,9 +207,8 @@ const MOMENTS: Moment[] = [
   },
 ];
 
-/* Nodes that enter the graph during the loop (they start at scale 0 and grow
-   when a session writes them); the pruned one shrinks away and stays gone
-   until the loop turns. */
+/* Nodes that enter the graph during the loop (they start at scale 0 and fly
+   in when a session writes them); the pruned one detaches and flies home. */
 const ADDED_DURING_LOOP = new Set(["launch-date-current", "webhook-fix"]);
 
 /* ------------------------------------------------------------------ */
@@ -201,6 +231,7 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
   const activeLine = useRef<THREE.LineSegments>(null);
   const stars = useRef<THREE.Points>(null);
   const superLines = useRef<THREE.LineSegments>(null);
+  const agentPlanes = useRef<(THREE.Mesh | null)[]>([]);
 
   const camera = useThree((s) => s.camera);
   const size = useThree((s) => s.size);
@@ -233,21 +264,13 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
   );
   const pruned = useRef<Set<string>>(new Set());
 
-  const agentMats = useMemo(
-    () =>
-      AGENTS.map(
-        (a) =>
-          new THREE.MeshStandardMaterial({
-            color: a.color,
-            emissive: a.color,
-            emissiveIntensity: 0.22,
-            roughness: 0.35,
-            metalness: 0.05,
-          }),
-      ),
+  const agentTextures = useMemo(
+    () => AGENTS.map((a) => logoTexture(a.icon as "claude" | "codex", a.color)),
     [],
   );
-  useEffect(() => () => agentMats.forEach((m) => m.dispose()), [agentMats]);
+  useEffect(() => () => agentTextures.forEach((t) => t.dispose()), [agentTextures]);
+
+  const agentBaseColors = useMemo(() => AGENTS.map((a) => new THREE.Color(a.color)), []);
 
   const nodeRadius = useMemo(
     () => SEEDS.map((s) => (0.07 + Math.sqrt(degreeOf(s.id)) * 0.034) * 1.05),
@@ -325,13 +348,27 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
   const journey = useRef({ phase: "dwell" as "dwell" | "travel", timer: 0.9, index: -1, t: 0 });
   const lastMoment = useRef(-1);
   const labelAlpha = useRef(0);
+  /** The node currently flying to/from its agent, in root-local space. */
+  const flying = useRef<{ id: string; index: number; from: THREE.Vector3; to: THREE.Vector3 } | null>(null);
+  const flyingPos = useMemo(() => new THREE.Vector3(), []);
 
   const easeInOut = (x: number) => (x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2);
 
   const toScreen = useMemo(() => {
     const v = new THREE.Vector3();
     return (world: THREE.Vector3) => {
-      v.copy(world).applyMatrix4(root.current?.matrixWorld ?? new THREE.Matrix4());
+      v.copy(world).project(camera);
+      return {
+        x: (v.x * 0.5 + 0.5) * size.width,
+        y: (-v.y * 0.5 + 0.5) * size.height,
+      };
+    };
+  }, [camera, size]);
+
+  const nodeToScreen = useMemo(() => {
+    const v = new THREE.Vector3();
+    return (local: THREE.Vector3) => {
+      v.copy(local).applyMatrix4(root.current?.matrixWorld ?? new THREE.Matrix4());
       v.project(camera);
       return {
         x: (v.x * 0.5 + 0.5) * size.width,
@@ -340,11 +377,15 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
     };
   }, [camera, size]);
 
-  /** Writes go from the agent into the graph; consumes and prunes come out. */
+  /** Writes fly from the agent into the graph; prunes fly home; consumes and
+      edits send the signal pulse instead. */
   const route = (m: Moment) => {
     const node = LAYOUT.get(m.node)!;
     const agent = AGENTS[AGENT_INDEX.get(m.agent)!].pos;
-    return m.kind === "add" ? { a: agent, b: node } : { a: node, b: agent };
+    if (m.kind === "add") return { a: agent, b: node };
+    if (m.kind === "remove") return { a: node, b: agent };
+    if (m.kind === "edit") return { a: agent, b: node };
+    return { a: node, b: agent };
   };
 
   useFrame((_, rawDelta) => {
@@ -371,16 +412,19 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
     const j = journey.current;
     const moment = j.index >= 0 ? MOMENTS[j.index] : null;
     const nodeIdx = moment ? (NODE_INDEX.get(moment.node) ?? 0) : 0;
+    const flyingNode = flying.current && j.phase === "travel" && (moment?.kind === "add" || moment?.kind === "remove");
 
-    /* Lifecycle scales ease toward their targets: added nodes grow in,
-       pruned nodes shrink away. */
+    /* Node lifecycle scales ease toward their targets; the flying node is
+       driven by the journey below instead. */
     const mesh = field.current;
     if (mesh) {
       let dirty = false;
       for (let i = 0; i < nodeCount; i++) {
         const seed = SEEDS[i];
         const target = pruned.current.has(seed.id) ? 0 : 1;
-        nodeScale.current[i] += (target - nodeScale.current[i]) * Math.min(1, delta * 5);
+        if (!(flyingNode && seed.id === flying.current!.id)) {
+          nodeScale.current[i] += (target - nodeScale.current[i]) * Math.min(1, delta * 5);
+        }
         const focused =
           !moment || i === nodeIdx || i === (moment.evidence ? (NODE_INDEX.get(moment.evidence) ?? 0) : -1)
             ? 1
@@ -388,7 +432,8 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
         focus.current[i] += (focused - focus.current[i]) * Math.min(1, delta * 7);
         if (glow.current[i] > 0) glow.current[i] = Math.max(0, glow.current[i] - delta * 1.3);
         const s = nodeRadius[i] * nodeScale.current[i];
-        dummy.position.copy(LAYOUT.get(seed.id)!);
+        const pos = flyingNode && seed.id === flying.current!.id ? flyingPos : LAYOUT.get(seed.id)!;
+        dummy.position.copy(pos);
         dummy.scale.setScalar(Math.max(0.001, s));
         dummy.updateMatrix();
         mesh.setMatrixAt(i, dummy.matrix);
@@ -403,15 +448,21 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
       }
     }
 
-    /* Agents breathe; the acting one flashes on arrival. */
-    agentMats.forEach((mat, i) => {
+    /* Agent logos billboard toward the camera; the acting one pops. */
+    agentPlanes.current.forEach((plane, i) => {
+      if (!plane) return;
+      plane.quaternion.copy(camera.quaternion);
       if (agentGlow.current[i] > 0) agentGlow.current[i] = Math.max(0, agentGlow.current[i] - delta * 1.3);
-      const idle = 0.18 + Math.sin(t * 1.6 + i * 1.7) * 0.06;
-      mat.emissiveIntensity = idle + agentGlow.current[i] * 1.1;
+      const pop = 1 + agentGlow.current[i] * 0.3;
+      plane.scale.setScalar(pop);
+      const mat = plane.material as THREE.MeshBasicMaterial;
+      mat.color.copy(agentBaseColors[i]).lerp(tmp.set("#ffffff"), agentGlow.current[i] * 0.55);
     });
 
-    /* Edge dimming; edges touching absent nodes fade to almost nothing. */
+    /* Edge dimming; edges touching absent nodes fade to almost nothing, and
+       edges touching the flying node follow it so the attach reads. */
     const colorAttr = edgeGeo.getAttribute("color") as THREE.BufferAttribute;
+    const posAttr = edgeGeo.getAttribute("position") as THREE.BufferAttribute;
     if (colorAttr) {
       const arr = colorAttr.array as Float32Array;
       for (let e = 0; e < normalLinks.length; e++) {
@@ -432,6 +483,21 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
         arr[k + 5] = arr[k + 2];
       }
       colorAttr.needsUpdate = true;
+    }
+    if (flyingNode && flying.current && posAttr) {
+      const arr = posAttr.array as Float32Array;
+      const fid = flying.current.id;
+      for (let e = 0; e < normalLinks.length; e++) {
+        const link = normalLinks[e];
+        const isSource = link.source === fid;
+        if (!isSource && link.target !== fid) continue;
+        const k = e * 6;
+        const offset = isSource ? 0 : 3;
+        arr[k + offset] = flyingPos.x;
+        arr[k + offset + 1] = flyingPos.y;
+        arr[k + offset + 2] = flyingPos.z;
+      }
+      posAttr.needsUpdate = true;
     }
     if (superLines.current) {
       const mat = superLines.current.material as THREE.LineDashedMaterial;
@@ -455,8 +521,28 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
           lastMoment.current = j.index;
           onMoment(m, j.index);
         }
-        if (m.kind === "add") glow.current[NODE_INDEX.get(m.node) ?? 0] = 0.5;
-        /* Point the active-edge overlay at this moment's edge. */
+        if (m.kind === "add" || m.kind === "remove") {
+          /* The node itself makes the trip. */
+          const agentWorld = AGENTS[AGENT_INDEX.get(m.agent)!].pos;
+          const localAgent =
+            m.kind === "add"
+              ? root.current
+                ? root.current.worldToLocal(agentWorld.clone())
+                : agentWorld.clone()
+              : LAYOUT.get(m.node)!;
+          const localNode =
+            m.kind === "add" ? LAYOUT.get(m.node)! : LAYOUT.get(m.node)!;
+          flying.current = {
+            id: m.node,
+            index: NODE_INDEX.get(m.node) ?? 0,
+            from: m.kind === "add" ? localAgent : localNode,
+            to: m.kind === "add" ? localNode : localAgent,
+          };
+        } else {
+          flying.current = null;
+        }
+        if (m.kind === "add") glow.current[NODE_INDEX.get(m.node) ?? 0] = 0.4;
+        /* Point the active-edge overlay at this moment's path. */
         const attr = activeGeo.getAttribute("position") as THREE.BufferAttribute;
         const r = route(m);
         attr.set([r.a.x, r.a.y, r.a.z, r.b.x, r.b.y, r.b.z]);
@@ -468,14 +554,20 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
       const r = route(m);
       const e = easeInOut(Math.min(1, j.t));
       const envelope = Math.min(1, j.t / 0.16, (1 - j.t) / 0.16);
-      if (pulse.current) {
+
+      if (flyingNode && flying.current) {
+        /* The memory itself makes the trip, growing or shrinking as it goes. */
+        flyingPos.lerpVectors(flying.current.from, flying.current.to, e);
+        const idx = flying.current.index;
+        if (m.kind === "add") nodeScale.current[idx] = e;
+        else nodeScale.current[idx] = 1 - e;
+      } else if (pulse.current && halo.current) {
+        /* Consumes and edits send the signal pulse instead. */
         pulse.current.visible = true;
         pulse.current.position.lerpVectors(r.a, r.b, e);
         pulse.current.scale.setScalar(Math.max(0.02, 0.075 * envelope));
-      }
-      if (halo.current) {
         halo.current.visible = true;
-        halo.current.position.copy(pulse.current?.position ?? r.a);
+        halo.current.position.copy(pulse.current.position);
         halo.current.scale.setScalar(Math.max(0.02, 0.19 * envelope));
         const hmat = halo.current.material as THREE.MeshBasicMaterial;
         hmat.opacity = 0.22 * envelope;
@@ -485,6 +577,7 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
       if (j.t >= 1) {
         j.phase = "dwell";
         j.timer = 0.85 + Math.random() * 0.45;
+        flying.current = null;
         if (m.kind === "consume") agentGlow.current[AGENT_INDEX.get(m.agent) ?? 0] = 1;
         if (m.kind === "add") glow.current[NODE_INDEX.get(m.node) ?? 0] = 1;
         if (m.kind === "remove") pruned.current.add(m.node);
@@ -493,7 +586,7 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
 
     /* Labels: the acting node, its evidence, and every agent. Labels flip
        to the left of their node when they would cross the card edge —
-       measured, not guessed, because label lengths vary a lot. */
+       measured against the label's real width. */
     const placeLabel = (
       el: HTMLDivElement | null,
       x: number,
@@ -510,10 +603,11 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
     };
     if (moment) {
       labelAlpha.current = Math.min(1, labelAlpha.current + delta * 4);
-      const to = toScreen(LAYOUT.get(moment.node)!);
+      const nodeLocal = flyingNode && flying.current ? flyingPos : LAYOUT.get(moment.node)!;
+      const to = nodeToScreen(nodeLocal);
       placeLabel(labelToRef.current, to.x, to.y - 26, labelAlpha.current * 0.95);
       if (moment.evidence) {
-        const from = toScreen(LAYOUT.get(moment.evidence)!);
+        const from = nodeToScreen(LAYOUT.get(moment.evidence)!);
         placeLabel(labelFromRef.current, from.x, from.y + 8, labelAlpha.current * 0.95);
       } else if (labelFromRef.current) {
         labelFromRef.current.style.opacity = "0";
@@ -570,17 +664,8 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
           <meshStandardMaterial roughness={0.38} metalness={0.08} />
         </instancedMesh>
 
-        {/* The agents: three claude sessions and a codex, one shared graph. */}
-        {AGENTS.map((agent, i) => (
-          <mesh
-            key={agent.id}
-            material={agentMats[i]}
-            position={agent.pos}
-          >
-            <sphereGeometry args={[0.17, 20, 20]} />
-          </mesh>
-        ))}
-
+        {/* The signal in flight for consumes/edits. Adds and prunes send the
+            memory itself instead. */}
         <mesh ref={pulse} visible={false}>
           <sphereGeometry args={[1, 12, 12]} />
           <meshBasicMaterial color={SIGNAL} />
@@ -590,6 +675,25 @@ function GraphScene({ onMoment, labelFromRef, labelToRef, agentLabelRefs, reduce
           <meshBasicMaterial color={SIGNAL} transparent opacity={0.2} depthWrite={false} />
         </mesh>
       </group>
+
+      {/* The agents live outside the swaying graph: fixed anchors, always
+          billboarded, logo-first. */}
+      {AGENTS.map((agent, i) => (
+        <mesh
+          key={agent.id}
+          ref={(m) => {
+            agentPlanes.current[i] = m;
+          }}
+          position={agent.pos}
+        >
+          <planeGeometry args={[0.52, 0.52]} />
+          <meshBasicMaterial
+            map={agentTextures[i]}
+            transparent
+            depthWrite={false}
+          />
+        </mesh>
+      ))}
 
       <points ref={stars} geometry={starGeo}>
         <pointsMaterial color="#8a8677" size={0.03} sizeAttenuation transparent opacity={0.26} depthWrite={false} />
