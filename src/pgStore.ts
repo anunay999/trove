@@ -2235,24 +2235,45 @@ export class PgGraphStore implements GraphStore {
       const batch = rows.slice(start, start + EMBED_BATCH);
       embeddings.push(...await provider.embed(batch.map((row) => String(row.text))));
     }
+    // Bulk-insert through unnest rather than one statement per row. The
+    // row-at-a-time loop sent a separate INSERT per embedding, each paying its
+    // own cross-region round trip *and* its own HNSW index maintenance:
+    // measured at ~0.58s/row against Supabase in production, which put the
+    // 62k-row backfill at ~10 hours and is the shape that produced "canceling
+    // statement due to statement timeout". unnest holds the parameter count at
+    // six no matter how many rows ride along, so the statement can never
+    // approach Postgres's 65535-parameter ceiling; the chunk below bounds the
+    // size of any single statement instead.
+    const ownerIds: string[] = [];
+    const vectors: string[] = [];
+    const shas: string[] = [];
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const embedding = embeddings[index];
+      if (!row || !embedding) continue;
+      ownerIds.push(String(row.id));
+      vectors.push(vectorLiteral(embedding));
+      shas.push(String(row.content_sha256));
+    }
+    if (ownerIds.length === 0) return;
+
+    const INSERT_CHUNK = 256;
     const client = await this.pool.connect();
     try {
       await client.query("begin");
-      for (let index = 0; index < rows.length; index += 1) {
-        const row = rows[index];
-        const embedding = embeddings[index];
-        if (!row || !embedding) continue;
+      for (let start = 0; start < ownerIds.length; start += INSERT_CHUNK) {
         await client.query(
           `insert into embedding (owner_table, owner_id, model, dimensions, embedding, content_sha256)
-           values ($1, $2, $3, $4, $5::vector, $6)
+           select $1, t.owner_id, $2, $3, t.embedding::vector, t.content_sha256
+             from unnest($4::uuid[], $5::text[], $6::text[]) as t(owner_id, embedding, content_sha256)
            on conflict (owner_table, owner_id, model, content_sha256) do nothing`,
           [
             ownerTable,
-            row.id,
             provider.model,
             provider.dimensions,
-            vectorLiteral(embedding),
-            row.content_sha256,
+            ownerIds.slice(start, start + INSERT_CHUNK),
+            vectors.slice(start, start + INSERT_CHUNK),
+            shas.slice(start, start + INSERT_CHUNK),
           ],
         );
       }
