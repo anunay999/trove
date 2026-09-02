@@ -94,6 +94,15 @@ const NEIGHBORHOOD_DEFAULT_MAX_NODES = 100;
 /** Attempts a job gets across all causes — failures and lease reclaims alike. */
 const JOB_MAX_ATTEMPTS = 5;
 
+/**
+ * Rows per embedding INSERT statement. Sized against statement_timeout rather
+ * than for throughput — see the comment in embedRows.
+ */
+function embeddingInsertChunk(): number {
+  const parsed = Number(process.env.TROVE_EMBEDDING_INSERT_CHUNK);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(1000, Math.trunc(parsed)) : 64;
+}
+
 function jobLeaseSeconds(): number {
   const parsed = Number(process.env.TROVE_JOB_LEASE_SECONDS);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 900;
@@ -2311,7 +2320,16 @@ export class PgGraphStore implements GraphStore {
     }
     if (ownerIds.length === 0) return;
 
-    const INSERT_CHUNK = 256;
+    // Chunk size is a timeout budget, not a batching preference. Every row
+    // inserted here costs an HNSW index insertion -- measured at ~0.43s/vector
+    // against production -- and a chunk is ONE statement, so it must finish
+    // inside statement_timeout (2min on Supabase). At 256 the statement ran
+    // ~114s: 95% of the budget, and it duly started failing with "canceling
+    // statement due to statement timeout", stalling the drain in a retry loop.
+    // Row-at-a-time was slower but never near the limit because each row was
+    // its own statement; batching bought throughput and, unnoticed, a cliff.
+    // 64 keeps most of the win at ~28s per statement, roughly 4x headroom.
+    const INSERT_CHUNK = embeddingInsertChunk();
     const client = await this.pool.connect();
     try {
       await client.query("begin");
