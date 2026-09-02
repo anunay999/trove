@@ -4,6 +4,8 @@ try {
   // .env is optional; real environment variables always win.
 }
 
+import v8 from "node:v8";
+
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -503,6 +505,26 @@ app.post("/v1/jobs/run", async (context) => {
   const job = await store.runJob(input, operationContextFromAuth(auth));
   if (!job) return context.json({ job: null, message: "No pending job available." });
   return context.json({ job });
+});
+
+// Memory forensics. Production RSS climbed ~0.42 GB/day from Aug 25 with flat
+// CPU and no FD growth, and the leak could not be pinned from outside the
+// process: the cgroup only says "anonymous memory", which is true of a JS
+// object leak, a Buffer leak and heap fragmentation alike. These three numbers
+// separate those cases — heapUsed climbing means JS objects are retained,
+// external/arrayBuffers climbing means Buffers (pg rows, fetch bodies) are, and
+// neither climbing while rss does means native allocator fragmentation.
+// Admin-only: heap space names and sizes are an internal detail.
+app.get("/v1/debug/memory", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:admin"]);
+  if (auth instanceof Response) return auth;
+  return context.json({
+    uptimeSeconds: Math.round(process.uptime()),
+    memoryUsage: process.memoryUsage(),
+    heapStatistics: v8.getHeapStatistics(),
+    heapSpaceStatistics: v8.getHeapSpaceStatistics(),
+    resourceUsage: process.resourceUsage(),
+  });
 });
 
 app.get("/v1/export/obsidian", async (context) => {
