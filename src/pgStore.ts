@@ -84,6 +84,16 @@ const { Pool } = pg;
  * it. Generous by default: a full refresh_embeddings drain is many OpenAI round
  * trips, and reclaiming a job that is merely slow throws away real work.
  */
+/**
+ * Default node cap for a neighborhood walk. Shared with exportMarkdown, which
+ * assembles the same depth-1 neighbourhoods in memory — if these two drift, the
+ * vault projection silently stops matching what neighborhood() would return.
+ */
+const NEIGHBORHOOD_DEFAULT_MAX_NODES = 100;
+
+/** Attempts a job gets across all causes — failures and lease reclaims alike. */
+const JOB_MAX_ATTEMPTS = 5;
+
 function jobLeaseSeconds(): number {
   const parsed = Number(process.env.TROVE_JOB_LEASE_SECONDS);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 900;
@@ -873,7 +883,7 @@ export class PgGraphStore implements GraphStore {
 
   async neighborhood(input: NeighborhoodInput, context?: GraphOperationContext): Promise<NeighborhoodResult> {
     const scope = ownerScope(context);
-    const maxNodes = Math.max(1, Math.min(500, Math.trunc(input.maxNodes ?? 100)));
+    const maxNodes = Math.max(1, Math.min(500, Math.trunc(input.maxNodes ?? NEIGHBORHOOD_DEFAULT_MAX_NODES)));
     const validAt = input.validAt ?? null;
     const nodeResult = await this.pool.query(
       `with recursive walk as (
@@ -1667,17 +1677,43 @@ export class PgGraphStore implements GraphStore {
   }
 
   async exportMarkdown(context?: GraphOperationContext): Promise<Record<string, string>> {
-    const scope = ownerScope(context);
-    const result = await this.pool.query(
-      "select id, slug from node where deleted_at is null and ($1 or owner_id = $2) order by slug",
-      [!scope.scoped, scope.ownerId],
-    );
+    // One project() per node meant a read() plus a recursive neighborhood()
+    // each -- around six round trips per node, ~9k across 1,432 nodes, every one
+    // of them crossing a region boundary in production. That is what made
+    // refresh_obsidian_projection take 10-20 minutes, and slow enough that three
+    // consecutive deploys killed it mid-flight: it sat 'running' from
+    // 2026-07-04 until the job lease finally reclaimed it, blocking its dedupe
+    // key the entire time. The whole vault is derivable from three bulk reads,
+    // so take those and assemble the depth-1 neighbourhoods in memory.
+    const snapshot = await this.exportGraph(context);
+    const nodesById = new Map(snapshot.nodes.map((node) => [node.id, node]));
+    const evidenceByNode = await this.getEvidenceForNodes([...nodesById.keys()], context);
+
+    const neighbourIds = new Map<string, Set<string>>(snapshot.nodes.map((node) => [node.id, new Set()]));
+    for (const edge of snapshot.edges) {
+      neighbourIds.get(edge.fromNodeId)?.add(edge.toNodeId);
+      neighbourIds.get(edge.toNodeId)?.add(edge.fromNodeId);
+    }
+
     const files: Record<string, string> = {};
-    for (const row of result.rows) {
-      const projected = await this.project({ nodeId: row.id, format: "markdown", depth: 1 }, context);
-      if (projected?.format === "markdown") {
-        files[`${row.slug}.md`] = projected.content;
-      }
+    for (const node of snapshot.nodes) {
+      const evidence = evidenceByNode.get(node.id) ?? [];
+      // Mirrors neighborhood({depth: 1}): the root sits at level 0 and
+      // everything one live edge away at level 1, ordered by (level, id) and
+      // capped by the same maxNodes -- which counts the root, so the slice
+      // stays on the combined list rather than on the neighbours alone.
+      const related = [...(neighbourIds.get(node.id) ?? [])]
+        .filter((id) => id !== node.id)
+        .map((id) => nodesById.get(id))
+        .filter((neighbour): neighbour is GraphNode => neighbour !== undefined)
+        .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+      const neighbourhood = {
+        nodes: [node, ...related].slice(0, NEIGHBORHOOD_DEFAULT_MAX_NODES),
+        edges: [] as GraphEdge[],
+      };
+      // project() counts a markdown render as a serve; preserve that here.
+      this.servedUnits.mark(evidence.map((unit) => unit.id), context);
+      files[`${node.slug}.md`] = renderMarkdownProjection(node, evidence, neighbourhood);
     }
     return files;
   }
@@ -1994,6 +2030,24 @@ export class PgGraphStore implements GraphStore {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      // Retire lease-expired rows that have spent their attempts. Without this
+      // the lease below leaves a hole exactly the shape of the bug it fixes: a
+      // job that hangs often enough to exhaust `attempts` stops matching
+      // `attempts < JOB_MAX_ATTEMPTS`, so it sits 'running' forever and
+      // graph_job_open_dedupe_idx keeps blocking every new job of its kind.
+      // Retiring it to 'failed' frees the dedupe key (the index only covers
+      // pending/running) while still refusing to run it again.
+      await client.query(
+        `update graph_job
+            set status = 'failed',
+                finished_at = now(),
+                updated_at = now(),
+                error = coalesce(nullif(error, ''), 'Lease expired with attempts exhausted; retired so its dedupe key stops blocking new jobs of this kind.')
+          where status = 'running'
+            and attempts >= $1
+            and updated_at < now() - make_interval(secs => $2::numeric)`,
+        [JOB_MAX_ATTEMPTS, jobLeaseSeconds()],
+      );
       const result = await client.query(
         `select id
          from graph_job
@@ -2002,7 +2056,7 @@ export class PgGraphStore implements GraphStore {
              or (
                -- Retry with quadratic backoff: attempts^2 x 10s since last update.
                status = 'failed'
-               and attempts < 5
+               and attempts < $3
                and updated_at < now() - make_interval(secs => power(attempts, 2) * 10)
              )
              or (
@@ -2016,7 +2070,7 @@ export class PgGraphStore implements GraphStore {
                -- conflict-idempotent, so re-running one is safe; a frozen queue
                -- is not.
                status = 'running'
-               and attempts < 5
+               and attempts < $3
                and updated_at < now() - make_interval(secs => $2::numeric)
              )
            )
@@ -2024,7 +2078,7 @@ export class PgGraphStore implements GraphStore {
          order by priority desc, created_at
          for update skip locked
          limit 1`,
-        [jobId ?? null, jobLeaseSeconds()],
+        [jobId ?? null, jobLeaseSeconds(), JOB_MAX_ATTEMPTS],
       );
 
       if (result.rowCount === 0) {
