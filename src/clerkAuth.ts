@@ -5,6 +5,33 @@ import type { UserStore } from "./users.js";
 const ADMIN_SCOPES: TroveScope[] = ["graph:admin"];
 const MEMBER_SCOPES: TroveScope[] = ["graph:read", "graph:write", "graph:export"];
 
+/**
+ * Both identity caches below are keyed by Clerk subject and were write-only:
+ * entries were checked for expiry on read but never removed, so a subject that
+ * authenticated once and never returned kept its identity resident for the life
+ * of the process. Storing through here drops what has already expired and caps
+ * what survives, so the cache tracks *recent* callers rather than every caller.
+ */
+function cacheIdentity(
+  cache: Map<string, { identity: AuthIdentity; expires: number }>,
+  sub: string,
+  identity: AuthIdentity,
+  ttlMs: number,
+  cap = 1000,
+): void {
+  const now = Date.now();
+  for (const [key, entry] of cache) {
+    if (entry.expires <= now) cache.delete(key);
+  }
+  cache.delete(sub);
+  cache.set(sub, { identity, expires: now + ttlMs });
+  while (cache.size > cap) {
+    const oldest = cache.keys().next();
+    if (oldest.done) break;
+    cache.delete(oldest.value);
+  }
+}
+
 function scopesFor(identity: AuthIdentity): TroveScope[] {
   if (identity.status !== "active") return [];
   return identity.role === "admin" ? ADMIN_SCOPES : MEMBER_SCOPES;
@@ -57,7 +84,7 @@ export function createClerkResolver(users: UserStore): NonNullable<AuthResolvers
       role: user.role,
       status: user.status,
     };
-    cache.set(sub, { identity, expires: Date.now() + CACHE_TTL_MS });
+    cacheIdentity(cache, sub, identity, CACHE_TTL_MS);
     return { actorId: sub, scopes: scopesFor(identity), identity };
   };
 }
@@ -147,7 +174,7 @@ export function createOAuthResolver(users: UserStore): NonNullable<AuthResolvers
       role: user.role,
       status: user.status,
     };
-    cache.set(sub, { identity, expires: Date.now() + CACHE_TTL_MS });
+    cacheIdentity(cache, sub, identity, CACHE_TTL_MS);
     return { actorId: sub, scopes: scopesFor(identity), identity };
   };
 }

@@ -29,4 +29,10 @@ COPY --from=web /app/web/dist ./web/dist
 COPY package.json ./
 COPY db ./db
 EXPOSE 8787
-CMD ["npm", "run", "start:container"]
+# Run node directly rather than via `npm run start:container`. Going through npm
+# put four processes between the container and the server
+# (npm -> sh -> npm -> sh -> node, ~88 MB of wrappers) and, worse, left npm as
+# PID 1: SIGTERM stopped at the wrapper, so the server's own handler never ran
+# and the job worker never shut down cleanly. `exec` hands node PID 1 once
+# migrations succeed.
+CMD ["sh", "-c", "node dist/scripts/applyMigrations.js && exec node dist/src/server.js"]

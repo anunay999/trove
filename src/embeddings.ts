@@ -25,6 +25,12 @@ export function createEmbeddingProviderFromEnv(): EmbeddingProvider | null {
   });
 }
 
+/** Per-request ceiling for an embeddings call. See the fetch in OpenAiEmbeddingProvider. */
+function embeddingTimeoutMs(): number {
+  const parsed = Number(process.env.TROVE_EMBEDDING_TIMEOUT_MS);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 60_000;
+}
+
 export function vectorLiteral(values: number[]): string {
   return `[${values.map((value) => {
     if (!Number.isFinite(value)) throw new Error("Embedding contained a non-finite value.");
@@ -129,6 +135,12 @@ class OpenAiEmbeddingProvider implements EmbeddingProvider {
       throw new Error("Embedding input cannot be empty.");
     }
 
+    // A bare fetch() has no timeout: if the connection stalls, the promise
+    // never settles. Inside a job that means runJob() never reaches finishJob(),
+    // so the row stays 'running' forever and its dedupe key blocks every later
+    // job of that kind. That is exactly how embedding refresh froze in
+    // production for six days. Failing is recoverable (the job retries with
+    // backoff); hanging is not.
     const response = await fetch(`${this.baseUrl}/embeddings`, {
       method: "POST",
       headers: {
@@ -140,6 +152,7 @@ class OpenAiEmbeddingProvider implements EmbeddingProvider {
         model: this.model,
         dimensions: this.dimensions,
       }),
+      signal: AbortSignal.timeout(embeddingTimeoutMs()),
     });
 
     if (!response.ok) {

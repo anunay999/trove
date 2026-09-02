@@ -159,6 +159,16 @@ function consumeJudgeBudget(ownerKey: string): boolean {
   if (limit === 0) return true; // 0 disables the budget entirely
   const now = Date.now();
   const calls = (judgeCallLog.get(ownerKey) ?? []).filter((at) => now - at < JUDGE_BUDGET_WINDOW_MS);
+  // Every owner that ever wrote used to keep an entry here for the life of the
+  // process, even once its window emptied. The array is windowed; the map was
+  // not. Sweeping owners whose windows have gone quiet keeps it proportional to
+  // *active* writers instead of to every writer ever seen.
+  if (calls.length === 0) judgeCallLog.delete(ownerKey);
+  for (const [key, at] of judgeCallLog) {
+    if (key !== ownerKey && at[at.length - 1] !== undefined && now - at[at.length - 1]! >= JUDGE_BUDGET_WINDOW_MS) {
+      judgeCallLog.delete(key);
+    }
+  }
   if (calls.length >= limit) {
     judgeCallLog.set(ownerKey, calls);
     return false;

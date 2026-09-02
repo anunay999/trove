@@ -79,6 +79,16 @@ import { slugify } from "./slug.js";
 
 const { Pool } = pg;
 
+/**
+ * How long a claimed job may stay 'running' before another worker may reclaim
+ * it. Generous by default: a full refresh_embeddings drain is many OpenAI round
+ * trips, and reclaiming a job that is merely slow throws away real work.
+ */
+function jobLeaseSeconds(): number {
+  const parsed = Number(process.env.TROVE_JOB_LEASE_SECONDS);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 900;
+}
+
 // Junk text units (short fragments, horizontal rules, markdown table
 // separators) are not worth an embedding. The missing-count and the select in
 // the refresh job must agree on this filter or the drain loop never finishes.
@@ -1995,12 +2005,26 @@ export class PgGraphStore implements GraphStore {
                and attempts < 5
                and updated_at < now() - make_interval(secs => power(attempts, 2) * 10)
              )
+             or (
+               -- Lease expiry. A worker that dies mid-job -- or hangs on a call
+               -- with no timeout -- leaves the row 'running' forever, and since
+               -- graph_job_open_dedupe_idx covers 'running', nothing of that kind
+               -- can ever be enqueued again: one wedged row silently freezes a
+               -- whole maintenance stream. (A refresh_embeddings job did exactly
+               -- that in production, and embeddings stopped refreshing for days
+               -- with no failure surfaced anywhere.) Job bodies are
+               -- conflict-idempotent, so re-running one is safe; a frozen queue
+               -- is not.
+               status = 'running'
+               and attempts < 5
+               and updated_at < now() - make_interval(secs => $2::numeric)
+             )
            )
            and ($1::uuid is null or id = $1)
          order by priority desc, created_at
          for update skip locked
          limit 1`,
-        [jobId ?? null],
+        [jobId ?? null, jobLeaseSeconds()],
       );
 
       if (result.rowCount === 0) {
