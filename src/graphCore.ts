@@ -812,6 +812,14 @@ export type GraphStore = {
   eventStats(context?: GraphOperationContext): MaybePromise<GraphEventStats>;
   lint(context?: GraphOperationContext): MaybePromise<GraphLintReport>;
   /**
+   * Settle any buffered activation bumps. Reads strengthen a node's activation
+   * through a timed buffer (src/activation.ts), so a count read straight off
+   * the row can trail by a window. Production tolerates that -- activation is a
+   * weak tie-breaker -- but a caller that must observe a settled count (a
+   * ranking assertion, a shutdown) calls this first.
+   */
+  flushActivation(): MaybePromise<void>;
+  /**
    * REPLACE one node's durable reconcile flags with the set a reconcile pass
    * just produced (an empty list clears them). Internal plumbing —
    * performReconcileNode is the only caller, and `lint` is the only reader.
