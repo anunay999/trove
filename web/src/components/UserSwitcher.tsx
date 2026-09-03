@@ -47,11 +47,14 @@ export function UserSwitcher({ self, impersonating }: { self: Identity; imperson
       value={impersonating?.clerkUserId ?? SELF}
       onValueChange={(value) => switchToUser(value === SELF ? null : value)}
     >
-      <SelectTrigger size="sm" className="w-[190px] text-[12px]" aria-label="View Trove as">
+      {/* A narrow header cannot spare 190px for a name. Below lg the trigger
+          shrinks to its dot — amber still means "someone else", and the banner
+          under the header spells out who — and the names return in the menu. */}
+      <SelectTrigger size="sm" className="w-auto text-[12px] lg:w-[190px]" aria-label="View Trove as">
         <SelectValue>
           <span className="flex items-center gap-2 truncate">
             <span className={`size-1.5 shrink-0 rounded-full ${impersonating ? "bg-amber-500" : "bg-emerald-500"}`} />
-            <span className="truncate">{current ? userLabel(current) : "Your account"}</span>
+            <span className="hidden truncate lg:inline">{current ? userLabel(current) : "Your account"}</span>
           </span>
         </SelectValue>
       </SelectTrigger>

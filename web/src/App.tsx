@@ -142,16 +142,21 @@ export default function App() {
       }`}
     >
       <header className="sticky top-0 z-20 shrink-0 border-b bg-background/90 backdrop-blur">
-        <div className="mx-auto flex h-14 w-full max-w-7xl items-center gap-6 px-6 2xl:max-w-[88rem]">
-          <span className="font-serif text-xl tracking-tight">Trove</span>
+        {/* Five tabs and the account controls do not fit one 375px line. Below
+            sm the tab row wraps to a line of its own (order-last, full width,
+            bled to the edges so it scrolls past the padding); from sm it sits
+            back inline and absorbs any remaining squeeze by scrolling, so the
+            document itself never gets a horizontal scrollbar. */}
+        <div className="mx-auto flex min-h-14 w-full max-w-7xl flex-wrap items-center gap-x-6 gap-y-2 px-6 py-2 sm:flex-nowrap sm:py-0 2xl:max-w-[88rem]">
+          <span className="shrink-0 font-serif text-xl tracking-tight">Trove</span>
           {dashboardReady && (
-            <nav className="flex items-center gap-1">
+            <nav className="order-last -mx-6 flex w-[calc(100%+3rem)] items-center gap-1 overflow-x-auto px-6 py-1 [scrollbar-width:none] sm:order-none sm:mx-0 sm:w-auto sm:min-w-0 sm:flex-1 sm:px-0 [&::-webkit-scrollbar]:hidden">
               {tabs.map((candidate) => (
                 <button
                   key={candidate}
                   type="button"
                   onClick={() => setTab(candidate)}
-                  className={`rounded-md px-3 py-1.5 text-sm capitalize transition-colors ${
+                  className={`shrink-0 rounded-md px-3 py-1.5 text-sm capitalize transition-colors ${
                     activeTab === candidate
                       ? "bg-secondary text-foreground"
                       : "text-muted-foreground hover:text-foreground"
@@ -162,7 +167,7 @@ export default function App() {
               ))}
             </nav>
           )}
-          <div className="ml-auto flex items-center gap-3">
+          <div className="ml-auto flex shrink-0 items-center gap-2 sm:gap-3">
             {dashboardReady && (
               <button
                 type="button"
