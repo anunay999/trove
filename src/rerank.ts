@@ -228,9 +228,12 @@ export async function rerankCandidates(
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<null>((resolve) => {
     timer = setTimeout(() => resolve(null), timeoutMs);
-    // A pending timer must not hold the process open — a recall that already
-    // answered should not keep a server (or a test run) alive.
-    timer.unref?.();
+    // Deliberately NOT unref'd. The timer is the only thing holding the event
+    // loop open while a provider hangs, and an unref'd one let the loop drain
+    // out from under the race: CI failed the whole reranker and MMR suites with
+    // "Promise resolution is still pending but the event loop has already
+    // resolved", cancelling every sibling test. It cannot leak — the finally
+    // below clears it on every path, and it lives at most timeoutMs anyway.
   });
 
   let scores: number[] | null;
