@@ -2,6 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { recallInputSchema } from "./contracts.js";
 import { contentTerms } from "./queryNormalize.js";
 import { parseTemporalScope, temporalAffinity, type TemporalScope } from "./temporalScope.js";
+import {
+  createRecallRerankerFromEnv,
+  rerankCandidates,
+  toRerankCandidate,
+  RERANK_MAX_CANDIDATES,
+  type Reranker,
+} from "./rerank.js";
 import type {
   AnnotateInput,
   CaptureInput,
@@ -923,6 +930,21 @@ function isPlaceholderContent(content: string | null | undefined): boolean {
 
 /** Catalog/log-style pages are useful as pointers but starve the pack if dumped whole. */
 const GIANT_CONTENT_CHARS = 12_000;
+/**
+ * Soft rank penalty for those pages, applied by BOTH ranking paths — the hand
+ * blend and the reranked one. See the note at its second use for why a
+ * relevance reranker cannot subsume it.
+ */
+const GIANT_RANK_PENALTY = 0.12;
+function giantContentPenalty(node: GraphNode): number {
+  return (node.content?.length ?? 0) > GIANT_CONTENT_CHARS ? GIANT_RANK_PENALTY : 0;
+}
+/**
+ * Weights of the reranked score. Relevance dominates because that is the whole
+ * point of paying for a second pass; activation is a prior, not a competitor.
+ */
+const RERANK_RELEVANCE_WEIGHT = 0.85;
+const RERANK_ACTIVATION_WEIGHT = 0.15;
 /** Hard cap for giant pages in a pack (summary + opening). */
 const GIANT_PACK_CHARS = 2_500;
 /** Soft cap for a single non-giant hop-0 page so one match doesn't exhaust the budget. */
@@ -1000,7 +1022,12 @@ function renderRecallEvidence(unit: TextUnit, maxChars = 1200): string {
   return `> ${text} [source:${unit.sourceId}]\n`;
 }
 
-export async function performRecall(store: GraphStore, rawInput: RecallInput, context?: GraphOperationContext): Promise<RecallResult> {
+export async function performRecall(
+  store: GraphStore,
+  rawInput: RecallInput,
+  context?: GraphOperationContext,
+  options: { reranker?: Reranker | null } = {},
+): Promise<RecallResult> {
   const input = recallInputSchema.parse(rawInput);
   // Temporal intent belongs in the question, not in a parameter: recall lost
   // asOf because it reached only the expansion, but "what did we deploy in
@@ -1082,10 +1109,15 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     : 0.5;
   // Prefer hop-0 (direct matches) over linked neighbors so budget goes to full pages.
   // Soft-penalize giant catalog/log pages so they don't outrank a specific runbook.
-  let scored = [...candidates.values()]
+  const byScore = (left: Scored, right: Scored): number =>
+    right.score - left.score ||
+    left.hops - right.hops ||
+    // Prefer more specific (shorter) pages when scores tie.
+    (left.node.content?.length ?? 0) - (right.node.content?.length ?? 0) ||
+    left.node.slug.localeCompare(right.node.slug);
+  type Scored = Candidate & { score: number };
+  const blended = [...candidates.values()]
     .map((candidate) => {
-      const contentLen = candidate.node.content?.length ?? 0;
-      const giantPenalty = contentLen > GIANT_CONTENT_CHARS ? 0.12 : 0;
       const align = candidate.distance !== undefined
         ? semanticAlignment(candidate.distance)
         : neutralAlignment;
@@ -1097,16 +1129,58 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
           0.20 * activationScore(candidate.node, nowMs) +
           0.15 * (candidate.degree / maxDegree) +
           (candidate.hops === 0 ? 0.15 : 0) -
-          giantPenalty,
+          giantContentPenalty(candidate.node),
       };
     })
-    .sort((left, right) =>
-      right.score - left.score ||
-      left.hops - right.hops ||
-      // Prefer more specific (shorter) pages when scores tie.
-      (left.node.content?.length ?? 0) - (right.node.content?.length ?? 0) ||
-      left.node.slug.localeCompare(right.node.slug),
-    );
+    .sort(byScore);
+
+  // Reranking (finding 08 / R5). The blend above is seven hand-set constants
+  // nobody measured, and bench/FINDINGS.md prices them: Hit@K 100% against
+  // precision 23.3%. It stays exactly as it is as the CANDIDATE GENERATOR —
+  // RRF fusion plus expansion is cheap, recalls everything, and orders badly —
+  // and a reranker reorders its head when one is configured.
+  //
+  // Head only, and the tail keeps its place behind it. Scores either side of
+  // that boundary come from different scales and are deliberately not compared;
+  // what packing consumes is the order, not the number.
+  const reranker = options.reranker === undefined ? createRecallRerankerFromEnv() : options.reranker;
+  const rerankHead = blended.slice(0, RERANK_MAX_CANDIDATES);
+  const rerankScores = await rerankCandidates(reranker, {
+    query: input.query,
+    candidates: rerankHead.map((candidate) => toRerankCandidate(candidate.node)),
+  });
+  let scored: Scored[] = rerankScores
+    ? [
+      ...rerankHead
+        .map((candidate) => ({
+          ...candidate,
+          // Two terms, not seven. The reranker already weighs everything match
+          // rank, alignment, degree and the hop bonus were proxies for — it
+          // reads the candidate against the query instead of guessing from its
+          // position in a fused list — so those four go. Two survive:
+          //
+          // - activation, because it is the one thing a cross-encoder cannot
+          //   know: which atoms THIS owner actually works from. Small on
+          //   purpose. It breaks ties; it does not overturn relevance.
+          // - the giant penalty, because it is not a relevance signal at all.
+          //   It is a budget-shape signal: a 12k-char catalog page can be the
+          //   most relevant hit and still be the wrong thing to spend a pack
+          //   on, and renderRecallAtom truncates it to 2.5k anyway. The
+          //   reranker is asked about relevance and answers about relevance,
+          //   so it cannot subsume this.
+          score:
+            RERANK_RELEVANCE_WEIGHT * (rerankScores.get(candidate.node.id) ?? 0) +
+            RERANK_ACTIVATION_WEIGHT * activationScore(candidate.node, nowMs) -
+            giantContentPenalty(candidate.node),
+        }))
+        .sort(byScore),
+      ...blended.slice(RERANK_MAX_CANDIDATES),
+    ]
+    : blended;
+
+  // Temporal reweight last, so it applies to whichever ranking produced the
+  // order above: it is a preference about WHEN a fact was true, orthogonal to
+  // how relevant the ranker thinks it is.
   if (temporal.scope) scored = rescoreForTemporalScope(scored, temporal.scope, edgePool.values(), new Date(nowMs));
 
   // The header names the scope so the pack itself says which time it answers
