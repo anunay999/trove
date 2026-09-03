@@ -675,7 +675,7 @@ export class PgGraphStore implements GraphStore {
     // Evidence and annotations intentionally remain current for historical fact
     // reads; only title/summary/content are revision-scoped in backlog #18.
     // Fetch stays constant-query: annotations, batched text units, then sources.
-    const annotations = await this.annotationsForNode(node.id);
+    const annotations = await this.annotationsForNode(node.id, scope);
     const unitsById = new Map(
       (await this.getEvidenceForNodes([node.id], context)).get(node.id)?.map((unit) => [unit.id, unit] as const) ?? [],
     );
@@ -684,7 +684,7 @@ export class PgGraphStore implements GraphStore {
         .filter((annotation) => !annotation.textUnitId && annotation.sourceId)
         .map((annotation) => annotation.sourceId as string),
     )];
-    const sourcesById = await this.sourcesByIds(sourceOnlyIds);
+    const sourcesById = await this.sourcesByIds(sourceOnlyIds, scope);
 
     const evidence: Array<TextUnit | GraphSource> = [];
     for (const annotation of annotations) {
@@ -895,6 +895,7 @@ export class PgGraphStore implements GraphStore {
          from walk
          join edge e
            on e.deleted_at is null
+          and ($6 or e.owner_id = $7)
           and (e.from_node_id = walk.node_id or e.to_node_id = walk.node_id)
           and ($8::timestamptz is null
             or (e.valid_from <= $8::timestamptz
@@ -929,10 +930,14 @@ export class PgGraphStore implements GraphStore {
     const nodeIds = nodes.map((node) => node.id);
     if (nodeIds.length === 0) return { nodes: [], edges: [] };
 
+    // Edges are owner-filtered like the nodes: with both endpoints in scope a
+    // stray edge could still have been written by another tenant (or planted),
+    // and it must not surface here any more than in exportGraph.
     const edgeResult = await this.pool.query(
       `select id, from_node_id, to_node_id, predicate, weight, created_at, valid_from, valid_until, expired_at, invalidated_by
        from edge
        where deleted_at is null
+         and ($5 or owner_id = $6)
          and from_node_id = any($1::uuid[])
          and to_node_id = any($1::uuid[])
          and ($4::timestamptz is null
@@ -943,7 +948,7 @@ export class PgGraphStore implements GraphStore {
            or ($2::timestamptz is not null
              and created_at <= $2::timestamptz
              and (expired_at is null or expired_at > $2::timestamptz)))`,
-      [nodeIds, input.asOf ?? null, input.includeExpired ?? false, validAt],
+      [nodeIds, input.asOf ?? null, input.includeExpired ?? false, validAt, !scope.scoped, scope.ownerId],
     );
 
     return { nodes, edges: edgeResult.rows.map(mapEdge) };
@@ -957,7 +962,14 @@ export class PgGraphStore implements GraphStore {
       const scope = ownerScope(context);
       const fromNodeId = input.fromNodeId ?? await this.nodeIdForSlug(input.fromSlug, client, scope);
       const toNodeId = input.toNodeId ?? await this.nodeIdForSlug(input.toSlug, client, scope);
-      if (!fromNodeId || !toNodeId) {
+      // A node id arrives from the client as-is, where a slug was resolved
+      // inside the owner's namespace. Both must end the same way: a foreign or
+      // tombstoned endpoint is an unknown one, so the link returns null rather
+      // than confirming the row exists.
+      const endpoints = fromNodeId && toNodeId
+        ? await this.visibleIds(client, "node", [fromNodeId, toNodeId], scope)
+        : new Set<string>();
+      if (!fromNodeId || !toNodeId || !endpoints.has(fromNodeId) || !endpoints.has(toNodeId)) {
         await client.query("rollback");
         return null;
       }
@@ -968,7 +980,7 @@ export class PgGraphStore implements GraphStore {
          on conflict (from_node_id, to_node_id, predicate) where deleted_at is null and expired_at is null
          do update set weight = excluded.weight
          returning id, from_node_id, to_node_id, predicate, weight, created_at, valid_from, valid_until, expired_at, invalidated_by`,
-        [randomUUID(), fromNodeId, toNodeId, input.predicate, input.weight, input.validFrom ?? null, actorUuid, ownerScope(context).ownerId],
+        [randomUUID(), fromNodeId, toNodeId, input.predicate, input.weight, input.validFrom ?? null, actorUuid, scope.ownerId],
       );
       const edge = mapEdge(result.rows[0]);
       await this.recordEvent(
@@ -983,12 +995,14 @@ export class PgGraphStore implements GraphStore {
       );
 
       if (input.supersedesEdgeId && input.supersedesEdgeId !== edge.id) {
+        // Owner-scoped like invalidateEdge: another tenant's edge is simply
+        // not there to expire, exactly as an unknown id is.
         const expired = await client.query(
           `update edge
            set expired_at = now(), valid_until = $2::timestamptz, invalidated_by = $3
-           where id = $1 and deleted_at is null and expired_at is null
+           where id = $1 and deleted_at is null and expired_at is null and ($4 or owner_id = $5)
            returning id`,
-          [input.supersedesEdgeId, edge.validFrom, edge.id],
+          [input.supersedesEdgeId, edge.validFrom, edge.id, !scope.scoped, scope.ownerId],
         );
         if (expired.rowCount && expired.rowCount > 0) {
           await this.recordEvent(
@@ -1546,7 +1560,7 @@ export class PgGraphStore implements GraphStore {
       this.pool.query(
         `select n.id, n.title
          from node n
-         left join annotation a on a.node_id = n.id
+         left join annotation a on a.node_id = n.id and ($1 or a.owner_id = $2)
          where n.deleted_at is null and ($1 or n.owner_id = $2)
          group by n.id, n.title
          having count(a.id) = 0
@@ -1581,7 +1595,7 @@ export class PgGraphStore implements GraphStore {
         `select n.id, n.title, coalesce(n.summary, '') as summary, left(coalesce(nr.content, ''), 2000) as content,
                 tu.text as unit_text
          from node n
-         join annotation a on a.node_id = n.id and a.text_unit_id is not null
+         join annotation a on a.node_id = n.id and a.text_unit_id is not null and ($1 or a.owner_id = $2)
          join text_unit tu on tu.id = a.text_unit_id
          left join node_revision nr on nr.id = n.current_revision_id
          where n.deleted_at is null and ($1 or n.owner_id = $2)`,
@@ -2394,6 +2408,21 @@ export class PgGraphStore implements GraphStore {
     actorUuid?: string | null,
   ): Promise<GraphAnnotation> {
     const resolvedActorUuid = actorUuid === undefined ? await this.actorUuidForContext(client, context) : actorUuid;
+    const scope = ownerScope(context);
+    const unknownReference = () => new UnknownEvidenceReferenceError(
+      `annotation references an unknown source/text-unit/node: sourceId=${input.sourceId ?? "null"} textUnitId=${input.textUnitId ?? "null"} nodeId=${input.nodeId ?? "null"}`,
+    );
+    // The FK below only proves the rows exist. Each referenced row must also
+    // belong to the caller, and a foreign one raises the very same error as a
+    // missing one, so the failure never confirms another tenant's row.
+    const refs = [
+      ["node", input.nodeId],
+      ["source", input.sourceId],
+      ["text_unit", input.textUnitId],
+    ] as const;
+    for (const [table, id] of refs) {
+      if (id && !(await this.visibleIds(client, table, [id], scope)).has(id)) throw unknownReference();
+    }
     let result: pg.QueryResult;
     try {
       result = await client.query(
@@ -2411,18 +2440,14 @@ export class PgGraphStore implements GraphStore {
           JSON.stringify(input.body),
           JSON.stringify(input.selector),
           resolvedActorUuid,
-          ownerScope(context).ownerId,
+          scope.ownerId,
         ],
       );
     } catch (error) {
       // FK violation (23503): a source/text-unit/node ref does not resolve.
       // Surface it as the named error so callers can distinguish a bogus
       // citation from a real failure without parsing pg error codes.
-      if ((error as { code?: string }).code === "23503") {
-        throw new UnknownEvidenceReferenceError(
-          `annotation references an unknown source/text-unit/node: sourceId=${input.sourceId ?? "null"} textUnitId=${input.textUnitId ?? "null"} nodeId=${input.nodeId ?? "null"}`,
-        );
-      }
+      if ((error as { code?: string }).code === "23503") throw unknownReference();
       throw error;
     }
     const annotation = mapAnnotation(result.rows[0]);
@@ -2626,6 +2651,29 @@ export class PgGraphStore implements GraphStore {
     };
   }
 
+  /**
+   * Which of `ids` the caller may touch. Every id a client hands us by value
+   * (link endpoints, supersedesEdgeId, annotate's node/source/text-unit) goes
+   * through here before it is written, so a foreign row and a missing row look
+   * identical: neither is in the returned set, and the caller then does what
+   * the slug path already does for an unknown slug. Unscoped (superuser and
+   * internal) callers see every live row, so their semantics are unchanged.
+   */
+  private async visibleIds(
+    client: pg.PoolClient,
+    table: "node" | "edge" | "source" | "text_unit",
+    ids: string[],
+    scope: OwnerScope,
+  ): Promise<Set<string>> {
+    if (ids.length === 0) return new Set();
+    const live = table === "node" || table === "edge" ? " and deleted_at is null" : "";
+    const result = await client.query(
+      `select id from ${table} where id = any($1::uuid[]) and ($2 or owner_id = $3)${live}`,
+      [ids, !scope.scoped, scope.ownerId],
+    );
+    return new Set(result.rows.map((row) => String(row.id)));
+  }
+
   private async nodeIdForSlug(slug: string | undefined, client: pg.PoolClient | undefined, scope: OwnerScope): Promise<string | null> {
     if (!slug) return null;
     const queryable = client ?? this.pool;
@@ -2647,24 +2695,28 @@ export class PgGraphStore implements GraphStore {
     return result.rows.map(mapTextUnit);
   }
 
-  private async annotationsForNode(nodeId: string): Promise<GraphAnnotation[]> {
+  // Both read helpers carry the owner predicate even though read() already
+  // resolved the node inside the owner's scope: an annotation or source row
+  // reached by id is evidence the caller's agent will be shown verbatim, and a
+  // row another tenant attached (or planted) must never become that evidence.
+  private async annotationsForNode(nodeId: string, scope: OwnerScope): Promise<GraphAnnotation[]> {
     const result = await this.pool.query(
       `select id, motivation, source_id, text_unit_id, node_id, body, selector, created_at
        from annotation
-       where node_id = $1
+       where node_id = $1 and ($2 or owner_id = $3)
        order by created_at`,
-      [nodeId],
+      [nodeId, !scope.scoped, scope.ownerId],
     );
     return result.rows.map(mapAnnotation);
   }
 
-  private async sourcesByIds(ids: string[]): Promise<Map<string, GraphSource>> {
+  private async sourcesByIds(ids: string[], scope: OwnerScope): Promise<Map<string, GraphSource>> {
     if (ids.length === 0) return new Map();
     const result = await this.pool.query(
       `select id, kind, title, uri, content_sha256, created_at
        from source
-       where id = any($1::uuid[])`,
-      [ids],
+       where id = any($1::uuid[]) and ($2 or owner_id = $3)`,
+      [ids, !scope.scoped, scope.ownerId],
     );
     return new Map(result.rows.map((row) => [String(row.id), mapSource(row)]));
   }

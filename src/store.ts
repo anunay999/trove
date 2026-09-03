@@ -792,6 +792,18 @@ export class InMemoryGraphStore implements GraphStore {
     if (input.nodeId != null && (!this.nodes.has(input.nodeId) || this.deletedNodeIds.has(input.nodeId))) {
       throw new UnknownEvidenceReferenceError(`annotation references an unknown node: ${input.nodeId}`);
     }
+    // Owner parity with Postgres for what this driver tracks (sources, and so
+    // their units): a scoped caller citing another owner's row gets the same
+    // error as citing a nonexistent one, so existence never leaks.
+    const scope = ownerScope(context);
+    if (scope.scoped) {
+      const cited = [input.sourceId, input.textUnitId != null ? this.textUnits.get(input.textUnitId)?.sourceId : undefined];
+      if (cited.some((sourceId) => sourceId != null && this.sourceOwnerIds.get(sourceId) !== scope.ownerId)) {
+        throw new UnknownEvidenceReferenceError(
+          `annotation references an unknown source/text-unit: sourceId=${input.sourceId ?? "null"} textUnitId=${input.textUnitId ?? "null"}`,
+        );
+      }
+    }
     const now = new Date().toISOString();
     const annotation: GraphAnnotation = {
       id: randomUUID(),
