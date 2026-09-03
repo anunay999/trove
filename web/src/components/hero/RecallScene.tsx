@@ -260,7 +260,7 @@ export function RecallScene() {
         </span>
       </div>
 
-      <div className="h-[28rem] p-4 md:h-[27rem] md:p-6 2xl:h-[31rem]">
+      <div className="min-h-[28rem] p-4 md:h-[27rem] md:p-6 2xl:h-[31rem]">
         <AnimatePresence mode="wait" initial={false}>
           <motion.div
             key={storyIndex}
