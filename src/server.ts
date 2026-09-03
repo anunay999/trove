@@ -11,6 +11,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { Hono, type Context as HonoContext } from "hono";
 import { cors } from "hono/cors";
+import { getSkill, llmsTxt, skillsIndexMarkdown } from "./skills.js";
 import { z } from "zod";
 import {
   annotateInputSchema,
@@ -692,6 +693,30 @@ async function parseJsonOrThrow<T extends z.ZodType>(
   const json = await jsonPromise;
   return schema.parse(json);
 }
+
+// The companion skills, readable by URL so a user can hand an agent
+// "read https://mytrove.in/skills/trove-curate.md and follow it" instead of
+// pasting. Same files as the npx install and the MCP prompts (src/skills.ts).
+// Public on purpose: they contain procedure, never data.
+const MARKDOWN = "text/markdown; charset=utf-8";
+const SKILLS_CACHE = "public, max-age=300";
+function publicBaseUrl(context: { req: { url: string; header: (name: string) => string | undefined } }): string {
+  const url = new URL(context.req.url);
+  const proto = context.req.header("x-forwarded-proto") ?? url.protocol.replace(":", "");
+  const host = context.req.header("x-forwarded-host") ?? context.req.header("host") ?? url.host;
+  return `${proto}://${host}`;
+}
+app.get("/skills.md", (context) =>
+  context.body(skillsIndexMarkdown(publicBaseUrl(context)), 200, { "content-type": MARKDOWN, "cache-control": SKILLS_CACHE }),
+);
+app.get("/llms.txt", (context) =>
+  context.body(llmsTxt(publicBaseUrl(context)), 200, { "content-type": "text/plain; charset=utf-8", "cache-control": SKILLS_CACHE }),
+);
+app.get("/skills/:name", (context) => {
+  const skill = getSkill(context.req.param("name").replace(/\.md$/, ""));
+  if (!skill) return context.text("Unknown skill.", 404);
+  return context.body(skill.raw, 200, { "content-type": MARKDOWN, "cache-control": SKILLS_CACHE });
+});
 
 // Serve the built dashboard (web/dist) for any non-API path. Run `npm run build`
 // inside web/ first; without a build these routes simply 404.

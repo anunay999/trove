@@ -30,7 +30,7 @@ Trove (repo `~/dev/trove`, hosted at `https://mytrove.in`, MCP server `trove`) h
 
 **Session loop (not end-of-day only):** boot with load → work → `remember` mid-session when a decision/fact/gotcha crystallises → `connect` hubs → supersede corrections → close with 3–8 small linked atoms. Never one mega "session summary" node.
 
-**MCP-only clients:** the same doctrine ships as MCP server `instructions`, resource `trove://doctrine`, prompts `trove-recall` / `trove-remember` / `trove-session`, and tool descriptions — skills are optional sugar for Claude Code.
+**MCP-only clients:** the same doctrine ships as MCP server `instructions`, resource `trove://doctrine`, prompts `trove-recall` / `trove-remember` / `trove-session` / `trove-curate`, and tool descriptions — skills are optional sugar for Claude Code. Every skill is also served at `https://mytrove.in/skills/<name>.md` (index at `/skills.md`), so any agent can be told to read one and follow it.
 
 ## Routing
 
@@ -39,7 +39,8 @@ Trove (repo `~/dev/trove`, hosted at `https://mytrove.in`, MCP server `trove`) h
 | Question about prior work, systems, preferences, decisions | `trove-recall` |
 | Session produced decisions/facts worth keeping, or a known fact changed | `trove-remember` |
 | A specific source (URL, file, paste) should be indexed | `trove-ingest` |
-| Health check / housekeeping | `trove-lint` |
+| Health check (read-only report) | `trove-lint` |
+| Cleanup: merge duplicates, supersede, link orphans, retire stale beliefs | `trove-curate` |
 
 ## Invariants (all skills)
 

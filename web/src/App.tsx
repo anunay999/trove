@@ -7,6 +7,7 @@ import { Overview } from "@/pages/Overview";
 const GraphView = lazy(() => import("@/pages/GraphView").then((m) => ({ default: m.GraphView })));
 import { Landing } from "@/pages/Landing";
 import { ApiKeys } from "@/pages/ApiKeys";
+import { Agents } from "@/pages/Agents";
 import { Admin } from "@/pages/Admin";
 import { WaitlistGate } from "@/pages/WaitlistGate";
 import { AuthControls } from "@/components/AuthControls";
@@ -23,9 +24,13 @@ import {
   type Stats,
 } from "@/lib/api";
 
-type Tab = "overview" | "graph" | "keys" | "admin";
+type Tab = "overview" | "graph" | "agents" | "keys" | "admin";
 
 const clerkEnabled = !!import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
+// app.<domain> is the product; the bare domain is the front door. Same bundle,
+// same API (the server answers on both hosts), but the app host never shows
+// the landing: signed out, it goes straight to sign-in.
+const isAppHost = window.location.hostname.startsWith("app.");
 
 function initialDark(): boolean {
   const saved = window.localStorage.getItem("trove_theme");
@@ -42,7 +47,7 @@ export default function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [signedIn, setSignedIn] = useState(false);
   const [drawer, setDrawer] = useState<{ open: boolean; mode: "sign-in" | "sign-up"; email?: string }>({ open: false, mode: "sign-in" });
-  const [signedOutView, setSignedOutView] = useState<"landing" | "connect">("landing");
+  const [signedOutView, setSignedOutView] = useState<"landing" | "connect">(isAppHost ? "connect" : "landing");
   // OAuth providers bounce back to #/sso-callback after the drawer has
   // unmounted; a mounted Clerk callback component must finish the handshake.
   const [ssoCallback] = useState(() => window.location.hash.includes("sso-callback"));
@@ -104,7 +109,7 @@ export default function App() {
   const tokenMode = !signedIn && hasApiToken && (tokenDashboard || !clerkEnabled);
   const dashboardReady = !error && (signedIn ? !isWaitlisted : tokenMode);
   const clerkSettling = clerkEnabled && !clerkLoaded;
-  const showLanding = clerkEnabled && clerkLoaded && !signedIn && !tokenMode && signedOutView === "landing";
+  const showLanding = clerkEnabled && clerkLoaded && !signedIn && !tokenMode && signedOutView === "landing" && !isAppHost;
   const showConnect = !signedIn && !dashboardReady && signedOutView === "connect";
 
   const disconnectKey = useCallback(() => {
@@ -118,8 +123,8 @@ export default function App() {
   }, []);
 
   const allTabs: Tab[] = signedIn && identity?.status === "active"
-    ? (isAdmin ? ["overview", "graph", "keys", "admin"] : ["overview", "graph", "keys"])
-    : ["overview", "graph"];
+    ? (isAdmin ? ["overview", "graph", "agents", "keys", "admin"] : ["overview", "graph", "agents", "keys"])
+    : ["overview", "graph", "agents"];
   // "View as" is a lens on the graph; API keys always belong to your own
   // account. Hiding the tab keeps the page from contradicting the banner.
   const tabs: Tab[] = impersonating ? allTabs.filter((candidate) => candidate !== "keys") : allTabs;
@@ -307,6 +312,10 @@ export default function App() {
           <Suspense fallback={<div className="h-full w-full" />}>
             <GraphView snapshot={snapshot} dark={dark} />
           </Suspense>
+        </main>
+      ) : activeTab === "agents" ? (
+        <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">
+          <Agents stats={stats} />
         </main>
       ) : activeTab === "keys" ? (
         <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">
