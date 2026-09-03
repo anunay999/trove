@@ -790,7 +790,10 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     ...(input.types ? { types: input.types } : {}),
     includeTextUnits: input.includeEvidence,
     mode: "hybrid",
-    limit: 10,
+    // The seed pool, not the pack size: the budgeter below decides how many of
+    // these fit. At 10 the pack was silently narrower than search, and a
+    // generous budget could never reach the eleventh hit.
+    limit: 50,
     ...(input.maxSemanticDistance !== undefined ? { maxSemanticDistance: input.maxSemanticDistance } : {}),
   }, context);
 

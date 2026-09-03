@@ -92,6 +92,32 @@ describe("recall", () => {
     assert.ok(third.lastAccessedAt, "reads must stamp lastAccessedAt");
   });
 
+  it("draws its candidates from more than the first ten search hits", async () => {
+    // A query that fourteen short notes all match. With the seed search capped
+    // at ten, four of them could never enter the pack no matter how generous
+    // the budget — recall was silently narrower than search.
+    const token = `quorumpool${stamp}`;
+    const ids: string[] = [];
+    for (let index = 0; index < 14; index += 1) {
+      const node = await store.capture({
+        title: `${token} note ${index}`,
+        type: "claim",
+        summary: `${token} candidate ${index} for the recall pool.`,
+        content: `Short body ${index} mentioning ${token} once so the pack stays cheap.`,
+        evidence: [],
+        links: [],
+      }, context);
+      ids.push(node.id);
+    }
+
+    const result = await store.recall({ query: token, tokenBudget: 32000, includeEvidence: false }, context);
+    const packed = result.atoms.filter((atom) => atom.hops === 0 && ids.includes(atom.node.id));
+    assert.ok(
+      packed.length > 10,
+      `recall packed only ${packed.length} of 14 matching notes under a 32k budget — the seed search is capping candidates`,
+    );
+  });
+
   it("packs full primary-note content and only teasers giant catalog pages", async () => {
     const marker = `REFUND_POLICY_${stamp}`;
     const policyBody = [

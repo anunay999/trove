@@ -551,8 +551,8 @@ export class PgGraphStore implements GraphStore {
     } else {
       // The two arms are independent, and the semantic one blocks on an embedding
       // API round trip. Running them concurrently hides the lexical SQL entirely
-      // behind that call rather than adding to it — recall (the hot path) calls
-      // this with limit 50.
+      // behind that call rather than adding to it — recall (the hot path) and
+      // view creation both call this with limit 50.
       const [lexical, semantic] = await Promise.all([
         this.lexicalSearch(input, scope),
         this.semanticSearch(input, provider, scope),
