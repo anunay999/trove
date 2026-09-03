@@ -35,6 +35,8 @@ export type LintGraphJobResult = {
   lint: Omit<GraphLintReport["summary"], "findings"> & { findings: GraphLintFinding[] };
   /** Terminal job rows past TERMINAL_JOB_RETENTION_DAYS removed on this run. */
   prunedJobs: number;
+  /** Audit events past TROVE_EVENT_RETENTION_DAYS removed on this run, capped per run. */
+  prunedEvents: number;
 };
 
 export type RefreshObsidianProjectionJobResult = {

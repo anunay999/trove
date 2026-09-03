@@ -253,6 +253,9 @@ create index edge_predicate_idx on edge(predicate) where deleted_at is null;
 create index annotation_text_unit_idx on annotation(text_unit_id);
 create index annotation_node_idx on annotation(node_id);
 create index graph_event_entity_idx on graph_event(entity_table, entity_id, created_at desc);
+-- Migration 019: retention prunes oldest-first, and the feed's keyset order is
+-- (created_at, id); one index serves both.
+create index graph_event_created_at_idx on graph_event(created_at, id);
 create index graph_job_status_idx on graph_job(status, priority desc, created_at);
 create index graph_job_kind_idx on graph_job(kind, created_at desc);
 create index node_revision_as_of_idx

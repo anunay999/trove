@@ -38,6 +38,10 @@ import {
   JOB_MAX_ATTEMPTS,
   TERMINAL_JOB_RETENTION_DAYS,
   lintMinIntervalSeconds,
+  capEventPayload,
+  eventPruneMaxRows,
+  eventRetentionDays,
+  EVENT_PRUNE_BATCH_ROWS,
   decodeEventCursor,
   encodeEventCursor,
   evidenceSupportScore,
@@ -2298,6 +2302,47 @@ export class PgGraphStore implements GraphStore {
   }
 
   /**
+   * The same housekeeping for the audit log: drop events past
+   * TROVE_EVENT_RETENTION_DAYS. graph_event is append-only and nothing ever
+   * removed a row, so it grew on every single write forever.
+   *
+   * Deliberately batched rather than one predicate-wide delete. A log that has
+   * never been trimmed can hold years of rows, and this runs on a request
+   * thread inside the lint job: an unbounded delete would hold locks and write
+   * one enormous WAL record. Each statement takes the oldest EVENT_PRUNE_BATCH_ROWS
+   * past the horizon, the run stops at eventPruneMaxRows(), and the next lint
+   * picks up whatever is left. Ordering by created_at makes the batch an index
+   * scan on graph_event_created_at_idx (migration 019) rather than a seq scan.
+   *
+   * Global, not owner-scoped, exactly like the job prune: the horizon is a
+   * property of the table, and one tenant's lint has no business leaving
+   * another tenant's expired rows behind.
+   */
+  private async pruneEvents(): Promise<number> {
+    const days = eventRetentionDays();
+    if (days <= 0) return 0;
+    const maxRows = eventPruneMaxRows();
+    let pruned = 0;
+    while (pruned < maxRows) {
+      const batch = Math.min(EVENT_PRUNE_BATCH_ROWS, maxRows - pruned);
+      const deleted = await this.pool.query(
+        `delete from graph_event
+         where id in (
+           select id from graph_event
+           where created_at < now() - make_interval(days => $1::int)
+           order by created_at
+           limit $2
+         )`,
+        [days, batch],
+      );
+      const count = deleted.rowCount ?? 0;
+      pruned += count;
+      if (count < batch) break;
+    }
+    return pruned;
+  }
+
+  /**
    * Reconciliation runs per node, below the other maintenance jobs in priority
    * (it is the expensive, LLM-judged pass). Dedupe is per node: a burst of
    * revisions to the same node collapses into one run, which reads the current
@@ -2511,11 +2556,13 @@ export class PgGraphStore implements GraphStore {
       const ownerId = typeof payloadOwner === "string" ? payloadOwner : null;
       const report = await this.lint(ownerId ? { ownerId } : undefined);
       const prunedJobs = await this.pruneTerminalJobs();
+      const prunedEvents = await this.pruneEvents();
       // Carry the findings themselves (capped) — counts alone are not actionable.
       const result: GraphJobResultMap["lint_graph"] = {
         ownerId,
         lint: { ...report.summary, findings: report.findings.slice(0, 200) },
         prunedJobs,
+        prunedEvents,
       };
       return result;
     }
@@ -2968,8 +3015,11 @@ export class PgGraphStore implements GraphStore {
         action,
         entityTable,
         entityId,
-        before === null ? null : JSON.stringify(before),
-        after === null ? null : JSON.stringify(after),
+        // Both columns are write-only (GraphEvent exposes neither), and a
+        // couple of payloads quote unbounded input — cap them, keeping the
+        // top-level keys. See capEventPayload.
+        before === null ? null : JSON.stringify(capEventPayload(before)),
+        after === null ? null : JSON.stringify(capEventPayload(after)),
         context?.requestId ?? null,
         ownerScope(context).ownerId,
       ],

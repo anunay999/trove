@@ -96,6 +96,8 @@ import {
   JOB_MAX_ATTEMPTS,
   TERMINAL_JOB_RETENTION_DAYS,
   lintMinIntervalSeconds,
+  eventPruneMaxRows,
+  eventRetentionDays,
   ownerScope,
   UnknownEvidenceReferenceError,
 } from "./graphCore.js";
@@ -1337,11 +1339,13 @@ export class InMemoryGraphStore implements GraphStore {
       const ownerId = typeof payloadOwner === "string" ? payloadOwner : null;
       const report = this.lint();
       const prunedJobs = this.pruneTerminalJobs();
+      const prunedEvents = this.pruneEvents();
       // Carry the findings themselves (capped) — counts alone are not actionable.
       const result: GraphJobResultMap["lint_graph"] = {
         ownerId,
         lint: { ...report.summary, findings: report.findings.slice(0, 200) },
         prunedJobs,
+        prunedEvents,
       };
       return result;
     }
@@ -1424,6 +1428,31 @@ export class InMemoryGraphStore implements GraphStore {
       pruned += 1;
     }
     return pruned;
+  }
+
+  /**
+   * Drop audit events past the retention horizon, oldest first, at most
+   * eventPruneMaxRows() per run; see pgStore.pruneEvents for the rationale.
+   * The memory log dies with the process, but the driver has to agree with
+   * Postgres on which events a lint removes and what it reports.
+   */
+  private pruneEvents(): number {
+    const days = eventRetentionDays();
+    if (days <= 0) return 0;
+    const floor = Date.now() - days * 86_400_000;
+    const expired = this.eventLog
+      .filter((event) => Date.parse(event.createdAt) < floor)
+      .sort(compareEventsAsc)
+      .slice(0, eventPruneMaxRows());
+    if (expired.length === 0) return 0;
+    const doomed = new Set(expired.map((event) => event.id));
+    // Rewritten in place: the log is the array itself, never a reference the
+    // store swaps out, and a spread of the survivors would be argument-count
+    // bound on a long log.
+    const survivors = this.eventLog.filter((event) => !doomed.has(event.id));
+    this.eventLog.length = 0;
+    for (const event of survivors) this.eventLog.push(event);
+    return expired.length;
   }
 
   /** Per-node reconciliation enqueue; see pgStore for the rationale. */
