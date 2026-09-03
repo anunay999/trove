@@ -294,6 +294,78 @@ export const LEXICAL_UNIT_SEARCH_SQL = `with q as (select $5::tsquery as query)
        order by rank desc, created_at desc, ordinal
        limit $1`;
 
+/**
+ * The semantic node arm. Vectors occupy $1..$N; everything else is numbered
+ * after them: model, type filter, limit, unscoped, owner, max distance,
+ * %query%, query, candidate limit.
+ *
+ * Probe the HNSW index FIRST, then join and filter — never filter-then-sort.
+ * Each per-vector branch is `order by embedding <=> $n limit K`, the only shape
+ * pgvector can serve from embedding_hnsw_idx (migration 009); the union is
+ * deduped by min() rather than `distinct on`, since a revision can hold
+ * several embedding rows (the unique key includes content_sha256).
+ *
+ * The owner filter lives INSIDE the limited branch, reached through the owning
+ * row (embedding carries no tenant; see migration 016 for why not). Ordered
+ * index scan → nested-loop pkey lookups → filter → limit keeps the distance
+ * order, and with hnsw.iterative_scan on (semanticSearch sets it) the scan
+ * keeps walking until K rows of THIS tenant pass. Filtering after the limit —
+ * the old shape — handed a small tenant whatever survived of a candidate
+ * window the large tenant had already filled, which was usually nothing.
+ */
+export function semanticNodeSearchSql(vectorCount: number): string {
+  const p = (offset: number): string => `$${vectorCount + offset}`;
+  const branches = Array.from({ length: vectorCount }, (_, index) => `(
+           select e.owner_id, e.embedding <=> $${index + 1}::vector as distance
+           from embedding e
+           join node_revision nr on nr.id = e.owner_id
+           join node n on n.id = nr.node_id
+           where e.owner_table = 'node_revision' and e.model = ${p(1)}
+             and (${p(4)} or n.owner_id = ${p(5)})
+           order by e.embedding <=> $${index + 1}::vector
+           limit ${p(9)}
+         )`).join(" union all ");
+  return `with candidates as (${branches}),
+            best as (select owner_id, min(distance) as distance from candidates group by owner_id)
+       select n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id,
+              n.updated_at, n.access_count, n.last_accessed_at, best.distance
+       from best
+       join node_revision nr on nr.id = best.owner_id
+       join node n on n.id = nr.node_id and n.deleted_at is null and nr.id = n.current_revision_id
+       where best.distance < ${p(6)}
+         and (${p(4)} or n.owner_id = ${p(5)})
+         and (${p(2)}::node_type[] is null or n.type = any(${p(2)}::node_type[]))
+         and (
+           coalesce(length(nr.content), 0) <= 12000
+           or n.title ilike ${p(7)}
+           or n.slug = lower(replace(${p(8)}, ' ', '-'))
+         )
+       order by best.distance
+       limit ${p(3)}`;
+}
+
+/**
+ * The semantic text-unit arm, one probe per query vector. $1 vector, $2 model,
+ * $3 unscoped, $4 owner, $5 limit, $6 max distance. The distance floor is
+ * applied OUTSIDE the probe: as a filter inside it, an unrelated query (every
+ * row over the floor) would make the iterative scan walk hnsw.max_scan_tuples
+ * looking for one that passes. Outside, the probe stops at $5 rows and the
+ * floor trims them — the same rows, since anything past the top $5 is farther.
+ */
+export const SEMANTIC_UNIT_SEARCH_SQL = `select tu.id, tu.source_id, tu.ordinal, tu.section_path, tu.char_start, tu.char_end, tu.text, tu.content_sha256, tu.distance
+       from (
+         select tu.id, tu.source_id, tu.ordinal, tu.section_path, tu.char_start, tu.char_end, tu.text, tu.content_sha256,
+                (e.embedding <=> $1::vector) as distance
+         from embedding e
+         join text_unit tu on tu.id = e.owner_id and e.owner_table = 'text_unit'
+         where e.model = $2
+           and ($3 or tu.owner_id = $4)
+         order by e.embedding <=> $1::vector
+         limit $5
+       ) tu
+       where tu.distance < $6
+       order by tu.distance`;
+
 type PgStoreOptions = {
   connectionString: string;
   /**
@@ -312,6 +384,8 @@ export class PgGraphStore implements GraphStore {
    * server is one process, and this backs a warning, not a security boundary.
    */
   private servedUnits = new ServedUnitLog();
+  /** Resolved once per store: whether pgvector is 0.8+ (hnsw.iterative_scan). */
+  private iterativeScanSupport: Promise<boolean> | null = null;
 
   constructor(options: PgStoreOptions) {
     this.pool = new Pool({ connectionString: options.connectionString, keepAlive: true });
@@ -321,6 +395,26 @@ export class PgGraphStore implements GraphStore {
     this.pool.on("error", (error) => {
       console.error("[pg-pool] idle client error:", error.message);
     });
+  }
+
+  /**
+   * hnsw.iterative_scan arrived in pgvector 0.8.0 (production runs 0.8.2). An
+   * older extension would reject the SET and abort the transaction, so the
+   * version is checked once and remembered; a failed check is not remembered,
+   * so a transient error does not pin the store to the pre-0.8 behaviour.
+   */
+  private supportsIterativeScan(): Promise<boolean> {
+    this.iterativeScanSupport ??= this.pool
+      .query(`select extversion from pg_extension where extname = 'vector'`)
+      .then((result) => {
+        const [major = 0, minor = 0] = String(result.rows[0]?.extversion ?? "0.0").split(".").map(Number);
+        return major > 0 || minor >= 8;
+      })
+      .catch(() => {
+        this.iterativeScanSupport = null;
+        return false;
+      });
+    return this.iterativeScanSupport;
   }
 
   async ingest(input: IngestInput, context?: GraphOperationContext): Promise<{ source: GraphSource; textUnits: TextUnit[] }> {
@@ -634,74 +728,27 @@ export class PgGraphStore implements GraphStore {
       .filter((vector): vector is number[] => Array.isArray(vector))
       .map(vectorLiteral);
     if (vectors.length === 0) return { nodes: [], textUnits: [] };
-    // Vectors occupy $1..$N; everything else is numbered after them.
-    const p = (offset: number): string => `$${vectors.length + offset}`;
     const typeFilter = input.types && input.types.length > 0 ? input.types : null;
     const maxDistance = maxSemanticDistanceFor(input);
 
-    // Probe the HNSW index FIRST, then join and filter — never filter-then-sort.
-    //
-    // The previous shape selected from embedding JOIN node_revision JOIN node
-    // with `distinct on (n.id) ... order by n.id, <distance>`. Ordering by n.id
-    // is something the vector index cannot provide, so Postgres read and sorted
-    // EVERY embedding row on every semantic search: measured at 50k rows, three
-    // sequential scans and 60.8ms. Probing the index for a bounded candidate set
-    // and joining afterwards plans as index scans throughout: 0.99ms, ~61x.
-    //
-    // Each per-vector branch is `order by embedding <=> $n limit K`, the only
-    // shape pgvector can serve from embedding_hnsw_idx (migration 009). Their
-    // union is deduped by min() rather than `distinct on`, which also removes
-    // the need for the n.id ordering that caused the problem — a revision can
-    // hold several embedding rows (the unique key includes content_sha256), and
-    // min() collapses them correctly.
-    //
-    // OVERFETCH exists because the index probe happens BEFORE owner scoping,
-    // type filters and the giant-content rule, so a heavily filtered query can
-    // otherwise come back short. It trades a larger candidate set for recall;
-    // pgvector 0.8's hnsw.iterative_scan would remove the guess entirely.
-    const OVERFETCH = 10;
-    const candidateLimit = Math.max(200, input.limit * OVERFETCH);
-    const candidateBranches = vectors
-      .map((_, index) => `(
-           select e.owner_id, e.embedding <=> $${index + 1}::vector as distance
-           from embedding e
-           where e.owner_table = 'node_revision' and e.model = ${p(1)}
-           order by e.embedding <=> $${index + 1}::vector
-           limit ${p(9)}
-         )`)
-      .join(" union all ");
-
-    const nodeResult = await this.pool.query(
-      `with candidates as (${candidateBranches}),
-            best as (select owner_id, min(distance) as distance from candidates group by owner_id)
-       select n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id,
-              n.updated_at, n.access_count, n.last_accessed_at, best.distance
-       from best
-       join node_revision nr on nr.id = best.owner_id
-       join node n on n.id = nr.node_id and n.deleted_at is null and nr.id = n.current_revision_id
-       where best.distance < ${p(6)}
-         and (${p(4)} or n.owner_id = ${p(5)})
-         and (${p(2)}::node_type[] is null or n.type = any(${p(2)}::node_type[]))
-         and (
-           coalesce(length(nr.content), 0) <= 12000
-           or n.title ilike ${p(7)}
-           or n.slug = lower(replace(${p(8)}, ' ', '-'))
-         )
-       order by best.distance
-       limit ${p(3)}`,
-      [
-        ...vectors,
-        provider.model,
-        typeFilter,
-        input.limit,
-        !scope.scoped,
-        scope.ownerId,
-        maxDistance,
-        `%${input.query}%`,
-        input.query,
-        candidateLimit,
-      ],
-    );
+    // The probe (see semanticNodeSearchSql) fetches a few times the limit
+    // because the type filter and the giant-page rule still run after it.
+    // Owner scoping is no longer among them — it is inside the probe — so this
+    // is no longer a guess about how many foreign rows a tenant must wade
+    // through, only about how selective the type filter is.
+    const candidateLimit = Math.max(100, input.limit * 4);
+    const nodeParams = [
+      ...vectors,
+      provider.model,
+      typeFilter,
+      input.limit,
+      !scope.scoped,
+      scope.ownerId,
+      maxDistance,
+      `%${input.query}%`,
+      input.query,
+      candidateLimit,
+    ];
 
     // One indexable probe PER vector, merged in JS — never `least(...)` here.
     // `order by e.embedding <=> $1::vector limit N` is the only shape pgvector
@@ -714,22 +761,47 @@ export class PgGraphStore implements GraphStore {
     // are the ones where normalized !== raw and a second vector exists.
     // Two indexed probes beat one unindexed scan; the union is exact because
     // min-over-vectors of a per-row distance is the same set either way.
-    const unitSql = `select tu.id, tu.source_id, tu.ordinal, tu.section_path, tu.char_start, tu.char_end, tu.text, tu.content_sha256,
-              (e.embedding <=> $1::vector) as distance
-       from embedding e
-       join text_unit tu on tu.id = e.owner_id and e.owner_table = 'text_unit'
-       where e.model = $2
-         and (e.embedding <=> $1::vector) < $6
-         and ($3 or tu.owner_id = $4)
-       order by e.embedding <=> $1::vector
-       limit $5`;
-    const unitRowsByVector = input.includeTextUnits
-      ? await Promise.all(
-        vectors.map((vector) =>
-          this.pool.query(unitSql, [vector, provider.model, !scope.scoped, scope.ownerId, input.limit, maxDistance]),
-        ),
-      )
-      : [];
+    //
+    // Both arms run on one connection inside a transaction so that the
+    // `set local`s cover them and nothing else:
+    //
+    //  - hnsw.iterative_scan: without it an HNSW scan hands back at most
+    //    hnsw.ef_search (40) candidates and stops, and an owner filter that
+    //    rejects most of them leaves the query short. With it the scan keeps
+    //    walking (up to hnsw.max_scan_tuples) until the limit is met.
+    //  - enable_hashjoin / enable_mergejoin off: the owner filter is reached
+    //    through pkey joins inside the limited probe. Only a nested loop
+    //    streams, so only a nested loop lets the Limit stop the scan once K
+    //    rows have passed; a hash join was observed (small owner, seqscan
+    //    off) to drain the index scan into its probe side first, which either
+    //    starves the window or, iterating, walks max_scan_tuples every time.
+    //    Every join in these statements is a primary-key lookup, where nested
+    //    loop is the plan the planner picks anyway at production sizes.
+    const client = await this.pool.connect();
+    let nodeResult: pg.QueryResult;
+    const unitRowsByVector: pg.QueryResult[] = [];
+    try {
+      await client.query("begin");
+      await client.query("set local enable_hashjoin = off");
+      await client.query("set local enable_mergejoin = off");
+      if (await this.supportsIterativeScan()) {
+        await client.query("set local hnsw.iterative_scan = relaxed_order");
+      }
+      nodeResult = await client.query(semanticNodeSearchSql(vectors.length), nodeParams);
+      if (input.includeTextUnits) {
+        for (const vector of vectors) {
+          unitRowsByVector.push(
+            await client.query(SEMANTIC_UNIT_SEARCH_SQL, [vector, provider.model, !scope.scoped, scope.ownerId, input.limit, maxDistance]),
+          );
+        }
+      }
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
     // Keep each unit once at its best (smallest) distance across the probes.
     const bestUnits = new Map<string, Record<string, unknown>>();
     for (const result of unitRowsByVector) {

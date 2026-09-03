@@ -5,9 +5,11 @@ import pg from "pg";
 import {
   LEXICAL_NODE_SEARCH_SQL,
   LEXICAL_UNIT_SEARCH_SQL,
+  SEMANTIC_UNIT_SEARCH_SQL,
   grepIndexLiteral,
   grepNodeSql,
   grepUnitSql,
+  semanticNodeSearchSql,
 } from "../src/pgStore.js";
 
 /**
@@ -53,6 +55,11 @@ const shouldRun = Boolean(databaseUrl) && process.env.TROVE_STORE !== "memory";
 // index build when the rest of the suite was running in parallel.
 const ROWS = 2_000;
 const DIMS = 384;
+// Two owners: a large one holding 95% of the rows and a small one with the
+// rest, so a scoped probe has to look past the first hnsw.ef_search candidates.
+const LARGE_OWNER = "11111111-1111-1111-1111-111111111111";
+const SMALL_OWNER = "22222222-2222-2222-2222-222222222222";
+const SMALL_OWNER_ROWS = 100;
 
 describe("query plans", { skip: shouldRun ? false : "requires a Postgres DATABASE_URL" }, () => {
   const probeName = `trove_${process.env.TROVE_TEST_DB_PREFIX ?? ""}plans_${process.pid}`.replace(/[^a-z0-9_]+/gi, "_").toLowerCase();
@@ -98,21 +105,32 @@ describe("query plans", { skip: shouldRun ? false : "requires a Postgres DATABAS
     await probe.query(`
       insert into node_revision (node_id, content, projection_markdown)
         select g, 'revision body ' || g, null from generate_series(1, ${ROWS}) g;
-      insert into node (id, current_revision_id, deleted_at, title, summary, slug, type)
-        select g, g, null, 'node ' || g, 'summary ' || g, 'node-' || g, 'claim' from generate_series(1, ${ROWS}) g;
+      insert into node (id, current_revision_id, deleted_at, title, summary, slug, type, owner_id)
+        select g, g, null, 'node ' || g, 'summary ' || g, 'node-' || g, 'claim',
+               case when g > ${ROWS - SMALL_OWNER_ROWS} then '${SMALL_OWNER}'::uuid else '${LARGE_OWNER}'::uuid end
+        from generate_series(1, ${ROWS}) g;
       insert into source select g, 'source ' || g from generate_series(1, ${ROWS}) g;
-      insert into text_unit (id, source_id, ordinal, text, content_sha256)
-        select g, g, 0, 'unit ' || g, 'sha' || g from generate_series(1, ${ROWS}) g;
+      insert into text_unit (id, source_id, ordinal, text, content_sha256, owner_id)
+        select g, g, 0, 'unit ' || g, 'sha' || g,
+               case when g > ${ROWS - SMALL_OWNER_ROWS} then '${SMALL_OWNER}'::uuid else '${LARGE_OWNER}'::uuid end
+        from generate_series(1, ${ROWS}) g;
+      -- Two clusters, not random vectors: random 384-d vectors are all nearly
+      -- equidistant, and an HNSW walk over them says nothing reliable. The
+      -- large owner's rows point along dimension 1, the small owner's along
+      -- dimension 2, and the query points along dimension 1 — so the small
+      -- owner's rows are strictly farther from it than every large-owner row.
       insert into embedding (owner_id, owner_table, model, embedding)
         select g, 'node_revision', 'm1',
-               (select array_agg(random())::vector(${DIMS}) from generate_series(1, ${DIMS}))
+               (select array_agg(case when i = (case when g > ${ROWS - SMALL_OWNER_ROWS} then 2 else 1 end) then 10.0 else random() end)::vector(${DIMS})
+                from generate_series(1, ${DIMS}) i)
         from generate_series(1, ${ROWS}) g;
       -- Both owner types share one embedding table, as in the real schema. The
       -- HNSW index does NOT cover owner_table, so a probe restricted to one type
       -- is a genuine test of whether the planner can still use it.
       insert into embedding (owner_id, owner_table, model, embedding)
         select g, 'text_unit', 'm1',
-               (select array_agg(random())::vector(${DIMS}) from generate_series(1, ${DIMS}))
+               (select array_agg(case when i = (case when g > ${ROWS - SMALL_OWNER_ROWS} then 2 else 1 end) then 10.0 else random() end)::vector(${DIMS})
+                from generate_series(1, ${DIMS}) i)
         from generate_series(1, ${ROWS}) g;
     `);
     await probe.query(`create index embedding_hnsw_idx on embedding using hnsw (embedding vector_cosine_ops)`);
@@ -145,6 +163,9 @@ describe("query plans", { skip: shouldRun ? false : "requires a Postgres DATABAS
    */
   const planOf = async (sql: string, params: unknown[]): Promise<string> => {
     await probe.query(`set enable_seqscan = off`);
+    // What semanticSearch sets on its own connection; harmless for the rest.
+    await probe.query(`set enable_hashjoin = off`);
+    await probe.query(`set enable_mergejoin = off`);
     const explained = await probe.query(`explain (costs off) ${sql}`, params);
     return explained.rows
       .map((row) => String(row["QUERY PLAN"]))
@@ -154,8 +175,8 @@ describe("query plans", { skip: shouldRun ? false : "requires a Postgres DATABAS
       .join("\n");
   };
 
-  const sampleVector = async (): Promise<string> =>
-    String((await probe.query(`select embedding::text as v from embedding limit 1`)).rows[0].v);
+  /** A query along dimension 1: near the large owner's cluster, far from the small owner's. */
+  const sampleVector = async (): Promise<string> => `[${[10, ...Array.from({ length: DIMS - 1 }, () => 0.5)].join(",")}]`;
 
   after(async () => {
     await probe?.end();
@@ -165,30 +186,18 @@ describe("query plans", { skip: shouldRun ? false : "requires a Postgres DATABAS
     }
   });
 
+  // Parameters as semanticSearch binds them for one query vector: model, type
+  // filter, limit, unscoped, owner, max distance, %query%, query, candidates.
+  const nodeParams = (vector: string, owner: string | null): unknown[] =>
+    [vector, "m1", null, 10, owner === null, owner, 2.0, "%node%", "node", 100];
+  const unitParams = (vector: string, owner: string | null): unknown[] =>
+    [vector, "m1", owner === null, owner, 10, 2.0];
+
   it("semantic node search probes embedding_hnsw_idx instead of scanning", async () => {
     await setup();
     const vector = await sampleVector();
 
-    // The shape pgStore.semanticSearch builds: per-vector HNSW probe into a
-    // bounded candidate set, then join and filter.
-    const plan = await planOf(
-      `with candidates as (
-         select e.owner_id, e.embedding <=> $1::vector as distance
-         from embedding e
-         where e.owner_table = 'node_revision' and e.model = $2
-         order by e.embedding <=> $1::vector
-         limit 200
-       ),
-       best as (select owner_id, min(distance) as distance from candidates group by owner_id)
-       select n.id, best.distance
-       from best
-       join node_revision nr on nr.id = best.owner_id
-       join node n on n.id = nr.node_id and n.deleted_at is null and nr.id = n.current_revision_id
-       where best.distance < $3
-       order by best.distance
-       limit 10`,
-      [vector, "m1", 0.55],
-    );
+    const plan = await planOf(semanticNodeSearchSql(1), nodeParams(vector, null));
 
     assert.match(
       plan,
@@ -200,6 +209,25 @@ describe("query plans", { skip: shouldRun ? false : "requires a Postgres DATABAS
       /Seq Scan on embedding/,
       `semantic node search is scanning every embedding row. Plan:\n${plan}`,
     );
+  });
+
+  it("an owner-scoped semantic node search still probes the index, with the owner joined inside", async () => {
+    const vector = await sampleVector();
+
+    // The owner filter is reached through node_revision → node INSIDE the
+    // limited branch. That must not cost the ordered index path: the probe has
+    // to stay an HNSW scan with pkey lookups on top, not a join that is sorted
+    // afterwards — a Sort over the whole join is the filter-then-sort shape the
+    // candidate CTE exists to avoid.
+    const plan = await planOf(semanticNodeSearchSql(1), nodeParams(vector, SMALL_OWNER));
+
+    assert.match(
+      plan,
+      /Index Scan using embedding_hnsw_idx/,
+      `the owner-scoped probe lost the HNSW index. Plan:\n${plan}`,
+    );
+    assert.doesNotMatch(plan, /Seq Scan on embedding/, `owner-scoped probe scans every embedding row. Plan:\n${plan}`);
+    assert.doesNotMatch(plan, /Hash Join|Merge Join/, `a non-streaming join sits between the probe and its limit. Plan:\n${plan}`);
   });
 
   it("least() over two vectors cannot use the index — the regression this guards", async () => {
@@ -225,24 +253,43 @@ describe("query plans", { skip: shouldRun ? false : "requires a Postgres DATABAS
     );
   });
 
-  it("semantic text-unit search probes the index per vector", async () => {
+  it("semantic text-unit search probes the index per vector, scoped or not", async () => {
     const vector = await sampleVector();
 
-    const plan = await planOf(
-      `select tu.id, (e.embedding <=> $1::vector) as distance
-       from embedding e
-       join text_unit tu on tu.id = e.owner_id and e.owner_table = 'text_unit'
-       where e.model = $2 and (e.embedding <=> $1::vector) < $3
-       order by e.embedding <=> $1::vector
-       limit 10`,
-      [vector, "m1", 0.55],
-    );
+    for (const owner of [null, SMALL_OWNER]) {
+      const plan = await planOf(SEMANTIC_UNIT_SEARCH_SQL, unitParams(vector, owner));
+      assert.match(plan, /Index Scan using embedding_hnsw_idx/, `text-unit probe (owner ${owner}) lost the HNSW index. Plan:\n${plan}`);
+      assert.doesNotMatch(
+        plan,
+        /Seq Scan on embedding/,
+        `semantic text-unit search (owner ${owner}) is scanning every embedding row. Plan:\n${plan}`,
+      );
+    }
+  });
 
-    assert.doesNotMatch(
-      plan,
-      /Seq Scan on embedding/,
-      `semantic text-unit search is scanning every embedding row. Plan:\n${plan}`,
-    );
+  it("hnsw.iterative_scan is what lets a scoped probe fill its limit — the SET semanticSearch issues", async () => {
+    const vector = await sampleVector();
+
+    // Without iteration an HNSW scan yields at most hnsw.ef_search (40)
+    // candidates and stops; every one of them is the large owner's (its
+    // cluster is nearer the query), so the join filter starves the limit.
+    // With iteration the scan keeps walking until the limit is met. Both runs
+    // use the statements production runs, under the session settings
+    // semanticSearch applies, on a table where the planner really chooses the
+    // index (seqscan is off for this session).
+    await probe.query(`set hnsw.iterative_scan = off`);
+    const starved = await probe.query(semanticNodeSearchSql(1), nodeParams(vector, SMALL_OWNER));
+    const starvedUnits = await probe.query(SEMANTIC_UNIT_SEARCH_SQL, unitParams(vector, SMALL_OWNER));
+    await probe.query(`set hnsw.iterative_scan = relaxed_order`);
+    const filled = await probe.query(semanticNodeSearchSql(1), nodeParams(vector, SMALL_OWNER));
+    const filledUnits = await probe.query(SEMANTIC_UNIT_SEARCH_SQL, unitParams(vector, SMALL_OWNER));
+    await probe.query(`reset hnsw.iterative_scan`);
+
+    assert.ok(starved.rows.length < 10, `expected the un-iterated probe to starve, got ${starved.rows.length} rows`);
+    assert.ok(starvedUnits.rows.length < 10, `expected the un-iterated unit probe to starve, got ${starvedUnits.rows.length} rows`);
+    assert.equal(filled.rows.length, 10, "the iterated node probe did not fill its limit");
+    assert.equal(filledUnits.rows.length, 10, "the iterated unit probe did not fill its limit");
+    assert.ok(filled.rows.every((row) => Number(row.id) > ROWS - SMALL_OWNER_ROWS), "a large-owner row leaked into the scoped probe");
   });
 
   // The lexical arm. Each of these plans the statement pgStore actually runs,

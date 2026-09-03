@@ -229,10 +229,14 @@ create unique index graph_job_open_dedupe_idx
 
 create table embedding (
   id uuid primary key default gen_random_uuid(),
-  owner_table text not null check (owner_table in ('node', 'node_revision', 'source', 'text_unit', 'claim', 'annotation')),
+  -- owner_table / owner_id name the owning ROW (no FK: the table is
+  -- polymorphic); the triggers below delete a vector with its row.
+  owner_table text not null check (owner_table in ('node', 'node_revision', 'source', 'text_unit', 'annotation')),
   owner_id uuid not null,
   model text not null,
   dimensions integer not null,
+  -- vector(1536), not halfvec: converting is a ~413 MB column rewrite plus an
+  -- HNSW rebuild in production — a maintenance-window job, not a boot migration.
   embedding vector(1536) not null,
   content_sha256 text not null,
   created_at timestamptz not null default now(),
@@ -279,3 +283,19 @@ create index embedding_hnsw_idx on embedding using hnsw (embedding vector_cosine
 -- write; the default 20% dead-tuple trigger is far too lazy for them.
 alter table node set (autovacuum_vacuum_scale_factor = 0.02);
 alter table graph_event set (autovacuum_vacuum_scale_factor = 0.02);
+
+-- Migration 016: a vector leaves with the row that owns it.
+create or replace function embedding_forget_owner() returns trigger
+language plpgsql as $$
+begin
+  delete from embedding where owner_table = tg_table_name and owner_id = old.id;
+  return old;
+end $$;
+
+create trigger text_unit_forget_embedding
+  after delete on text_unit
+  for each row execute function embedding_forget_owner();
+
+create trigger node_revision_forget_embedding
+  after delete on node_revision
+  for each row execute function embedding_forget_owner();
