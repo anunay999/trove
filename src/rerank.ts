@@ -35,6 +35,7 @@
  */
 
 import type { GraphNode } from "./contracts.js";
+import { contentTerms } from "./queryNormalize.js";
 
 /** What the reranker is shown about one candidate. Bounded by construction. */
 export type RerankCandidate = {
@@ -250,4 +251,106 @@ export async function rerankCandidates(
     byId.set(candidate.id, Math.max(0, Math.min(1, score)));
   }
   return byId;
+}
+
+// ---------------------------------------------------------------------------
+// Diversity: maximal marginal relevance over the reranked list.
+// ---------------------------------------------------------------------------
+
+/**
+ * MMR's relevance/novelty trade-off (Carbonell & Goldstein 1998):
+ *
+ *   mmr(i) = λ · relevance(i) − (1 − λ) · max similarity(i, already selected)
+ *
+ * 0.7 leans on relevance. A reranker's top answer must stay the top answer —
+ * this pass exists to stop the SECOND, THIRD and FOURTH slots going to
+ * restatements of it, not to trade the best atom for a more interesting one.
+ * Recall's budget is the reason it matters at all: near-identical atoms cost
+ * full price each and buy the reader nothing, and a pack that spends 8k tokens
+ * saying one thing four ways is worse than one that says four things.
+ *
+ * Turned down toward 0 this becomes a novelty sort and the pack stops answering
+ * the question; turned up to 1 it is a no-op and the ordering is exactly the
+ * reranker's. Anything outside roughly 0.5–0.9 wants a measurement first.
+ */
+export const MMR_LAMBDA = 0.7;
+
+/**
+ * Redundancy between two atoms, as cosine over their content-term bags.
+ *
+ * Deliberately NOT the atoms' stored embeddings: those live in the `embedding`
+ * table (or the memory driver's private cache) and nothing on the GraphStore
+ * surface hands them to a caller, so using them here means a new store method
+ * and a new query on the recall path — a bigger change than the diversity pass
+ * is worth, and one that would fetch vectors recall does not otherwise need.
+ * Term overlap is a blunter instrument, but near-duplicate atoms are the case
+ * it is best at: two restatements of the same fact share their vocabulary
+ * almost exactly. Swap in a vector similarity through `similarity` the day the
+ * vectors are on hand.
+ */
+export function termOverlapSimilarity(left: Set<string>, right: Set<string>): number {
+  if (left.size === 0 || right.size === 0) return 0;
+  let shared = 0;
+  for (const term of left) if (right.has(term)) shared += 1;
+  return shared / Math.sqrt(left.size * right.size);
+}
+
+/**
+ * Reorder (never drop) `items` by maximal marginal relevance. Dropping is the
+ * budgeter's job: everything still comes back, and a demoted near-duplicate
+ * simply falls to where the token budget is likely to cut it.
+ *
+ * Relevance is the caller's score CLAMPED to [0,1], never min-max normalized
+ * across the batch. The reranked score is already an absolute relevance on
+ * that scale, which is what MMR assumes; rescaling it would stretch the 0.05
+ * that separates a good answer from its own restatement into the full range
+ * and put the diversity term permanently out of reach.
+ *
+ * Items are expected in descending score order (the caller has already sorted
+ * them), which is why two or fewer are returned untouched: the greedy pass
+ * cannot reorder a list whose second element is the only remaining choice.
+ */
+export function mmrOrder<T>(
+  items: T[],
+  accessors: { score: (item: T) => number; text: (item: T) => string },
+  opts: { lambda?: number; similarity?: (left: Set<string>, right: Set<string>) => number } = {},
+): T[] {
+  if (items.length <= 2) return [...items];
+  const lambda = opts.lambda ?? MMR_LAMBDA;
+  const similarity = opts.similarity ?? termOverlapSimilarity;
+
+  const terms = items.map((item) => new Set(contentTerms(accessors.text(item))));
+  const relevance = items.map((item) => Math.max(0, Math.min(1, accessors.score(item))));
+
+  const selected: number[] = [];
+  const remaining = new Set(items.map((_, index) => index));
+  const maxSimilarity = items.map(() => 0);
+
+  while (remaining.size > 0) {
+    let best = -1;
+    let bestValue = Number.NEGATIVE_INFINITY;
+    for (const index of remaining) {
+      const value = lambda * (relevance[index] ?? 0) - (1 - lambda) * (maxSimilarity[index] ?? 0);
+      // Strictly greater keeps the pass stable: a tie leaves the earlier
+      // (higher-ranked) candidate in front, so MMR never reshuffles a list it
+      // has nothing to say about.
+      if (value > bestValue) {
+        bestValue = value;
+        best = index;
+      }
+    }
+    if (best < 0) break;
+    remaining.delete(best);
+    selected.push(best);
+    const chosenTerms = terms[best];
+    if (chosenTerms) {
+      for (const index of remaining) {
+        const other = terms[index];
+        if (!other) continue;
+        maxSimilarity[index] = Math.max(maxSimilarity[index] ?? 0, similarity(chosenTerms, other));
+      }
+    }
+  }
+
+  return selected.map((index) => items[index] as T);
 }

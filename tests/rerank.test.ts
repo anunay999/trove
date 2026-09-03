@@ -5,6 +5,8 @@ import {
   parseRerankScores,
   rerankCandidates,
   rerankPrompt,
+  mmrOrder,
+  termOverlapSimilarity,
   toRerankCandidate,
   RERANK_CANDIDATE_CHARS,
   type RerankCandidate,
@@ -114,5 +116,55 @@ describe("recall reranker", () => {
       assert.equal(await rerankCandidates(async () => [0.5], batch), null);
       assert.equal(await rerankCandidates(async () => [0.5, Number.NaN], batch), null);
     });
+  });
+});
+
+describe("maximal marginal relevance", () => {
+  const item = (id: string, score: number, text: string) => ({ id, score, text });
+  const accessors = {
+    score: (entry: { score: number }) => entry.score,
+    text: (entry: { text: string }) => entry.text,
+  };
+  const order = (items: Array<{ id: string; score: number; text: string }>, lambda?: number) =>
+    mmrOrder(items, accessors, lambda === undefined ? {} : { lambda }).map((entry) => entry.id);
+
+  const ledger = "quarterly ledger reconciles orbital burn receipts";
+  const items = [
+    item("best", 1, ledger),
+    item("restatement", 0.95, `${ledger} each quarter`),
+    item("different", 0.9, "custody rotation hands the signing key to the finance group"),
+  ];
+
+  it("demotes a near-duplicate below a lower-scored atom that says something else", () => {
+    assert.deepEqual(order(items), ["best", "different", "restatement"]);
+  });
+
+  it("never demotes the top answer", () => {
+    assert.equal(order(items)[0], "best");
+  });
+
+  it("reorders nothing when no two atoms are alike", () => {
+    const distinct = [
+      item("a", 1, "orbital burn receipts reconciled quarterly"),
+      item("b", 0.9, "custody rotation signing key finance"),
+      item("c", 0.8, "retention archives closed quarters after seven years"),
+    ];
+    assert.deepEqual(order(distinct), ["a", "b", "c"]);
+  });
+
+  it("is the identity at lambda 1, and a novelty sort at lambda 0", () => {
+    assert.deepEqual(order(items, 1), ["best", "restatement", "different"]);
+    assert.deepEqual(order(items, 0), ["best", "different", "restatement"]);
+  });
+
+  it("keeps every item — dropping is the budgeter's job", () => {
+    assert.equal(mmrOrder(items, accessors).length, items.length);
+  });
+
+  it("scores overlap on the shared vocabulary, not on length", () => {
+    const left = new Set(["ledger", "orbital", "burn"]);
+    assert.equal(termOverlapSimilarity(left, left), 1);
+    assert.equal(termOverlapSimilarity(left, new Set(["custody", "rotation"])), 0);
+    assert.equal(termOverlapSimilarity(left, new Set()), 0);
   });
 });

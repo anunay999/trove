@@ -4,6 +4,7 @@ import { contentTerms } from "./queryNormalize.js";
 import { parseTemporalScope, temporalAffinity, type TemporalScope } from "./temporalScope.js";
 import {
   createRecallRerankerFromEnv,
+  mmrOrder,
   rerankCandidates,
   toRerankCandidate,
   RERANK_MAX_CANDIDATES,
@@ -945,6 +946,8 @@ function giantContentPenalty(node: GraphNode): number {
  */
 const RERANK_RELEVANCE_WEIGHT = 0.85;
 const RERANK_ACTIVATION_WEIGHT = 0.15;
+/** Body slice the diversity pass compares. See its use in performRecall. */
+const MMR_TEXT_CHARS = 2_000;
 /** Hard cap for giant pages in a pack (summary + opening). */
 const GIANT_PACK_CHARS = 2_500;
 /** Soft cap for a single non-giant hop-0 page so one match doesn't exhaust the budget. */
@@ -1177,6 +1180,26 @@ export async function performRecall(
       ...blended.slice(RERANK_MAX_CANDIDATES),
     ]
     : blended;
+  // Diversity, over the reranked head only. A reranker is a relevance function
+  // and nothing more: shown four restatements of the one fact that answers the
+  // query, it scores all four at the top and they take the whole pack, so the
+  // budget buys one fact instead of four. MMR spends the slots after the first
+  // on atoms that add something. Deliberately not applied to the hand blend —
+  // with the flag off, recall is what it was.
+  if (rerankScores) {
+    const head = mmrOrder(scored.slice(0, RERANK_MAX_CANDIDATES), {
+      score: (candidate) => candidate.score,
+      // Redundancy is judged on the same text the reader would see. The body
+      // slice is bounded for the same reason the reranker's is: term extraction
+      // should cost the same on a runbook and on an event log.
+      text: (candidate) => [
+        candidate.node.title,
+        candidate.node.summary ?? "",
+        (candidate.node.content ?? "").slice(0, MMR_TEXT_CHARS),
+      ].filter(Boolean).join("\n"),
+    });
+    scored.splice(0, head.length, ...head);
+  }
 
   // Temporal reweight last, so it applies to whichever ranking produced the
   // order above: it is a preference about WHEN a fact was true, orthogonal to
