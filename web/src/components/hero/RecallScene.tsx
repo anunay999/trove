@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 /*
@@ -143,6 +143,33 @@ function Rise({ show, children, className, delay = 0 }: { show: boolean; childre
 function StoryFrame({ story, beat, animate }: { story: Story; beat: number; animate: boolean }) {
   const at = (name: Beat) => beat >= BEATS.indexOf(name);
 
+  // The spine grows to each stop as the story reaches it: the memory's dot,
+  // the related fact's dot, then the checkmark. Stops are measured, not
+  // guessed, so wrapped text on a phone can't leave the line short or long.
+  const spineRef = useRef<HTMLDivElement>(null);
+  const memoryStop = useRef<HTMLSpanElement>(null);
+  const relatedStop = useRef<HTMLSpanElement>(null);
+  const actStop = useRef<HTMLSpanElement>(null);
+  const [spineHeight, setSpineHeight] = useState(0);
+
+  useLayoutEffect(() => {
+    const measure = () => {
+      const spine = spineRef.current;
+      if (!spine) return;
+      const stop = at("act") ? actStop.current : at("connect") ? relatedStop.current : at("remember") ? memoryStop.current : null;
+      if (!stop) {
+        setSpineHeight(0);
+        return;
+      }
+      const top = spine.getBoundingClientRect().top;
+      const rect = stop.getBoundingClientRect();
+      setSpineHeight(rect.top + rect.height / 2 - top);
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [beat, story]);
+
   return (
     <div className="flex h-full flex-col">
       {/* The ask. */}
@@ -154,20 +181,20 @@ function StoryFrame({ story, beat, animate }: { story: Story; beat: number; anim
         <Typed text={story.asked} active={animate} />
       </p>
 
-      {/* The thread from the question down to what came back. */}
-      <div className="relative ml-2 mt-3 flex-1 pl-5 md:ml-3 md:pl-6">
+      {/* The spine from the question down through everything that came back. */}
+      <div ref={spineRef} className="relative ml-2 mt-3 flex flex-1 flex-col pl-5 md:ml-3 md:pl-6">
         <motion.span
           initial={false}
-          animate={{ scaleY: at("remember") ? 1 : 0 }}
-          transition={{ duration: 0.5, ease: EASE }}
-          className="absolute left-0 top-0 h-full w-px origin-top bg-[var(--signal)]/50"
+          animate={{ height: spineHeight }}
+          transition={{ duration: 0.55, ease: EASE }}
+          className="absolute left-0 top-0 w-px bg-[var(--signal)]/50"
           aria-hidden="true"
         />
 
         {/* What Trove remembered, with its receipt. */}
         <Rise show={at("remember")} className="relative rounded-xl border bg-[var(--background)]/80 p-4 md:p-5">
           <span className="absolute -left-5 top-6 h-px w-5 bg-[var(--signal)]/50 md:-left-6 md:w-6" aria-hidden="true" />
-          <span className="absolute -left-[3px] top-[21px] size-1.5 rounded-full bg-[var(--signal)]" aria-hidden="true" />
+          <span ref={memoryStop} className="absolute -left-[22.5px] top-[21px] size-1.5 rounded-full bg-[var(--signal)] md:-left-[26.5px]" aria-hidden="true" />
           <Label>remembered</Label>
           <p className="mt-1.5 text-lg font-medium leading-tight tracking-tight md:text-xl">{story.remembered}</p>
 
@@ -188,19 +215,12 @@ function StoryFrame({ story, beat, animate }: { story: Story; beat: number; anim
           </Rise>
         </Rise>
 
-        {/* The related thing the agent didn't ask for. */}
-        <Rise show={at("connect")} className="relative ml-5 md:ml-6">
-          <div className="flex items-center gap-2 py-2">
-            <motion.span
-              initial={false}
-              animate={{ scaleY: at("connect") ? 1 : 0 }}
-              transition={{ duration: 0.4, ease: EASE }}
-              className="ml-3 h-4 w-px origin-top bg-[var(--signal)]/50"
-              aria-hidden="true"
-            />
-            <Label>also worth knowing</Label>
-          </div>
-          <div className="rounded-xl border bg-[var(--background)]/60 px-4 py-3">
+        {/* The related thing the agent didn't ask for, hung off the same spine. */}
+        <Rise show={at("connect")} className="relative mt-3">
+          <span className="absolute -left-5 top-[7px] h-px w-5 bg-[var(--signal)]/50 md:-left-6 md:w-6" aria-hidden="true" />
+          <span ref={relatedStop} className="absolute -left-[22.5px] top-[4px] size-1.5 rounded-full bg-[var(--signal)] md:-left-[26.5px]" aria-hidden="true" />
+          <Label>also worth knowing</Label>
+          <div className="mt-2 rounded-xl border bg-[var(--background)]/60 px-4 py-3">
             <p className="text-[13px] leading-snug text-foreground md:text-sm">{story.related}</p>
             <p className="mt-1.5 font-mono text-[10px] text-muted-foreground">
               <span className="uppercase tracking-[0.14em]">from</span>
@@ -208,13 +228,18 @@ function StoryFrame({ story, beat, animate }: { story: Story; beat: number; anim
             </p>
           </div>
         </Rise>
-      </div>
 
-      {/* The agent acts on it. */}
-      <Rise show={at("act")} className="mt-3 flex items-center gap-2.5 text-sm text-foreground">
-        <span className="flex size-4 items-center justify-center rounded-full bg-[var(--signal)] text-[10px] font-bold text-[var(--cta-fg)]">✓</span>
-        {story.outcome}
-      </Rise>
+        {/* The agent acts on it. The checkmark is the end of the spine. */}
+        <Rise show={at("act")} className="relative mt-4 flex items-center text-sm text-foreground">
+          <span
+            ref={actStop}
+            className="absolute -left-[27.5px] flex size-4 items-center justify-center rounded-full bg-[var(--signal)] text-[10px] font-bold text-[var(--cta-fg)] md:-left-[31.5px]"
+          >
+            ✓
+          </span>
+          {story.outcome}
+        </Rise>
+      </div>
     </div>
   );
 }
