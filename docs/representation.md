@@ -142,7 +142,7 @@ Use four retrieval modes together:
 
 1. Exact lookup: slug, id, source URL, project name, date.
 2. Full text search: precise matching over long text and node titles.
-3. Semantic search: embeddings over text units and graph atoms.
+3. Semantic search: embeddings over text chunks (contiguous runs of text units within a section, embedded with a title/section context prefix) and graph atoms. Hits resolve back to text units, which stay the citation grain.
 4. Graph expansion: neighbors, communities, timelines, contradictions, dependencies.
 
 Postgres full text search is the live lexical retrieval path for Trove nodes, revisions, and text units. `pgvector` handles semantic retrieval in the same database when embedding refresh is configured with a real provider; otherwise hybrid search falls back to lexical rather than storing fake vectors. If scale demands it later, Qdrant or another vector store can become a specialized index, but not the canonical memory.

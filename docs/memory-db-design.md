@@ -104,7 +104,7 @@ Ordered by leverage; the schema is already ~70% of the way there.
 2. **Reconciliation in the write path.** On `capture`/`ingest` extraction: candidate-match against existing node facts (slug, FTS, embedding), auto-link or flag, and generate contradiction candidates for temporally overlapping facts. Wire the invalidation primitive into `graph.lint`'s contradiction pass.
 3. **`graph.recall` with `token_budget`.** Compose the pieces that already exist (hybrid search, `neighborhood`, nodes, annotations) into one budgeted context-pack operator. This replaces "agent calls search then read then neighborhood" with one call — and it is the single biggest agent-UX win.
 4. **Activation columns.** `access_count`, `last_accessed_at` on `node`; bump on read (batched); fold into ranking. Add a nightly `graph_job` that computes decay and tags dormant atoms.
-5. **Embed facts, not just text units.** Shipped for the current `node_revision`: the searchable vector covers revision title, summary, and content. Superseded revision vectors are pruned so search cannot resurrect stale facts.
+5. **Embed facts, not just text units.** Shipped for the current `node_revision`: the searchable vector covers revision title, summary, and content. Superseded revision vectors are pruned so search cannot resurrect stale facts. The raw-text side moved off the line grain too: `text_chunk` gathers a section's contiguous units into one vector carrying a title/section context prefix, Anthropic's contextual-retrieval shape, and a hit resolves back to the text units it covers.
 6. **Keep deferring Kuzu** until multi-hop traversal is demonstrably the bottleneck — the step-back research strengthened, not weakened, that call. Same for a separate vector DB.
 
 ## What Stays True From v1

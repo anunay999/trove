@@ -219,7 +219,7 @@ Expected result:
 - Prompt list includes the `trove-*` workflows.
 - `grep` returns results from the configured store.
 - `events` returns a cursor-paginated feed with `nextCursor` and `hasMore`.
-- Lexical search uses Postgres full text ranking over nodes, revisions, and text units; semantic/hybrid search uses pgvector only when real embeddings exist.
+- Lexical search uses Postgres full text ranking over nodes, revisions, and text units; semantic/hybrid search uses pgvector over node revisions and text chunks, only when real embeddings exist. A chunk hit is returned as the text units it covers, so citations are unchanged.
 - `jobs` and `trove://jobs` expose queue state.
 - `views` and `trove://views` expose saved mind maps.
 - A read-only token sees only core tools and cannot remember or export.

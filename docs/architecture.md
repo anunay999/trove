@@ -25,7 +25,7 @@ flowchart LR
   DB --> Units["Text units + annotations"]
   DB --> Graph["Semantic atoms + edges"]
   DB --> Jobs["Durable maintenance jobs"]
-  Units --> Search["FTS + embeddings"]
+  Units --> Search["FTS over units + embeddings over chunks"]
   Graph --> Views["Materialized graph views"]
   Jobs --> Views
   Views --> Markdown["Obsidian markdown export"]
@@ -139,14 +139,15 @@ Official references:
 The substrate should separate durable primitives:
 
 - `source`: immutable raw input or imported long-form document
-- `text_unit`: addressable section, paragraph, chunk, quote, transcript segment, or OCR block
+- `text_unit`: addressable section, paragraph, chunk, quote, transcript segment, or OCR block. The CITATION grain: evidence quotes, annotations and the served-unit log all point here.
+- `text_chunk`: a contiguous run of text units inside one section, capped by `CHUNK_TARGET_CHARS` (1200) and carrying the context prefix it is embedded with. The EMBEDDING grain, and nothing else — a chunk is never cited.
 - `annotation`: meaning attached to a source span or text unit
 - `node`: canonical semantic atom such as project, pattern, person, domain, claim, decision, task, question, or view. A claim is a node type with provenance through its annotations; the separate `claim` table was dropped in migration 010 (nothing wrote to it).
 - `edge`: typed relationship between nodes, bitemporal (`valid_from`/`valid_until` world time, `expired_at` belief time)
 - `revision`: the full fact (title, summary, content) at each version of a node
 - `event`: append-only audit log of every graph mutation
 - `view`: saved mind map/query projection
-- `embedding`: vector rows for each node's current revision and for text units. Superseded revisions lose theirs on update, so semantic search cannot resurrect replaced content.
+- `embedding`: vector rows for each node's current revision and for each text chunk. Not one per text unit: a unit is a LINE (averaging 187 bytes in production), one vector per line was 98% of the vector bytes and filled the disk on 3 September, and a line carries too little to retrieve on. A semantic hit on a chunk expands back through its `first_ordinal..last_ordinal` range to the text units it covers, so citations are unchanged. Superseded revisions lose their vectors on update, so semantic search cannot resurrect replaced content. Storage and tenancy live in [deployment.md](/Users/anunay/dev/trove/docs/deployment.md#embedding-storage).
 - `job`: durable maintenance work for projection refresh, graph lint, and embedding refresh
 
 This avoids the main markdown trap: a page can contain many facts, a long source can support many facts, and a fact can belong to multiple pages/views.
