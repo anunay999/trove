@@ -50,7 +50,10 @@ export type Stats = {
   predicates: CountRow[];
   actions: CountRow[];
   eventsPerDay: Array<{ date: string; total: number; writes: number }>;
+  /** Documents dated by domain time — the date each one claims for itself. */
   sourcesPerDay: Array<{ date: string; documents: number }>;
+  /** The same documents dated by ingest time — the day Trove received them. */
+  sourcesIngestedPerDay: Array<{ date: string; documents: number }>;
   topAccessed: Array<{
     id: string;
     slug: string;

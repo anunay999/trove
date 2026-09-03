@@ -59,6 +59,7 @@ import {
 } from "./oauthMetadata.js";
 import { createGraphStore } from "./createStore.js";
 import { EdgeValidityConflictError, isSmokeEvent } from "./graphCore.js";
+import { sourceDaySeries } from "./sourceStats.js";
 import { startJobWorker } from "./jobWorker.js";
 import { createTroveMcpServer } from "./mcpTools.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
@@ -206,29 +207,11 @@ app.get("/v1/stats", async (context) => {
     store.sources({ limit: 5000 }, owner),
   ]);
 
-  // Domain time beats transaction time: date each document by what it says about
-  // itself (frontmatter date, or a date in its path/title), not when it was imported.
-  const isoDate = /\b(20\d{2}-\d{2}-\d{2})\b/;
-  const domainDate = (row: (typeof sourceRows)[number]): string => {
-    const entryDate = (row.metadata as { entryDate?: string }).entryDate;
-    if (entryDate && isoDate.test(entryDate)) return isoDate.exec(entryDate)![1]!;
-    const frontmatter = (row.metadata as { frontmatter?: Record<string, string> }).frontmatter ?? {};
-    for (const candidate of [frontmatter.created, frontmatter.date, frontmatter.updated]) {
-      if (candidate && isoDate.test(candidate)) return isoDate.exec(candidate)![1]!;
-    }
-    const relPath = (row.metadata as { relPath?: string }).relPath ?? "";
-    const fromName = isoDate.exec(`${relPath} ${row.title}`);
-    if (fromName) return fromName[1]!;
-    return row.createdAt.slice(0, 10);
-  };
-
-  const sourcesPerDay = new Map<string, { date: string; documents: number }>();
-  for (const row of sourceRows) {
-    const date = domainDate(row);
-    const entry = sourcesPerDay.get(date) ?? { date, documents: 0 };
-    entry.documents += 1;
-    sourcesPerDay.set(date, entry);
-  }
+  // Two honest readings of the same rows. Domain time answers "when is this
+  // document from" — the date it claims for itself; ingest time answers "when
+  // did I add it". They diverge by months on an imported vault, and a chart
+  // that only knows the first reads as broken to someone who just imported.
+  const sourceDays = sourceDaySeries(sourceRows);
 
   // Whole-log rollups come from an aggregate, not from paging the feed. The
   // paged version stopped after 10,000 events and reported zero for every day
@@ -294,7 +277,8 @@ app.get("/v1/stats", async (context) => {
     predicates: countBy(snapshot.edges, (edge) => edge.predicate),
     actions: eventStats.actions,
     eventsPerDay: eventStats.perDay,
-    sourcesPerDay: [...sourcesPerDay.values()].sort((left, right) => left.date.localeCompare(right.date)),
+    sourcesPerDay: sourceDays.byDocumentDate,
+    sourcesIngestedPerDay: sourceDays.byIngestDate,
     topAccessed,
     recentEvents,
     jobs: countBy(jobList, (job) => job.status),
