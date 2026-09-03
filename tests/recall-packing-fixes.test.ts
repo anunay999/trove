@@ -1,7 +1,7 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { estimateTokens } from "../src/graphCore.js";
-import { suiteStore, closeStore } from "./helpers.js";
+import { suiteStore, closeStore, isolateDatabase } from "./helpers.js";
 
 // Regression tests for the recall packing fixes:
 // - F3: the token budget covers the whole wire response; atoms carry the
@@ -9,6 +9,14 @@ import { suiteStore, closeStore } from "./helpers.js";
 // - F4: recall packing must not bump access activation.
 // - F10: per-node evidence is query-ranked and capped at 5, packed only after
 //   every atom has its body/teaser allocation.
+// This suite recalls UNSCOPED, and one fixture marker is deliberately
+// stamp-free, so on a shared database every previous run leaves another node
+// that matches it. Thirty-five of them had accumulated locally, crowding this
+// run's depth-2 neighbour out of a candidate pool that recall widened from ten
+// to fifty. CI never saw it because CI starts empty. Give the suite its own
+// database so it measures packing, not how many times it has been run before.
+await isolateDatabase("recall-packing-fixes");
+
 describe("recall packing fixes", () => {
   const { store, context, stamp } = suiteStore("recall-packing-fixes");
 
