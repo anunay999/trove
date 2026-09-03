@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * How the graph view reads a chat turn.
@@ -62,4 +62,165 @@ export function usePrefersReducedMotion(): boolean {
     return () => query.removeEventListener("change", onChange);
   }, []);
   return reduced;
+}
+
+// ---- Paced replay ---------------------------------------------------------
+
+/**
+ * Retrieval is faster than the eye.
+ *
+ * A local recall finishes both search arms, a two-hop walk and the pack inside
+ * about a tenth of a second, so publishing each event the moment it lands lights
+ * the whole crawl in one frame: the graph blinks, and the thing the panel exists
+ * to show never happens on screen. So the highlights are put through a queue and
+ * released on a clock.
+ *
+ * The seam, said plainly, because it is the one place this feature bends:
+ *
+ *   - the ANIMATION is paced. These three constants are the only numbers on the
+ *     screen that were not measured.
+ *   - the NUMBERS are not. Every elapsed time in the stage list is the server's
+ *     own measurement, carried through untouched; nothing displayed is ever
+ *     derived from this clock.
+ *   - nothing is invented. The queue only ever replays events the server sent,
+ *     in the order it sent them. A node that retrieval did not touch never
+ *     lights, however long the replay runs.
+ *
+ * Under `prefers-reduced-motion: reduce` the queue is bypassed entirely and the
+ * final state appears at once.
+ */
+
+/** Between two nodes inside one stage. */
+export const REPLAY_NODE_MS = 40;
+/** Held at a stage boundary, so the stages read as separate moves. */
+export const REPLAY_STAGE_MS = 190;
+/** Ceiling for the whole replay: a big pack compresses rather than drags. */
+export const REPLAY_BUDGET_MS = 1800;
+/** However much it compresses, two nodes never land in the same frame. */
+const REPLAY_MIN_NODE_MS = 8;
+
+/** One node's promotion, as the panel reads it off a stream event. */
+export type ReplayPromotion = {
+  id: string;
+  state: ChatHighlightState;
+  hops?: number;
+  arm?: ChatHighlight["arm"];
+};
+
+/**
+ * One beat of the replay: a stage row and the nodes that stage touched.
+ * Either half may be empty — `rank` reports no nodes, and a `seeds` event for
+ * an arm that found nothing is a row with no lights, which is the point.
+ */
+export type ReplayBeat<TStage> = { stage?: TStage; nodes: ReplayPromotion[] };
+
+/**
+ * Replay a turn's beats at a watchable pace.
+ *
+ * `begin` starts a turn (and cancels whatever the last one was still playing,
+ * so a second question interrupts cleanly), `push` adds a beat as it arrives
+ * off the stream, `cancel` stops without clearing the graph.
+ */
+export function useRetrievalReplay<TStage>(options: {
+  onHighlights: (highlights: ChatHighlights) => void;
+  onStage: (stage: TStage) => void;
+  reduced: boolean;
+}): {
+  begin: () => void;
+  push: (beat: ReplayBeat<TStage>) => void;
+  cancel: () => void;
+  isReplaying: boolean;
+} {
+  const { onHighlights, onStage, reduced } = options;
+  const callbacks = useRef({ onHighlights, onStage, reduced });
+  callbacks.current = { onHighlights, onStage, reduced };
+
+  const queue = useRef<ReplayBeat<TStage>[]>([]);
+  const lit = useRef(new Map<string, ChatHighlight>());
+  const timer = useRef<number | null>(null);
+  const [isReplaying, setIsReplaying] = useState(false);
+
+  /** Strictly increasing: a node already further along is never walked back. */
+  const promote = (node: ReplayPromotion) => {
+    const current = lit.current.get(node.id);
+    if (current && CHAT_STATE_RANK[current.state] >= CHAT_STATE_RANK[node.state]) return;
+    lit.current.set(node.id, {
+      state: node.state,
+      hops: node.hops ?? current?.hops ?? 0,
+      ...(node.arm ?? current?.arm ? { arm: node.arm ?? current?.arm } : {}),
+      at: performance.now(),
+    });
+  };
+
+  const stop = useCallback(() => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = null;
+  }, []);
+
+  const step = useCallback(() => {
+    timer.current = null;
+    const beat = queue.current[0];
+    if (!beat) {
+      setIsReplaying(false);
+      return;
+    }
+    if (beat.stage !== undefined) {
+      callbacks.current.onStage(beat.stage);
+      beat.stage = undefined;
+    }
+    const node = beat.nodes.shift();
+    if (node) {
+      promote(node);
+      callbacks.current.onHighlights(new Map(lit.current));
+    }
+    const beatDone = beat.nodes.length === 0;
+    if (beatDone) queue.current.shift();
+    if (queue.current.length === 0) {
+      setIsReplaying(false);
+      return;
+    }
+    // Spend the budget across whatever is still waiting, so a 40-node pack
+    // speeds up instead of turning into a slideshow.
+    const pending = queue.current.reduce((total, row) => total + row.nodes.length, 0);
+    const perNode = Math.max(
+      REPLAY_MIN_NODE_MS,
+      Math.min(REPLAY_NODE_MS, REPLAY_BUDGET_MS / Math.max(1, pending)),
+    );
+    timer.current = window.setTimeout(step, beatDone ? REPLAY_STAGE_MS : perNode);
+  }, []);
+
+  const begin = useCallback(() => {
+    stop();
+    queue.current = [];
+    lit.current = new Map();
+    setIsReplaying(false);
+    // Everything dims the moment the question is sent; nodes earn their way
+    // back out of the dark as the replay reports the server touching them.
+    callbacks.current.onHighlights(new Map());
+  }, [stop]);
+
+  const push = useCallback(
+    (beat: ReplayBeat<TStage>) => {
+      if (callbacks.current.reduced) {
+        if (beat.stage !== undefined) callbacks.current.onStage(beat.stage);
+        for (const node of beat.nodes) promote(node);
+        callbacks.current.onHighlights(new Map(lit.current));
+        return;
+      }
+      queue.current.push({ stage: beat.stage, nodes: [...beat.nodes] });
+      setIsReplaying(true);
+      if (timer.current === null) step();
+    },
+    [step],
+  );
+
+  const cancel = useCallback(() => {
+    stop();
+    queue.current = [];
+    setIsReplaying(false);
+  }, [stop]);
+
+  useEffect(() => stop, [stop]);
+
+  return { begin, push, cancel, isReplaying };
 }

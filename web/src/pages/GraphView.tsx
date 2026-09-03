@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D from "react-force-graph-2d";
 import { forceCollide, forceX, forceY } from "d3-force-3d";
+import { useResizable } from "@astryxdesign/core/Resizable";
 import { Skeleton } from "@/components/ui/skeleton";
-import { GraphChat } from "@/components/GraphChat";
+import { GraphChat, RetrievalHud, type Stage } from "@/components/GraphChat";
 import {
   highlightInk,
   usePrefersReducedMotion,
@@ -87,7 +88,23 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
   // null: the chat is not driving the graph. A Map (even an empty one): it is,
   // so every node NOT in it is dimmed and every node in it wears its state.
   const [highlights, setHighlights] = useState<ChatHighlights>(null);
+  // The retrieval stages live in the chat but are drawn over the canvas, so
+  // they come back up here on their way to the HUD.
+  const [chatStages, setChatStages] = useState<Stage[]>([]);
   const reducedMotion = usePrefersReducedMotion();
+
+  /**
+   * The chat rail. The graph is the canvas and this is the companion beside it,
+   * so it starts narrow and the reader can trade one for the other; the width
+   * it settles on is what the canvas is sized against and what the camera
+   * subtracts when it centres a pack.
+   */
+  const rail = useResizable({
+    defaultSize: 380,
+    minSizePx: 320,
+    maxSizePx: 560,
+    autoSaveId: "trove:graph-chat-rail",
+  });
 
   useEffect(() => {
     const element = containerRef.current;
@@ -318,8 +335,15 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
   // A container query in spirit: the chat docks to the side when there is room
   // for a graph beside it, and to the bottom when there is not.
   const narrow = size.width < 720;
-  /** Must match the sidebar width in GraphChat (w-[25rem]). */
-  const CHAT_SIDEBAR_PX = 400;
+  /** What the rail is currently taking from the canvas, or nothing when closed. */
+  const railPx = chatOpen && !narrow ? rail.size : 0;
+  /**
+   * How much of the canvas the HUD covers from the bottom edge. The camera
+   * frames the pack in the band above it, so the readout never lands on the
+   * cluster it is describing. Roughly `styles.hud` at eight stages.
+   */
+  const HUD_HEIGHT_PX = 300;
+  const hudOpen = chatOpen && !narrow && chatStages.length > 0;
   /**
    * Ceiling for the post-pack camera. Close enough to read the labels, far
    * enough that the dark graph around the lit nodes is still on screen.
@@ -343,7 +367,7 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
           // the canvas the reduced box is what makes zoomToFit land the lit
           // nodes where they can be seen instead of centring them under the
           // panel — and it keeps hit-testing honest at the same time.
-          width={chatOpen && !narrow ? Math.max(240, size.width - CHAT_SIDEBAR_PX) : size.width}
+          width={Math.max(240, size.width - railPx)}
           height={chatOpen && narrow ? Math.round(size.height * 0.38) : size.height}
           graphData={data}
           backgroundColor="rgba(0,0,0,0)"
@@ -526,56 +550,99 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
         )}
       </div>
 
+      {hudOpen ? (
+        // The metrics, over the canvas rather than in the rail: they describe
+        // what is happening on the graph, so they belong on the graph. Pinned
+        // bottom-right — top-left is the search, top-right the node card,
+        // bottom-left the type legend — and the camera above keeps the lit
+        // cluster out from under it.
+        <div
+          className="pointer-events-none absolute bottom-4 z-30"
+          style={{ right: railPx + 16 }}
+        >
+          <RetrievalHud
+            stages={chatStages}
+            // The receipt is closed when the `done` row lands, so that is when
+            // the HUD stops saying it is still working.
+            running={!chatStages.some((stage) => stage.key === "done")}
+            dark={dark}
+          />
+        </div>
+      ) : null}
+
       {chatOpen ? (
-        <GraphChat
-          dark={dark}
-          narrow={narrow}
-          onHighlights={setHighlights}
-          onFocusNode={(nodeId) => {
-            const node = nodeById.get(nodeId);
-            if (node) focusNode(node);
-          }}
-          onPacked={(nodeIds) => {
-            // Bring the crawl into frame once the pack is settled. Without it
-            // the lit nodes sit wherever the layout put them — often off-screen
-            // once the panel takes a third of a wide viewport, and nearly
-            // always so at 375px. One move per turn; pan and zoom stay the
-            // viewer's from here on.
-            //
-            // Not zoomToFit: fitting six nodes fills the canvas with six nodes
-            // and the dimmed graph they were pulled out of disappears, which is
-            // the context that makes the demonstration mean anything. Centre on
-            // them, and clamp how close the camera is allowed to get.
-            const graph = graphRef.current;
-            if (!graph || nodeIds.length === 0) return;
-            const packed = new Set(nodeIds);
-            const placed = data.nodes.filter(
-              (node) => packed.has(node.id) && node.x !== undefined && node.y !== undefined,
-            );
-            if (placed.length === 0) return;
-            const xs = placed.map((node) => node.x as number);
-            const ys = placed.map((node) => node.y as number);
-            const minX = Math.min(...xs);
-            const maxX = Math.max(...xs);
-            const minY = Math.min(...ys);
-            const maxY = Math.max(...ys);
-            const canvasWidth = chatOpen && !narrow ? Math.max(240, size.width - CHAT_SIDEBAR_PX) : size.width;
-            const canvasHeight = chatOpen && narrow ? Math.round(size.height * 0.38) : size.height;
-            const pad = 80;
-            const zoom = Math.min(
-              MAX_PACK_ZOOM,
-              Math.max(0.2, (canvasWidth - pad * 2) / Math.max(40, maxX - minX)),
-              Math.max(0.2, (canvasHeight - pad * 2) / Math.max(40, maxY - minY)),
-            );
-            const ms = reducedMotion ? 0 : 600;
-            graph.centerAt((minX + maxX) / 2, (minY + maxY) / 2, ms);
-            graph.zoom(zoom, ms);
-          }}
-          onClose={() => {
-            setChatOpen(false);
-            setHighlights(null);
-          }}
-        />
+        <aside
+          aria-label="Ask the graph"
+          // The panel's frame is the canvas's business, not the panel's: it is
+          // the canvas that is giving up the room. A narrow rail beside the
+          // canvas where there is width for both, and a sheet stacked under a
+          // shortened canvas where there is not. Everything inside the aside is
+          // Astryx; the aside itself is not.
+          className={
+            narrow
+              ? "absolute inset-x-0 bottom-0 z-20 h-[62%] border-t"
+              : "absolute inset-y-0 right-0 z-20 border-l"
+          }
+          style={narrow ? undefined : { width: rail.size }}
+        >
+          <GraphChat
+            dark={dark}
+            narrow={narrow}
+            resizable={rail.props}
+            onStages={setChatStages}
+            onHighlights={setHighlights}
+            onFocusNode={(nodeId) => {
+              const node = nodeById.get(nodeId);
+              if (node) focusNode(node);
+            }}
+            onPacked={(nodeIds) => {
+              // Bring the crawl into frame once the pack is settled. Without it
+              // the lit nodes sit wherever the layout put them — often off-screen
+              // once the panel takes a third of a wide viewport, and nearly
+              // always so at 375px. One move per turn; pan and zoom stay the
+              // viewer's from here on.
+              //
+              // Not zoomToFit: fitting six nodes fills the canvas with six nodes
+              // and the dimmed graph they were pulled out of disappears, which is
+              // the context that makes the demonstration mean anything. Centre on
+              // them, and clamp how close the camera is allowed to get.
+              const graph = graphRef.current;
+              if (!graph || nodeIds.length === 0) return;
+              const packed = new Set(nodeIds);
+              const placed = data.nodes.filter(
+                (node) => packed.has(node.id) && node.x !== undefined && node.y !== undefined,
+              );
+              if (placed.length === 0) return;
+              const xs = placed.map((node) => node.x as number);
+              const ys = placed.map((node) => node.y as number);
+              const minX = Math.min(...xs);
+              const maxX = Math.max(...xs);
+              const minY = Math.min(...ys);
+              const maxY = Math.max(...ys);
+              const canvasWidth = Math.max(240, size.width - railPx);
+              const canvasHeight = chatOpen && narrow ? Math.round(size.height * 0.38) : size.height;
+              // The HUD sits in the bottom-right corner of the canvas, so the
+              // pack is framed in the band above it and then lifted by half
+              // that band — the readout never lands on the cluster it reads.
+              const hudInset = hudOpen ? HUD_HEIGHT_PX : 0;
+              const usableHeight = Math.max(160, canvasHeight - hudInset);
+              const pad = 80;
+              const zoom = Math.min(
+                MAX_PACK_ZOOM,
+                Math.max(0.2, (canvasWidth - pad * 2) / Math.max(40, maxX - minX)),
+                Math.max(0.2, (usableHeight - pad * 2) / Math.max(40, maxY - minY)),
+              );
+              const ms = reducedMotion ? 0 : 600;
+              graph.centerAt((minX + maxX) / 2, (minY + maxY) / 2 + hudInset / 2 / zoom, ms);
+              graph.zoom(zoom, ms);
+            }}
+            onClose={() => {
+              setChatOpen(false);
+              setHighlights(null);
+              setChatStages([]);
+            }}
+          />
+        </aside>
       ) : null}
 
       <div
@@ -609,7 +676,7 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
           className="absolute top-4 flex max-h-[calc(100%-2rem)] w-80 flex-col rounded-lg border bg-card p-4"
           // The chat docks to the right edge on a wide viewport, so the node
           // card steps aside rather than hiding under it.
-          style={{ right: chatOpen && !narrow ? "26rem" : "1rem" }}
+          style={{ right: railPx > 0 ? railPx + 16 : 16 }}
         >
           <div className="flex items-start justify-between gap-3">
             <p className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
