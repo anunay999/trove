@@ -27,10 +27,19 @@ import {
 type Tab = "overview" | "graph" | "agents" | "keys" | "admin";
 
 const clerkEnabled = !!import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
-// app.<domain> is the product; the bare domain is the front door. Same bundle,
-// same API (the server answers on both hosts), but the app host never shows
-// the landing: signed out, it goes straight to sign-in.
-const isAppHost = window.location.hostname.startsWith("app.");
+// app.<domain> is the product; the bare domain is the front door and shows
+// nothing but the landing. Same bundle, same API (the server answers on both
+// hosts). Signing in, joining, or connecting a key from the front door hops
+// to the app host, which opens the matching drawer on arrival. Dev mirrors
+// production: localhost:5173 is the front door, app.localhost:5173 the app.
+const hostname = window.location.hostname;
+const isAppHost = hostname.startsWith("app.");
+const isFrontDoor = clerkEnabled && !isAppHost;
+const appOrigin = `${window.location.protocol}//app.${hostname}${window.location.port ? `:${window.location.port}` : ""}`;
+
+function goToApp(hash = "") {
+  window.location.assign(`${appOrigin}/${hash}`);
+}
 
 function initialDark(): boolean {
   const saved = window.localStorage.getItem("trove_theme");
@@ -109,14 +118,14 @@ export default function App() {
   const tokenMode = !signedIn && hasApiToken && (tokenDashboard || !clerkEnabled);
   const dashboardReady = !error && (signedIn ? !isWaitlisted : tokenMode);
   const clerkSettling = clerkEnabled && !clerkLoaded;
-  const showLanding = clerkEnabled && clerkLoaded && !signedIn && !tokenMode && signedOutView === "landing" && !isAppHost;
+  const showLanding = isFrontDoor;
   const showConnect = !signedIn && !dashboardReady && signedOutView === "connect";
 
   const disconnectKey = useCallback(() => {
     window.localStorage.removeItem("trove_token");
     setImpersonation(null);
     setTokenDashboard(false);
-    setSignedOutView("landing");
+    setSignedOutView(isAppHost ? "connect" : "landing");
     setStats(null);
     setSnapshot(null);
     setError(null);
@@ -130,8 +139,30 @@ export default function App() {
   const tabs: Tab[] = impersonating ? allTabs.filter((candidate) => candidate !== "keys") : allTabs;
   const activeTab: Tab = tabs.includes(tab) ? tab : "overview";
 
-  const openLogin = useCallback(() => setDrawer({ open: true, mode: "sign-in" }), []);
-  const openSignUp = useCallback((email?: string) => setDrawer({ open: true, mode: "sign-up", email }), []);
+  const openLogin = useCallback(() => {
+    if (isFrontDoor) return goToApp("#login");
+    setDrawer({ open: true, mode: "sign-in" });
+  }, []);
+  const openSignUp = useCallback((email?: string) => {
+    if (isFrontDoor) return goToApp(`#signup${email ? `?email=${encodeURIComponent(email)}` : ""}`);
+    setDrawer({ open: true, mode: "sign-up", email });
+  }, []);
+
+  // Arriving from the front door: open the drawer the visitor asked for, once
+  // Clerk is ready to render it. Already signed in? The hash is stale; drop it.
+  useEffect(() => {
+    if (!isAppHost || !clerkLoaded) return;
+    const hash = window.location.hash;
+    if (!hash.startsWith("#login") && !hash.startsWith("#signup") && !hash.startsWith("#connect")) return;
+    if (!signedIn) {
+      if (hash.startsWith("#login")) setDrawer({ open: true, mode: "sign-in" });
+      else if (hash.startsWith("#signup")) {
+        const email = new URLSearchParams(hash.split("?")[1] ?? "").get("email") ?? undefined;
+        setDrawer({ open: true, mode: "sign-up", email });
+      } else setSignedOutView("connect");
+    }
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+  }, [clerkLoaded, signedIn]);
 
   return (
     // The landing is always dark. The night tokens go on the shell, not just the
@@ -172,14 +203,13 @@ export default function App() {
                 Refresh
               </button>
             )}
-            {showLanding && hasApiToken && (
-              <button
-                type="button"
-                onClick={() => setTokenDashboard(true)}
+            {isFrontDoor && (
+              <a
+                href={appOrigin}
                 className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground transition-colors hover:text-foreground"
               >
-                Dashboard
-              </button>
+                Open app
+              </a>
             )}
             {tokenMode && (
               <button
@@ -242,18 +272,14 @@ export default function App() {
         </div>
       )}
 
-      {clerkSettling ? (
+      {showLanding ? (
+        <Landing onJoin={(email) => openSignUp(email)} onLogin={openLogin} onConnectKey={() => goToApp("#connect")} />
+      ) : clerkSettling ? (
         <div className="flex flex-1 items-center justify-center">
           <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Loading…</p>
         </div>
       ) : isWaitlisted ? (
         <WaitlistGate email={identity?.email ?? null} dark={dark} />
-      ) : showLanding ? (
-        <Landing
-          onJoin={(email) => openSignUp(email)}
-          onLogin={openLogin}
-          onConnectKey={() => setSignedOutView("connect")}
-        />
       ) : showConnect || (error && error.includes("401")) ? (
         <div className="mx-auto mt-24 w-full max-w-sm rounded-lg border bg-card p-8">
           <h2 className="font-serif text-xl">Connect to Trove</h2>
