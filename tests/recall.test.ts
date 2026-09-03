@@ -1,5 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { recallInputSchema } from "../src/contracts.js";
 import { suiteStore, closeStore, isolateDatabase } from "./helpers.js";
 
 // Recall packs are budget-sensitive: nodes left by a previous run or a parallel
@@ -150,5 +151,24 @@ describe("recall", () => {
       const fillerHits = (after.match(/billing refund pricing notes/g) ?? []).length;
       assert.ok(fillerHits < 80, `giant page teaser should be short, saw ${fillerHits} filler phrases`);
     }
+  });
+
+  it("rejects asOf outright instead of answering from the present", async () => {
+    // recall never time-travelled: search, supersession, and evidence always
+    // came from the present, only the expansion honoured asOf. An old client
+    // still sending it must hear that, not get a present-day pack.
+    const asOf = "2026-01-01T00:00:00.000Z";
+    const parsed = recallInputSchema.safeParse({ query: "anything", asOf });
+    assert.equal(parsed.success, false, "asOf must not parse on recall");
+    const messages = parsed.error?.issues.map((issue) => issue.message).join("\n") ?? "";
+    assert.match(messages, /asOf is not supported on recall/);
+    assert.match(messages, /read/);
+    assert.match(messages, /neighborhood/);
+    await assert.rejects(
+      async () => store.recall({ query: "anything", asOf } as never, context),
+      /asOf is not supported on recall/,
+    );
+    // Without asOf the same input is fine: the rejection is targeted, not strict mode.
+    assert.equal(recallInputSchema.safeParse({ query: "anything" }).success, true);
   });
 });

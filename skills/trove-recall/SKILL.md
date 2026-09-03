@@ -37,6 +37,7 @@ When **not** to use:
 
 - `read { id | slug }` for full body + evidence, or a raw source document by source id.
 - `neighborhood { nodeId, depth, asOf? }` when structure or belief history matters.
+- Time travel lives on `read { asOf }` and `neighborhood { asOf }` only; `recall` answers from present belief and rejects `asOf`.
 
 ### Step 3 — synthesize
 

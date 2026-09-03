@@ -123,7 +123,7 @@ Tool visibility is tiered by credential scope: core tools are shown to every cre
 Core (the everyday agent vocabulary):
 
 - `remember` - distilled belief (not raw dump); revises on exact title/slug; check `similar`; mid-session small atoms + links
-- `recall` - open questions only; token-budgeted pack (default 8000); follow with `read` if thin
+- `recall` - open questions only; token-budgeted pack (default 8000); follow with `read` if thin; present belief only (no `asOf`)
 - `grep` - prefer over recall for ports/IPs/errors/flags; then `read` for full doc
 - `read` - full node body or raw source by id/slug; node reads accept `asOf` for recorded fact history
 - `connect` - typed edges; `supersedesEdgeId` replaces a belief on the record

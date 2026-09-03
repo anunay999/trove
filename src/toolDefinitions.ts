@@ -97,7 +97,7 @@ export const troveTools = [
     name: "recall",
     tier: "core",
     description:
-      "Open questions only — e.g. 'how do we handle refunds?' — returns a short ranked brief with citations. Not for exact ids or error strings (use grep) or when you already know the note name (use read). Default tokenBudget 8000 covers the whole response. Atoms carry the packed body slice — contentTruncated marks cut bodies, hops is the true graph distance from the match — and evidence is relevance-ranked to the query. An atom marked SUPERSEDED has been replaced by a newer note (named in the header) — prefer the successor, cite the superseded one only for history. The brief is a digest; if the right note is on top but incomplete, follow with read on that slug.",
+      "Open questions only — e.g. 'how do we handle refunds?' — returns a short ranked brief with citations. Not for exact ids or error strings (use grep) or when you already know the note name (use read). Default tokenBudget 8000 covers the whole response. Atoms carry the packed body slice — contentTruncated marks cut bodies, hops is the true graph distance from the match — and evidence is relevance-ranked to the query. An atom marked SUPERSEDED has been replaced by a newer note (named in the header) — prefer the successor, cite the superseded one only for history. The brief is a digest; if the right note is on top but incomplete, follow with read on that slug. Always answers from present belief — there is no asOf here; for what a fact said or which links were believed at a past time use read or neighborhood with asOf.",
     inputSchema: recallInputSchema,
   },
   {

@@ -157,6 +157,21 @@ app.all("/mcp", async (context) => {
   }
 });
 
+// Every REST body is parsed with a zod schema; without this a bad body fell
+// through to Hono's default handler as a bare 500 and the caller never saw
+// which field was wrong. Auth errors keep their own status codes above.
+app.onError((error, context) => {
+  if (error instanceof z.ZodError) {
+    return context.json({
+      error: "invalid_input",
+      message: error.issues.map((issue) => `${issue.path.join(".") || "body"}: ${issue.message}`).join("; "),
+      issues: error.issues,
+    }, 400);
+  }
+  console.error(error);
+  return context.text("Internal Server Error", 500);
+});
+
 app.get("/v1/tools", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;

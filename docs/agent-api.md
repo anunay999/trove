@@ -45,7 +45,8 @@ Visibility is tiered by credential scope: **core** tools are shown to every cred
 
 `recall`
 
-- Input: `query`, `tokenBudget` (default **8000**), optional `types`, `depth`, `asOf`, `includeEvidence`, `maxSemanticDistance` (cosine-distance ceiling 0–2 for semantic hits; server default 0.55, configurable via `TROVE_SEMANTIC_MAX_DISTANCE`)
+- Input: `query`, `tokenBudget` (default **8000**), optional `types`, `depth`, `includeEvidence`, `maxSemanticDistance` (cosine-distance ceiling 0–2 for semantic hits; server default 0.55, configurable via `TROVE_SEMANTIC_MAX_DISTANCE`)
+- Present belief only: there is no `asOf`. A request that sends one is rejected with a pointer to `read` (fact snapshots) and `neighborhood` (edge history), the two time-travel surfaces.
 - Output: a token-budgeted context pack — packed atoms with scores, connecting edges, evidence text units, citations, `spentTokens`, and `truncated`
 - Open-ended questions only: hybrid search seeds a graph expansion, candidates are ranked by match plus ACT-R-style activation (recency, frequency) plus degree, and a greedy packer fills the budget. The budget covers the whole serialized response: atoms carry the packed body slice (`contentTruncated` marks cut bodies — `read` the slug for the full note), `hops` is the true graph distance from the match, and per-node evidence is relevance-ranked to the query, capped at 5 units each.
 - The pack is a **brief**, not always a full note. Packing never counts as a read — only an explicit `read` strengthens activation. Primary hits pack deeply; giant catalog notes are teaser-capped. Prefer one good `recall` for open questions; follow with `read` when you need the complete note.

@@ -167,7 +167,17 @@ export const recallInputSchema = z.object({
   tokenBudget: z.number().int().min(100).max(32000).default(8000),
   types: z.array(nodeTypeSchema).optional(),
   depth: z.number().int().min(0).max(2).default(1),
-  asOf: z.string().optional(),
+  // recall answers from present belief only. It once accepted asOf and passed
+  // it to the neighbourhood expansion alone, so search, supersession marks,
+  // and evidence stayed current while edge visibility went back in time: a
+  // pack that looked coherent and was not. Time travel lives on read (fact
+  // snapshots) and neighborhood (edge history). z.object strips unknown keys,
+  // so an old client sending asOf would otherwise get a silent present-day
+  // pack; declaring it as never rejects it by name with a pointer instead.
+  asOf: z
+    .never({ error: "asOf is not supported on recall; use read (fact snapshots) or neighborhood (edge history) for time travel." })
+    .optional()
+    .describe("Not supported: recall answers from present belief. Use read or neighborhood for asOf."),
   includeEvidence: z.boolean().default(true),
   // Cosine-distance ceiling for semantic seed hits (0..2). See searchInputSchema.
   maxSemanticDistance: z.number().min(0).max(2).optional(),

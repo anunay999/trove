@@ -759,7 +759,6 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
         nodeId: seed.id,
         depth: input.depth,
         includeExpired: false,
-        ...(input.asOf ? { asOf: input.asOf } : {}),
       }, context);
       for (const edge of expansion.edges) edgePool.set(edge.id, edge);
       for (const node of expansion.nodes) {

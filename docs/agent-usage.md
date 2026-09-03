@@ -68,6 +68,7 @@ If your host strips instructions, pin `trove://doctrine` or paste the [system-pr
 ### Rules of thumb
 
 - **Don’t use `recall` for a ticket id or error string** — `grep` first.
+- **`recall` has no `asOf`** — it answers from present belief and rejects the parameter. History lives on `read` and `neighborhood`.
 - **Don’t answer from a thin brief** if you know the note name — `read` it.
 - Ask `recall` in plain language:  
   `"How do we handle refunds for annual plans?"`  
