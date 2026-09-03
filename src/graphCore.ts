@@ -178,6 +178,13 @@ export type GraphJob = {
    * for genuinely global maintenance, but it must be observable).
    */
   dedupeJoined?: boolean;
+  /**
+   * app_user.id the job belongs to: stamped from the enqueuing context the way
+   * every other write stamps its rows. NULL is global/operator work (an
+   * unscoped context, or the background worker) and is listed only to
+   * unscoped readers, never to a scoped user.
+   */
+  ownerId: string | null;
   attempts: number;
   createdAt: string;
   updatedAt: string;
@@ -539,7 +546,7 @@ export type GraphStore = {
   exportMarkdown(context?: GraphOperationContext): MaybePromise<Record<string, string>>;
   exportGraph(context?: GraphOperationContext): MaybePromise<GraphSnapshot>;
   enqueueJob(input: EnqueueJobInput, context?: GraphOperationContext): MaybePromise<GraphJob>;
-  jobs(input?: ListJobsInput): MaybePromise<GraphJob[]>;
+  jobs(input?: ListJobsInput, context?: GraphOperationContext): MaybePromise<GraphJob[]>;
   runJob(input?: RunJobInput, context?: GraphOperationContext): MaybePromise<GraphJob | null>;
   health(): MaybePromise<{ ok: true }>;
 };

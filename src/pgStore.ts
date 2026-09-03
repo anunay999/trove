@@ -95,6 +95,10 @@ const NEIGHBORHOOD_DEFAULT_MAX_NODES = 100;
 /** Attempts a job gets across all causes — failures and lease reclaims alike. */
 const JOB_MAX_ATTEMPTS = 5;
 
+/** Every column mapJob reads; one list so a new column cannot be missed by one query. */
+const JOB_COLUMNS = `id, kind, status, priority, payload, result, error, dedupe_key, attempts, owner_id,
+              created_at, updated_at, started_at, finished_at`;
+
 function jobLeaseSeconds(): number {
   const parsed = Number(process.env.TROVE_JOB_LEASE_SECONDS);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 900;
@@ -1939,16 +1943,21 @@ export class PgGraphStore implements GraphStore {
     }
   }
 
-  async jobs(input: ListJobsInput = { limit: 25 }): Promise<GraphJob[]> {
+  async jobs(input: ListJobsInput = { limit: 25 }, context?: GraphOperationContext): Promise<GraphJob[]> {
+    // Same scoping as every other read: a scoped caller sees only rows stamped
+    // with their owner. Global (NULL-owner) rows are operator work and are
+    // listed only to unscoped callers, so a lint over the whole graph never
+    // shows one tenant another tenant's node titles.
+    const scope = ownerScope(context);
     const result = await this.pool.query(
-      `select id, kind, status, priority, payload, result, error, dedupe_key, attempts,
-              created_at, updated_at, started_at, finished_at
+      `select ${JOB_COLUMNS}
        from graph_job
        where ($1::text is null or status = $1)
          and ($2::text is null or kind = $2)
+         and ($4 or owner_id = $5)
        order by created_at desc
        limit $3`,
-      [input.status ?? null, input.kind ?? null, input.limit ?? 25],
+      [input.status ?? null, input.kind ?? null, input.limit ?? 25, !scope.scoped, scope.ownerId],
     );
     return result.rows.map(mapJob);
   }
@@ -1980,18 +1989,35 @@ export class PgGraphStore implements GraphStore {
     return { ok: true };
   }
 
+  /**
+   * Maintenance work a mutation leaves behind. Dedupe collapses a burst of
+   * writes into one pending row per key.
+   *
+   * Lint is per owner: the key is `maintenance:lint_graph:<ownerId>` and the
+   * payload carries the owner, so the job runs `lint()` under that owner's
+   * scope and its findings (node ids and titles) belong to the tenant whose
+   * write caused them. An unscoped writer (superuser, worker) gets the global
+   * key with no owner, which is also what an operator-triggered lint uses —
+   * the only way a lint runs over everyone's graph.
+   *
+   * Embedding refresh stays under the global key: its result is counts, not
+   * data, and one drain over every owner's missing rows is cheaper than one
+   * per tenant. The importer's owner-scoped drain keys itself.
+   */
   private async enqueueMaintenanceJobs(
     client: pg.PoolClient,
     context: GraphOperationContext | undefined,
     actorUuid: string | null,
     kinds: Array<GraphJob["kind"]>,
   ): Promise<void> {
+    const scope = ownerScope(context);
     for (const kind of kinds) {
+      const scoped = kind === "lint_graph" && scope.scoped && scope.ownerId !== null;
       await this.enqueueJobWithClient(client, {
         kind,
-        payload: { reason: "graph_mutation" },
+        payload: scoped ? { reason: "graph_mutation", ownerId: scope.ownerId } : { reason: "graph_mutation" },
         priority: kind === "refresh_embeddings" ? 40 : 60,
-        dedupeKey: `maintenance:${kind}`,
+        dedupeKey: scoped ? `maintenance:${kind}:${scope.ownerId}` : `maintenance:${kind}`,
       }, context, actorUuid);
     }
   }
@@ -2002,11 +2028,12 @@ export class PgGraphStore implements GraphStore {
    * revisions to the same node collapses into one run, which reads the current
    * revision at claim time.
    *
-   * Note the contrast with `maintenance:<kind>` keys above: lint and global
-   * embedding refresh are genuinely global work, so concurrent writers sharing
-   * one pending row is CORRECT there (the job covers everyone's data), while
-   * reconciliation is per-node work and must never absorb across nodes. The
-   * `dedupeJoined` return marker lets a caller observe either absorption.
+   * Note the contrast with the `maintenance:*` keys above: those cover a whole
+   * scope (one owner's lint, or the global embedding drain), so concurrent
+   * writers in that scope sharing one pending row is CORRECT — the job covers
+   * all of their data — while reconciliation is per-node work and must never
+   * absorb across nodes. The `dedupeJoined` return marker lets a caller
+   * observe either absorption.
    */
   private async enqueueReconcileJob(
     client: pg.PoolClient,
@@ -2030,8 +2057,7 @@ export class PgGraphStore implements GraphStore {
   ): Promise<GraphJob> {
     if (input.dedupeKey) {
       const existing = await client.query(
-        `select id, kind, status, priority, payload, result, error, dedupe_key, attempts,
-                created_at, updated_at, started_at, finished_at
+        `select ${JOB_COLUMNS}
          from graph_job
          where kind = $1
            and dedupe_key = $2
@@ -2045,17 +2071,25 @@ export class PgGraphStore implements GraphStore {
 
     const jobId = randomUUID();
     const result = await client.query(
-      `insert into graph_job (id, kind, priority, payload, dedupe_key, created_by)
-       values ($1, $2, $3, $4::jsonb, $5, $6)
+      `insert into graph_job (id, kind, priority, payload, dedupe_key, created_by, owner_id)
+       values ($1, $2, $3, $4::jsonb, $5, $6, $7)
        on conflict do nothing
-       returning id, kind, status, priority, payload, result, error, dedupe_key, attempts,
-                 created_at, updated_at, started_at, finished_at`,
-      [jobId, input.kind, input.priority, JSON.stringify(input.payload), input.dedupeKey ?? null, actorUuid],
+       returning ${JOB_COLUMNS}`,
+      [
+        jobId,
+        input.kind,
+        input.priority,
+        JSON.stringify(input.payload),
+        input.dedupeKey ?? null,
+        actorUuid,
+        // Stamped like every other write: the row belongs to the context that
+        // enqueued it, and NULL (unscoped) marks operator/worker work.
+        ownerScope(context).ownerId,
+      ],
     );
     if (result.rowCount === 0 && input.dedupeKey) {
       const existing = await client.query(
-        `select id, kind, status, priority, payload, result, error, dedupe_key, attempts,
-                created_at, updated_at, started_at, finished_at
+        `select ${JOB_COLUMNS}
          from graph_job
          where kind = $1
            and dedupe_key = $2
@@ -2137,8 +2171,7 @@ export class PgGraphStore implements GraphStore {
 
       if (result.rowCount === 0) {
         const existing = jobId ? await client.query(
-          `select id, kind, status, priority, payload, result, error, dedupe_key, attempts,
-                  created_at, updated_at, started_at, finished_at
+          `select ${JOB_COLUMNS}
            from graph_job
            where id = $1`,
           [jobId],
@@ -2156,8 +2189,7 @@ export class PgGraphStore implements GraphStore {
              updated_at = now(),
              started_at = now()
          where id = $1
-         returning id, kind, status, priority, payload, result, error, dedupe_key, attempts,
-                   created_at, updated_at, started_at, finished_at`,
+         returning ${JOB_COLUMNS}`,
         [result.rows[0].id, process.env.TROVE_WORKER_ID ?? "inline-worker"],
       );
       await client.query("commit");
@@ -2172,9 +2204,17 @@ export class PgGraphStore implements GraphStore {
 
   private async performJob(job: GraphJob): Promise<GraphJobResult> {
     if (job.kind === "lint_graph") {
-      const report = await this.lint();
+      // payload.ownerId scopes the lint to one tenant, the same contract as
+      // refresh_embeddings below. Absent means the whole graph, which only an
+      // operator-triggered enqueue produces; a mutation always carries its owner.
+      const payloadOwner = asRecord(job.payload).ownerId;
+      const ownerId = typeof payloadOwner === "string" ? payloadOwner : null;
+      const report = await this.lint(ownerId ? { ownerId } : undefined);
       // Carry the findings themselves (capped) — counts alone are not actionable.
-      const result: GraphJobResultMap["lint_graph"] = { lint: { ...report.summary, findings: report.findings.slice(0, 200) } };
+      const result: GraphJobResultMap["lint_graph"] = {
+        ownerId,
+        lint: { ...report.summary, findings: report.findings.slice(0, 200) },
+      };
       return result;
     }
 
@@ -2416,8 +2456,7 @@ export class PgGraphStore implements GraphStore {
              updated_at = now(),
              finished_at = now()
          where id = $1
-         returning id, kind, status, priority, payload, result, error, dedupe_key, attempts,
-                   created_at, updated_at, started_at, finished_at`,
+         returning ${JOB_COLUMNS}`,
         [jobId, status, result === null ? null : JSON.stringify(result), error],
       );
       const job = mapJob(updated.rows[0]);
@@ -2899,6 +2938,7 @@ function mapJob(row: Record<string, unknown>): GraphJob {
     result: row.result === null ? null : asRecord(row.result),
     error: row.error === null ? null : String(row.error),
     dedupeKey: row.dedupe_key === null ? null : String(row.dedupe_key),
+    ownerId: row.owner_id === null || row.owner_id === undefined ? null : String(row.owner_id),
     attempts: Number(row.attempts),
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at),

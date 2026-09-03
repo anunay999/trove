@@ -1217,6 +1217,7 @@ export class InMemoryGraphStore implements GraphStore {
       result: null,
       error: null,
       dedupeKey: input.dedupeKey ?? null,
+      ownerId: ownerScope(context).ownerId,
       attempts: 0,
       createdAt: now,
       updatedAt: now,
@@ -1228,8 +1229,12 @@ export class InMemoryGraphStore implements GraphStore {
     return job;
   }
 
-  jobs(input: ListJobsInput = { limit: 25 }): GraphJob[] {
+  jobs(input: ListJobsInput = { limit: 25 }, context?: GraphOperationContext): GraphJob[] {
+    // Mirrors pgStore: a scoped caller lists only rows stamped with their
+    // owner; global (null-owner) rows are operator work for unscoped readers.
+    const scope = ownerScope(context);
     return [...this.graphJobs.values()]
+      .filter((job) => !scope.scoped || job.ownerId === scope.ownerId)
       .filter((job) => !input.status || job.status === input.status)
       .filter((job) => !input.kind || job.kind === input.kind)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
@@ -1300,9 +1305,16 @@ export class InMemoryGraphStore implements GraphStore {
 
   private async performJob(job: GraphJob): Promise<GraphJobResult> {
     if (job.kind === "lint_graph") {
+      // The memory driver is single-user, so lint always covers the whole
+      // store; the owner is still reported so the result shape matches pg.
+      const payloadOwner = (job.payload as Record<string, unknown>).ownerId;
+      const ownerId = typeof payloadOwner === "string" ? payloadOwner : null;
       const report = this.lint();
       // Carry the findings themselves (capped) — counts alone are not actionable.
-      const result: GraphJobResultMap["lint_graph"] = { lint: { ...report.summary, findings: report.findings.slice(0, 200) } };
+      const result: GraphJobResultMap["lint_graph"] = {
+        ownerId,
+        lint: { ...report.summary, findings: report.findings.slice(0, 200) },
+      };
       return result;
     }
 
@@ -1338,16 +1350,19 @@ export class InMemoryGraphStore implements GraphStore {
     return result;
   }
 
+  /** Per-owner lint key and payload, global embedding refresh; see pgStore. */
   private enqueueMaintenanceJobs(
     context: GraphOperationContext | undefined,
     kinds: Array<GraphJob["kind"]>,
   ): void {
+    const scope = ownerScope(context);
     for (const kind of kinds) {
+      const scoped = kind === "lint_graph" && scope.scoped && scope.ownerId !== null;
       this.enqueueJob({
         kind,
-        payload: { reason: "graph_mutation" },
+        payload: scoped ? { reason: "graph_mutation", ownerId: scope.ownerId } : { reason: "graph_mutation" },
         priority: kind === "refresh_embeddings" ? 40 : 60,
-        dedupeKey: `maintenance:${kind}`,
+        dedupeKey: scoped ? `maintenance:${kind}:${scope.ownerId}` : `maintenance:${kind}`,
       }, context);
     }
   }

@@ -247,7 +247,7 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
         description: toolDescription("jobs"),
         inputSchema: listJobsInputSchema,
       },
-      async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await store.jobs(input))),
+      async (input) => withScopes(authContext, ["graph:admin"], async () => jsonToolResult(await store.jobs(input, operationContext))),
     );
 
     server.registerTool(
@@ -368,8 +368,8 @@ function registerTroveResources(
       description: "Read recent durable maintenance jobs.",
       mimeType: "application/json",
     },
-    async (uri) => withScopes(authContext, ["graph:read"], async () =>
-      jsonResource(uri, { jobs: await store.jobs({ limit: 25 }) })),
+    async (uri) => withScopes(authContext, ["graph:admin"], async () =>
+      jsonResource(uri, { jobs: await store.jobs({ limit: 25 }, operationContext) })),
   );
 
   server.registerResource(

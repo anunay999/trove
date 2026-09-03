@@ -194,7 +194,7 @@ export const troveTools = [
   {
     name: "jobs",
     tier: "operator",
-    description: "List durable maintenance jobs for projections, lint, and embedding refresh.",
+    description: "List durable maintenance jobs for projections, lint, and embedding refresh. Scoped to your own jobs; operators without an owner see every job.",
     inputSchema: listJobsInputSchema,
   },
   {

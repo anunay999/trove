@@ -200,7 +200,7 @@ app.get("/v1/stats", async (context) => {
   const owner = operationContextFromAuth(auth);
   const [snapshot, jobList, lintReport, latest, sourceRows] = await Promise.all([
     store.exportGraph(owner),
-    store.jobs({ limit: 100 }),
+    store.jobs({ limit: 100 }, owner),
     store.lint(owner),
     store.timeline(owner),
     store.sources({ limit: 5000 }, owner),
@@ -473,15 +473,17 @@ app.get("/v1/lint", async (context) => {
   return context.json(await store.lint(operationContextFromAuth(auth)));
 });
 
+// Operator surface, like the MCP `jobs` tool: results carry lint findings and
+// reconcile candidates, and the list is owner-scoped besides.
 app.get("/v1/jobs", async (context) => {
-  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:admin"]);
   if (auth instanceof Response) return auth;
   const input = listJobsInputSchema.parse({
     status: context.req.query("status"),
     kind: context.req.query("kind"),
     limit: context.req.query("limit") ? Number(context.req.query("limit")) : undefined,
   });
-  return context.json({ jobs: await store.jobs(input) });
+  return context.json({ jobs: await store.jobs(input, operationContextFromAuth(auth)) });
 });
 
 app.get("/v1/views", async (context) => {
