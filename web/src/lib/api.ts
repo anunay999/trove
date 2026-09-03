@@ -142,6 +142,14 @@ async function sendJson<T>(path: string, options: { method?: string; body?: unkn
 }
 
 export const fetchStats = (): Promise<Stats> => getJson<Stats>("/v1/stats");
+
+/** A companion skill's markdown, frontmatter stripped. Public route; no auth. */
+export async function fetchSkillBody(name: string): Promise<string> {
+  const response = await fetch(`/skills/${name}.md`);
+  if (!response.ok) throw new Error(`/skills/${name}.md failed: ${response.status}`);
+  const raw = await response.text();
+  return raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "").trim();
+}
 export const fetchGraph = (): Promise<GraphSnapshot> => getJson<GraphSnapshot>("/v1/graph");
 
 export type SourceDocument = {

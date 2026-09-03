@@ -49,6 +49,11 @@ Your agent gets a small verb-per-job toolset: `remember`, `recall`, `grep`, `rea
 npx skills add anunay999/trove -g
 ```
 
+Every skill is also served by the API, so any agent can be told to read one and follow it: the index is at [mytrove.in/skills.md](https://mytrove.in/skills.md) (and `/llms.txt`), each file at `/skills/<name>.md`. The same procedures are exposed as MCP prompts, e.g. `/mcp__trove__trove-curate` in Claude Code cleans up your graph from inside the session.
+
+```
+```
+
 Full setup — keys, scopes, stdio, importing a vault — is in [docs/quickstart.md](docs/quickstart.md).
 
 ## What you get

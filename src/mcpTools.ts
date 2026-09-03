@@ -24,6 +24,7 @@ import { assertScopes, operationContextFromAuth, type AuthContext, type TroveSco
 import { forget, readAny, remember } from "./agentOps.js";
 import type { GraphStore } from "./graphCore.js";
 import { toolDescription, TROVE_AGENT_DOCTRINE, visibleTiers } from "./toolDefinitions.js";
+import { getSkill } from "./skills.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
 
 export function createTroveMcpServer(store: GraphStore, authContext?: AuthContext): McpServer {
@@ -488,6 +489,50 @@ function registerTrovePrompts(server: McpServer): void {
         },
       ],
     }),
+  );
+
+  // The curator. The body is skills/trove-curate/SKILL.md verbatim, so the
+  // slash command, the pasted prompt on the dashboard, and the installed skill
+  // are one procedure. The fallback only exists for a checkout without the
+  // skills directory (stdio dev runs from odd cwds).
+  server.registerPrompt(
+    "trove-curate",
+    {
+      title: "Trove Curate",
+      description:
+        "Clean up the memory graph from this session: merge duplicates, record supersession, link orphans, retire stale beliefs. Bounded, reversible, proposes anything destructive.",
+      argsSchema: {
+        focus: z
+          .string()
+          .optional()
+          .describe("Optional: a topic, project, or lint code to concentrate on (e.g. 'duplicates', 'project trove')."),
+      },
+    },
+    async ({ focus }) => {
+      const skill = getSkill("trove-curate");
+      const procedure =
+        skill?.body ??
+        [
+          "Run lint. For duplicate_title pairs, read both and connect the newer to the older with a supersedes edge when they state the same fact.",
+          "For orphan_node, read the node, recall its hub, connect with mentions or part_of when unambiguous.",
+          "Propose (do not apply) merges, forget, and stale invalidations. Never rewrite content. Stop after 25 nodes and report.",
+        ].join("\n");
+      return {
+        messages: [
+          {
+            role: "user" as const,
+            content: {
+              type: "text" as const,
+              text: [
+                focus ? `Curate my Trove graph, focusing on: ${focus}` : "Curate my Trove graph.",
+                "",
+                procedure,
+              ].join("\n"),
+            },
+          },
+        ],
+      };
+    },
   );
 }
 

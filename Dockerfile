@@ -28,6 +28,8 @@ COPY --from=build /app/dist ./dist
 COPY --from=web /app/web/dist ./web/dist
 COPY package.json ./
 COPY db ./db
+# Served at /skills.md and as MCP prompts; see src/skills.ts.
+COPY skills ./skills
 EXPOSE 8787
 # Run node directly rather than via `npm run start:container`. Going through npm
 # put four processes between the container and the server
