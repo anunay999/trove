@@ -2,7 +2,7 @@ import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { InMemoryGraphStore } from "../src/store.js";
 import type { GraphEvent } from "../src/graphCore.js";
-import { suiteStore, closeStore, hasPostgres } from "./helpers.js";
+import { suiteStore, closeStore, hasPostgres, isolateDatabase } from "./helpers.js";
 import { isSmokeEvent, WRITE_ACTIONS } from "../src/graphCore.js";
 
 /**
@@ -17,6 +17,11 @@ import { isSmokeEvent, WRITE_ACTIONS } from "../src/graphCore.js";
  * the old budget: at 10,000 the previous implementation lost everything after
  * the cutoff.
  */
+// The day-for-day assertion compares an aggregate against a full drain of the
+// feed; on a shared database any sibling suite writing between the two reads
+// breaks the equality, so this suite gets its own.
+await isolateDatabase("event-stats");
+
 const PAST_OLD_PAGE_BUDGET = 10_600;
 
 function syntheticEvent(index: number, date: string, overrides: Partial<GraphEvent> = {}): GraphEvent {
