@@ -35,6 +35,43 @@ HTTP exists for human interfaces and simple automations:
 
 The HTTP API should mirror the MCP operations rather than becoming a second product.
 
+#### `POST /v1/graph-chat` — a recall you can watch
+
+One route deliberately has no MCP twin, because it exists for a human interface
+only: `/v1/graph-chat` answers a question from the graph and **streams the
+retrieval as it happens** over Server-Sent Events, so the dashboard can dim the
+graph and light nodes in the order recall touches them. Same `graph:read` scope
+and the same owner scoping as `/v1/recall`; the body is
+`{ query, tokenBudget?, depth? }`.
+
+Each frame is `data: <json>` carrying its own discriminant, plus `elapsedMs`
+since the request began:
+
+| `type` | when | carries |
+| --- | --- | --- |
+| `start` | request accepted | the query |
+| `seeds` | one search arm settled | `arm` (`lexical` / `semantic`), its hits |
+| `fused` | RRF fusion done | the seed pool |
+| `expand` | one seed's neighborhood walk returned | the nodes it **added**, with `hops` |
+| `rank` | candidate order settled | ids + scores, and whether a reranker ran |
+| `pack` | the token budget was spent | the packed atoms, `spentTokens` |
+| `answer_start` | generation begins | `model`, or `null` when none is configured |
+| `token` | the model produced text | the text |
+| `notice` | a truthful aside, never an error | `model_not_configured` / `no_results` |
+| `error` | recall or the model failed | `code`, `message` |
+| `done` | terminal, always sent | `finish`, `citations`, `citedNodeIds`, `answer` |
+
+Every event comes from `performRecall`'s trace hook (`RecallTrace` in
+`src/graphCore.ts`), emitted by the line that did the work and carrying the rows
+that line produced. Nothing is replayed on a timer; a node counts as *cited*
+only when the answer writes its `[[slug]]`.
+
+The answering model is opt-in (`TROVE_GRAPH_CHAT=1` plus `OPENAI_API_KEY`, any
+OpenAI-compatible `OPENAI_BASE_URL`, model named by `TROVE_CHAT_MODEL`). With no
+model the endpoint still streams the whole traversal and returns the pack, and
+`done.finish` is `no_model` — the graph demonstration is the part that needs no
+LLM.
+
 ## Tool Surface
 
 Visibility is tiered by credential scope: **core** tools are shown to every credential, **curator** tools require a write scope, **operator** tools require `graph:admin`. Call-time scope checks apply regardless.
