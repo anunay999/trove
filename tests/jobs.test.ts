@@ -1,9 +1,11 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { suiteStore, closeStore, isolateDatabase, hasPostgres } from "./helpers.js";
+import pg from "pg";
+import { suiteStore, closeStore, isolateDatabase, hasPostgres, sleep } from "./helpers.js";
 import { enqueueEmbeddingDrainFollowUp } from "../src/jobWorker.js";
 import { UserStore } from "../src/users.js";
+import { JOB_MAX_ATTEMPTS } from "../src/graphCore.js";
 import type { GraphJob, GraphOperationContext } from "../src/graphCore.js";
 
 // This suite asserts on queue state, and `runJob({})` claims whichever job is
@@ -26,11 +28,136 @@ async function freshOwner(tag: string): Promise<string> {
   }
 }
 
+/** Run one statement against the suite's Postgres database. */
+async function sql<T extends Record<string, unknown>>(text: string, params: unknown[]): Promise<T[]> {
+  const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  await client.connect();
+  try {
+    return (await client.query(text, params)).rows as T[];
+  } finally {
+    await client.end();
+  }
+}
+
+/** Swap the store's job body for the duration of a test (the F12c pattern). */
+function patchPerformJob(store: unknown, body: (job: GraphJob) => unknown): () => void {
+  const patched = store as { performJob: (job: GraphJob) => unknown };
+  const original = patched.performJob;
+  patched.performJob = body;
+  return () => {
+    patched.performJob = original;
+  };
+}
+
+/** Push a job's last update past any lease or retry backoff. */
+async function ageJob(store: unknown, jobId: string): Promise<void> {
+  if (hasPostgres()) {
+    await sql("update graph_job set updated_at = now() - interval '2 days' where id = $1", [jobId]);
+    return;
+  }
+  const jobs = (store as { graphJobs: Map<string, GraphJob> }).graphJobs;
+  const job = jobs.get(jobId);
+  if (job) jobs.set(jobId, { ...job, updatedAt: new Date(Date.now() - 172_800_000).toISOString() });
+}
+
 describe("jobs", () => {
   const { store, context, stamp } = suiteStore("job");
 
   after(async () => {
     await closeStore(store);
+  });
+
+  it("a slow but healthy job heartbeats its lease and is not reclaimed", async (t) => {
+    // A one-second lease with a two-second job: without a heartbeat the
+    // second claim below reclaims the row (attempts 2) and the first worker's
+    // finish then overwrites a job another worker is running.
+    const previousLease = process.env.TROVE_JOB_LEASE_SECONDS;
+    process.env.TROVE_JOB_LEASE_SECONDS = "1";
+    const restore = patchPerformJob(store, async () => {
+      await sleep(2_000);
+      return { ownerId: null, lint: { nodes: 0, edges: 0, findings: [], errors: 0, warnings: 0 } };
+    });
+    t.after(() => {
+      restore();
+      if (previousLease === undefined) delete process.env.TROVE_JOB_LEASE_SECONDS;
+      else process.env.TROVE_JOB_LEASE_SECONDS = previousLease;
+    });
+
+    const job = await store.enqueueJob({
+      kind: "lint_graph",
+      payload: { smoke: "heartbeat" },
+      priority: 0,
+      dedupeKey: `smoke:heartbeat:${stamp}`,
+    }, context);
+    const first = store.runJob({ jobId: job.id }, context);
+    await sleep(1_300);
+    const contender = await store.runJob({ jobId: job.id }, context);
+    assert.equal(contender?.status, "running", "the contender sees the job still running");
+    assert.equal(contender?.attempts, 1, "a heartbeating job is not reclaimed after the lease window");
+
+    const finished = await first;
+    assert.equal(finished?.status, "succeeded");
+    assert.equal(finished?.attempts, 1, "the original claim finished its own attempt");
+  });
+
+  it("a stale claimant cannot finish a job another worker has reclaimed", { skip: hasPostgres() ? false : "postgres only" }, async (t) => {
+    const restore = patchPerformJob(store, async () => {
+      await sleep(600);
+      return { ownerId: null, lint: { nodes: 0, edges: 0, findings: [], errors: 0, warnings: 0 } };
+    });
+    t.after(restore);
+
+    const job = await store.enqueueJob({
+      kind: "lint_graph",
+      payload: { smoke: "stale-claimant" },
+      priority: 0,
+      dedupeKey: `smoke:stale-claimant:${stamp}`,
+    }, context);
+    const stale = store.runJob({ jobId: job.id }, context);
+    await sleep(200);
+    // Simulate a lease reclaim by another worker while the first is mid-job.
+    await sql(
+      "update graph_job set claimed_by = $2, attempts = attempts + 1, updated_at = now() where id = $1",
+      [job.id, "other-worker:reclaim"],
+    );
+
+    const returned = await stale;
+    assert.notEqual(returned?.status, "succeeded", "the stale worker's result must not land");
+    const [row] = await sql<{ status: string; claimed_by: string; attempts: number; result: unknown }>(
+      "select status, claimed_by, attempts, result from graph_job where id = $1",
+      [job.id],
+    );
+    assert.equal(row?.status, "running", "the reclaiming worker still owns the row");
+    assert.equal(row?.claimed_by, "other-worker:reclaim");
+    assert.equal(row?.attempts, 2);
+    assert.equal(row?.result, null, "the dropped result was not written");
+
+    await sql("update graph_job set status = 'cancelled', finished_at = now(), updated_at = now() where id = $1", [job.id]);
+  });
+
+  it("the retry budget is JOB_MAX_ATTEMPTS: the last failure dead-letters", async (t) => {
+    const restore = patchPerformJob(store, () => {
+      throw new Error("boom");
+    });
+    t.after(restore);
+
+    const job = await store.enqueueJob({
+      kind: "lint_graph",
+      payload: { smoke: "dead-letter" },
+      priority: 0,
+      dedupeKey: `smoke:dead-letter:${stamp}`,
+    }, context);
+    assert.equal(typeof JOB_MAX_ATTEMPTS, "number");
+    for (let attempt = 1; attempt <= JOB_MAX_ATTEMPTS; attempt += 1) {
+      await ageJob(store, job.id);
+      const result = await store.runJob({ jobId: job.id }, context);
+      assert.equal(result?.attempts, attempt);
+      assert.equal(
+        result?.status as string,
+        attempt < JOB_MAX_ATTEMPTS ? "failed" : "dead",
+        `attempt ${attempt} of ${JOB_MAX_ATTEMPTS}`,
+      );
+    }
   });
 
   it("a scoped write enqueues an owner-scoped lint that other owners cannot list", async () => {

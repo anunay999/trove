@@ -35,6 +35,7 @@ import {
   isTextUnit,
   ownerScope,
   type OwnerScope,
+  JOB_MAX_ATTEMPTS,
   decodeEventCursor,
   encodeEventCursor,
   evidenceSupportScore,
@@ -92,9 +93,6 @@ const { Pool } = pg;
  */
 const NEIGHBORHOOD_DEFAULT_MAX_NODES = 100;
 
-/** Attempts a job gets across all causes — failures and lease reclaims alike. */
-const JOB_MAX_ATTEMPTS = 5;
-
 /** Every column mapJob reads; one list so a new column cannot be missed by one query. */
 const JOB_COLUMNS = `id, kind, status, priority, payload, result, error, dedupe_key, attempts, owner_id,
               created_at, updated_at, started_at, finished_at`;
@@ -102,6 +100,15 @@ const JOB_COLUMNS = `id, kind, status, priority, payload, result, error, dedupe_
 function jobLeaseSeconds(): number {
   const parsed = Number(process.env.TROVE_JOB_LEASE_SECONDS);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 900;
+}
+
+/**
+ * How often a running job renews its lease. A third of the lease keeps two
+ * missed beats inside the window; the clamp keeps a test-sized lease from
+ * hammering the pool and a huge one from waiting an hour between beats.
+ */
+function leaseHeartbeatMs(): number {
+  return Math.max(250, Math.min(60_000, Math.floor((jobLeaseSeconds() * 1000) / 3)));
 }
 
 // Junk text units (short fragments, horizontal rules, markdown table
@@ -1964,20 +1971,63 @@ export class PgGraphStore implements GraphStore {
 
   async runJob(input: RunJobInput = {}, context?: GraphOperationContext): Promise<GraphJob | null> {
     const claimed = await this.claimJob(input.jobId);
-    if (!claimed || claimed.status !== "running") return claimed;
+    if (!claimed) return null;
+    if (claimed.job.status !== "running" || !claimed.claimant) return claimed.job;
 
+    // The lease is only as good as its renewal. Nothing used to touch
+    // updated_at while a job ran, so a slow-but-healthy embedding drain (many
+    // provider round trips) looked exactly like a dead worker once it passed
+    // JOB_LEASE_SECONDS, got reclaimed, and ran twice. The heartbeat renews
+    // under this claim only; once another worker holds the row it stops.
+    const heartbeat = this.startLeaseHeartbeat(claimed.job.id, claimed.claimant);
+    let outcome: { status: "succeeded"; result: GraphJobResult } | { status: "failed"; error: string };
     try {
-      const result = await this.performJob(claimed);
-      return await this.finishJob(claimed.id, "succeeded", result, null, context);
+      outcome = { status: "succeeded", result: await this.performJob(claimed.job) };
     } catch (error) {
-      return await this.finishJob(
-        claimed.id,
-        "failed",
-        null,
-        error instanceof Error ? error.message : "Unknown job error",
-        context,
-      );
+      outcome = { status: "failed", error: error instanceof Error ? error.message : "Unknown job error" };
+    } finally {
+      // Stop before finishing, or a beat can land after the row is closed and
+      // report a lease we gave up on purpose.
+      heartbeat.stop();
     }
+    return outcome.status === "succeeded"
+      ? await this.finishJob(claimed.job, claimed.claimant, "succeeded", outcome.result, null, context)
+      : await this.finishJob(claimed.job, claimed.claimant, "failed", null, outcome.error, context);
+  }
+
+  private startLeaseHeartbeat(jobId: string, claimant: string): { stop(): void } {
+    let inFlight = false;
+    let stopped = false;
+    const timer = setInterval(() => {
+      if (inFlight) return;
+      inFlight = true;
+      this.pool.query(
+        `update graph_job
+            set updated_at = now()
+          where id = $1 and status = 'running' and claimed_by = $2`,
+        [jobId, claimant],
+      ).then((updated) => {
+        if (stopped) return;
+        if ((updated.rowCount ?? 0) === 0) {
+          // Reclaimed or retired under us. The work in flight cannot be
+          // cancelled, but finishJob's guard will drop its result; no point
+          // renewing a lease we no longer hold.
+          console.warn(`[jobs] lease for ${jobId} is no longer held by ${claimant}; the in-flight result will be dropped`);
+          clearInterval(timer);
+        }
+      }).catch((error: unknown) => {
+        console.warn(`[jobs] lease heartbeat for ${jobId} failed:`, error instanceof Error ? error.message : error);
+      }).finally(() => {
+        inFlight = false;
+      });
+    }, leaseHeartbeatMs());
+    timer.unref?.();
+    return {
+      stop: () => {
+        stopped = true;
+        clearInterval(timer);
+      },
+    };
   }
 
   async close(): Promise<void> {
@@ -2069,25 +2119,36 @@ export class PgGraphStore implements GraphStore {
       if ((existing.rowCount ?? 0) > 0) return { ...mapJob(existing.rows[0]), dedupeJoined: true };
     }
 
-    const jobId = randomUUID();
-    const result = await client.query(
-      `insert into graph_job (id, kind, priority, payload, dedupe_key, created_by, owner_id)
-       values ($1, $2, $3, $4::jsonb, $5, $6, $7)
-       on conflict do nothing
-       returning ${JOB_COLUMNS}`,
-      [
-        jobId,
-        input.kind,
-        input.priority,
-        JSON.stringify(input.payload),
-        input.dedupeKey ?? null,
-        actorUuid,
-        // Stamped like every other write: the row belongs to the context that
-        // enqueued it, and NULL (unscoped) marks operator/worker work.
-        ownerScope(context).ownerId,
-      ],
-    );
-    if (result.rowCount === 0 && input.dedupeKey) {
+    // Insert, or join the open row that beat us to the dedupe key. Two rounds:
+    // the open row we lose to can finish between our conflicting insert and
+    // the reselect, which frees the key again -- reading rows[0] off the
+    // conflicted insert in that gap was a TypeError with no job to show for
+    // it. If the key is still contended after a retry something is wrong with
+    // the queue, and that deserves a named error rather than a crash.
+    let inserted: pg.QueryResult | null = null;
+    for (let round = 0; round < 2 && inserted === null; round += 1) {
+      const attempt = await client.query(
+        `insert into graph_job (id, kind, priority, payload, dedupe_key, created_by, owner_id)
+         values ($1, $2, $3, $4::jsonb, $5, $6, $7)
+         on conflict do nothing
+         returning ${JOB_COLUMNS}`,
+        [
+          randomUUID(),
+          input.kind,
+          input.priority,
+          JSON.stringify(input.payload),
+          input.dedupeKey ?? null,
+          actorUuid,
+          // Stamped like every other write: the row belongs to the context that
+          // enqueued it, and NULL (unscoped) marks operator/worker work.
+          ownerScope(context).ownerId,
+        ],
+      );
+      if ((attempt.rowCount ?? 0) > 0) {
+        inserted = attempt;
+        break;
+      }
+      if (!input.dedupeKey) throw new Error(`enqueueJob: insert of ${input.kind} returned no row`);
       const existing = await client.query(
         `select ${JOB_COLUMNS}
          from graph_job
@@ -2100,7 +2161,12 @@ export class PgGraphStore implements GraphStore {
       );
       if ((existing.rowCount ?? 0) > 0) return { ...mapJob(existing.rows[0]), dedupeJoined: true };
     }
-    const job = mapJob(result.rows[0]);
+    if (inserted === null) {
+      throw new Error(
+        `enqueueJob: ${input.kind} with dedupe key ${input.dedupeKey} conflicted twice but no pending/running row holds that key`,
+      );
+    }
+    const job = mapJob(inserted.rows[0]);
     await this.recordEvent(
       client,
       "enqueue_job",
@@ -2114,7 +2180,13 @@ export class PgGraphStore implements GraphStore {
     return job;
   }
 
-  private async claimJob(jobId?: string): Promise<GraphJob | null> {
+  /**
+   * Claim the next runnable job (or one job by id). `claimant` is set only when
+   * this call moved the row to 'running': it is the value written to
+   * claimed_by, unique per claim, and the only token that may finish the row.
+   * A job returned without a claimant was merely looked up (not runnable now).
+   */
+  private async claimJob(jobId?: string): Promise<{ job: GraphJob; claimant: string | null } | null> {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
@@ -2177,9 +2249,12 @@ export class PgGraphStore implements GraphStore {
           [jobId],
         ) : { rows: [], rowCount: 0 };
         await client.query("commit");
-        return (existing.rowCount ?? 0) > 0 ? mapJob(existing.rows[0]) : null;
+        return (existing.rowCount ?? 0) > 0 ? { job: mapJob(existing.rows[0]), claimant: null } : null;
       }
 
+      // Unique per claim, not per worker: a worker that reclaims its own
+      // lease-expired row must not let the earlier attempt's finish through.
+      const claimant = `${process.env.TROVE_WORKER_ID ?? "inline-worker"}:${randomUUID()}`;
       const claimed = await client.query(
         `update graph_job
          set status = 'running',
@@ -2190,10 +2265,10 @@ export class PgGraphStore implements GraphStore {
              started_at = now()
          where id = $1
          returning ${JOB_COLUMNS}`,
-        [result.rows[0].id, process.env.TROVE_WORKER_ID ?? "inline-worker"],
+        [result.rows[0].id, claimant],
       );
       await client.query("commit");
-      return mapJob(claimed.rows[0]);
+      return { job: mapJob(claimed.rows[0]), claimant };
     } catch (error) {
       await client.query("rollback");
       throw error;
@@ -2435,7 +2510,8 @@ export class PgGraphStore implements GraphStore {
   }
 
   private async finishJob(
-    jobId: string,
+    claimed: GraphJob,
+    claimant: string,
     status: "succeeded" | "failed",
     result: Record<string, unknown> | null,
     error: string | null,
@@ -2445,10 +2521,15 @@ export class PgGraphStore implements GraphStore {
     try {
       await client.query("begin");
       const actorUuid = await this.actorUuidForContext(client, context);
+      // Only the claim that started this attempt may end it. Matching on id
+      // alone let a worker that had lost its lease overwrite the row another
+      // worker was running -- marking it finished under the wrong attempt,
+      // or failed with a stale error. Attempts is in the guard as well so an
+      // identical claimant string on a later attempt could never match.
       const updated = await client.query(
         `update graph_job
          set status = case
-               when $2 = 'failed' and attempts >= 5 then 'dead'
+               when $2 = 'failed' and attempts >= $5 then 'dead'
                else $2
              end,
              result = $3::jsonb,
@@ -2456,9 +2537,28 @@ export class PgGraphStore implements GraphStore {
              updated_at = now(),
              finished_at = now()
          where id = $1
+           and status = 'running'
+           and claimed_by = $6
+           and attempts = $7
          returning ${JOB_COLUMNS}`,
-        [jobId, status, result === null ? null : JSON.stringify(result), error],
+        [
+          claimed.id,
+          status,
+          result === null ? null : JSON.stringify(result),
+          error,
+          JOB_MAX_ATTEMPTS,
+          claimant,
+          claimed.attempts,
+        ],
       );
+      if ((updated.rowCount ?? 0) === 0) {
+        await client.query("rollback");
+        console.warn(
+          `[jobs] dropped ${status} result for ${claimed.kind} ${claimed.id}: claim ${claimant} (attempt ${claimed.attempts}) is no longer current`,
+        );
+        const current = await client.query(`select ${JOB_COLUMNS} from graph_job where id = $1`, [claimed.id]);
+        return (current.rowCount ?? 0) > 0 ? mapJob(current.rows[0]) : claimed;
+      }
       const job = mapJob(updated.rows[0]);
       await this.recordEvent(
         client,

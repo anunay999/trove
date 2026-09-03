@@ -91,7 +91,7 @@ import {
 } from "./graphCore.js";
 import { cosineSimilarity, createEmbeddingProviderFromEnv, type EmbeddingProvider } from "./embeddings.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
-import { EdgeValidityConflictError, ownerScope, UnknownEvidenceReferenceError } from "./graphCore.js";
+import { EdgeValidityConflictError, JOB_MAX_ATTEMPTS, ownerScope, UnknownEvidenceReferenceError } from "./graphCore.js";
 import { performReconcileNode, type ReconcileJudge } from "./reconcile.js";
 import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
@@ -1246,7 +1246,7 @@ export class InMemoryGraphStore implements GraphStore {
     // (attempts^2 x 10s since last update) has elapsed. Dead jobs never run.
     const claimable = (candidate: GraphJob): boolean => {
       if (candidate.status === "pending") return true;
-      if (candidate.status === "failed" && candidate.attempts < 5) {
+      if (candidate.status === "failed" && candidate.attempts < JOB_MAX_ATTEMPTS) {
         const backoffMs = Math.pow(candidate.attempts, 2) * 10_000;
         return Date.parse(candidate.updatedAt) + backoffMs <= Date.now();
       }
@@ -1288,7 +1288,7 @@ export class InMemoryGraphStore implements GraphStore {
       const failed: GraphJob = {
         ...running,
         // Out of retries: dead-letter, never reclaimed.
-        status: running.attempts >= 5 ? "dead" : "failed",
+        status: running.attempts >= JOB_MAX_ATTEMPTS ? "dead" : "failed",
         error: error instanceof Error ? error.message : "Unknown job error",
         updatedAt: finishedAt,
         finishedAt,

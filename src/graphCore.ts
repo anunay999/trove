@@ -211,6 +211,14 @@ export type GraphOperationContext = {
  */
 export type OwnerScope = { scoped: boolean; ownerId: string | null };
 
+/**
+ * Attempts a job gets across all causes -- failures and lease reclaims alike.
+ * One constant for both drivers and every query: the claim filter, the
+ * dead-letter threshold and the lease-exhaustion retirement must agree, or a
+ * job can sit in a state none of them matches.
+ */
+export const JOB_MAX_ATTEMPTS = 5;
+
 export function ownerScope(context?: GraphOperationContext): OwnerScope {
   // Scoping requires an explicit owner. No context, superuser, or a context
   // without an ownerId (internal/maintenance callers) all see the whole graph.
