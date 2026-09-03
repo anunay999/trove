@@ -58,7 +58,7 @@ import {
   resourceMetadataUrl,
 } from "./oauthMetadata.js";
 import { createGraphStore } from "./createStore.js";
-import { isSmokeEvent } from "./graphCore.js";
+import { EdgeValidityConflictError, isSmokeEvent } from "./graphCore.js";
 import { startJobWorker } from "./jobWorker.js";
 import { createTroveMcpServer } from "./mcpTools.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
@@ -357,7 +357,8 @@ app.post("/v1/invalidate-edge", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:link"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), invalidateEdgeInputSchema);
-  const edge = await store.invalidateEdge(input, operationContextFromAuth(auth));
+  const edge = await withEdgeValidityConflict(context, () => store.invalidateEdge(input, operationContextFromAuth(auth)));
+  if (edge instanceof Response) return edge;
   if (!edge) return context.json({ error: "Edge not found" }, 404);
   return context.json({ edge });
 });
@@ -366,10 +367,28 @@ app.post("/v1/link", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:link"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), linkInputSchema);
-  const edge = await store.link(input, operationContextFromAuth(auth));
+  const edge = await withEdgeValidityConflict(context, () => store.link(input, operationContextFromAuth(auth)));
+  if (edge instanceof Response) return edge;
   if (!edge) return context.json({ error: "Unable to resolve link endpoints" }, 404);
   return context.json({ edge }, 201);
 });
+
+// A write that would give one link two versions at the same world-time
+// instant, or end a version before it began, is the caller's conflict (409),
+// not a server failure. The body names the edge that owns the interval.
+async function withEdgeValidityConflict<T>(
+  context: HonoContext,
+  run: () => T | Promise<T>,
+): Promise<T | Response> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof EdgeValidityConflictError) {
+      return context.json({ error: error.message, conflictingEdgeId: error.conflictingEdgeId }, 409);
+    }
+    throw error;
+  }
+}
 
 app.post("/v1/ingest", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:ingest"]);

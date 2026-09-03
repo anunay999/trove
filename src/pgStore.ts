@@ -45,6 +45,7 @@ import {
   splitTextUnits,
   ServedUnitLog,
   FUZZY_QUOTE_CANDIDATE_FLOOR,
+  EdgeValidityConflictError,
   UnknownEvidenceReferenceError,
   WEAK_EVIDENCE_FLOOR,
   type GraphEvent,
@@ -934,7 +935,7 @@ export class PgGraphStore implements GraphStore {
     // stray edge could still have been written by another tenant (or planted),
     // and it must not surface here any more than in exportGraph.
     const edgeResult = await this.pool.query(
-      `select id, from_node_id, to_node_id, predicate, weight, created_at, valid_from, valid_until, expired_at, invalidated_by
+      `select id, from_node_id, to_node_id, predicate, weight, created_at, valid_from, valid_until, expired_at, invalidated_by, invalidation_reason
        from edge
        where deleted_at is null
          and ($5 or owner_id = $6)
@@ -974,14 +975,38 @@ export class PgGraphStore implements GraphStore {
         return null;
       }
 
-      const result = await client.query(
-        `insert into edge (id, from_node_id, to_node_id, predicate, weight, valid_from, created_by, owner_id)
-         values ($1, $2, $3, $4, $5, coalesce($6::timestamptz, now()), $7, $8)
-         on conflict (from_node_id, to_node_id, predicate) where deleted_at is null and expired_at is null
-         do update set weight = excluded.weight
-         returning id, from_node_id, to_node_id, predicate, weight, created_at, valid_from, valid_until, expired_at, invalidated_by`,
-        [randomUUID(), fromNodeId, toNodeId, input.predicate, input.weight, input.validFrom ?? null, actorUuid, scope.ownerId],
-      );
+      // World-time integrity. A triple may have one version per instant, and
+      // edge_valid_range_excl enforces it across expired versions too; this
+      // pre-check exists so the refusal can name the version that owns the
+      // interval instead of surfacing a bare constraint error. The active
+      // version, if any, is not a conflict: the upsert below turns the call
+      // into a weight update on it, and no new row is written.
+      const validFrom = input.validFrom ?? null;
+      const overlapping = await client.query(overlappingVersionSql, [fromNodeId, toNodeId, input.predicate, validFrom]);
+      if (overlapping.rowCount) {
+        throw overlapError(String(overlapping.rows[0].id), input.predicate, validFrom);
+      }
+
+      let result;
+      try {
+        result = await client.query(
+          `insert into edge (id, from_node_id, to_node_id, predicate, weight, valid_from, created_by, owner_id)
+           values ($1, $2, $3, $4, $5, coalesce($6::timestamptz, now()), $7, $8)
+           on conflict (from_node_id, to_node_id, predicate) where deleted_at is null and expired_at is null
+           do update set weight = excluded.weight
+           returning id, from_node_id, to_node_id, predicate, weight, created_at, valid_from, valid_until, expired_at, invalidated_by, invalidation_reason`,
+          [randomUUID(), fromNodeId, toNodeId, input.predicate, input.weight, validFrom, actorUuid, scope.ownerId],
+        );
+      } catch (error) {
+        // The pre-check lost a race to a concurrent writer of the same triple;
+        // the constraint is the arbiter. Name the committed winner if it is
+        // visible from a fresh connection (this one's transaction is aborted).
+        if (isExclusionViolation(error, "edge_valid_range_excl")) {
+          const winner = await this.pool.query(overlappingVersionSql, [fromNodeId, toNodeId, input.predicate, validFrom]);
+          throw overlapError(winner.rowCount ? String(winner.rows[0].id) : null, input.predicate, validFrom);
+        }
+        throw error;
+      }
       const edge = mapEdge(result.rows[0]);
       await this.recordEvent(
         client,
@@ -995,14 +1020,33 @@ export class PgGraphStore implements GraphStore {
       );
 
       if (input.supersedesEdgeId && input.supersedesEdgeId !== edge.id) {
-        // Owner-scoped like invalidateEdge: another tenant's edge is simply
-        // not there to expire, exactly as an unknown id is.
+        // The successor's validFrom becomes the old edge's validUntil, so it
+        // must not precede the old edge's validFrom or edge_valid_range_check
+        // would refuse the close. Compared in SQL against the same
+        // coalesce(validFrom, now()) the insert used, so the two agree to the
+        // microsecond. Owner-scoped like every other write by id.
+        const previous = await client.query(
+          `select id, valid_from <= coalesce($4::timestamptz, now()) as closes_after_start
+           from edge
+           where id = $1 and deleted_at is null and expired_at is null and ($2 or owner_id = $3)
+           for update`,
+          [input.supersedesEdgeId, !scope.scoped, scope.ownerId, validFrom],
+        );
+        if (previous.rowCount && previous.rows[0].closes_after_start !== true) {
+          throw new EdgeValidityConflictError(
+            `Cannot supersede edge ${input.supersedesEdgeId}: the new edge's validFrom (${edge.validFrom}) precedes the superseded edge's validFrom.`,
+            input.supersedesEdgeId,
+          );
+        }
         const expired = await client.query(
           `update edge
-           set expired_at = now(), valid_until = $2::timestamptz, invalidated_by = $3
+           set expired_at = now(),
+               valid_until = coalesce($2::timestamptz, now()),
+               invalidated_by = $3,
+               invalidation_reason = 'superseded'
            where id = $1 and deleted_at is null and expired_at is null and ($4 or owner_id = $5)
            returning id`,
-          [input.supersedesEdgeId, edge.validFrom, edge.id, !scope.scoped, scope.ownerId],
+          [input.supersedesEdgeId, validFrom, edge.id, !scope.scoped, scope.ownerId],
         );
         if (expired.rowCount && expired.rowCount > 0) {
           await this.recordEvent(
@@ -1036,7 +1080,7 @@ export class PgGraphStore implements GraphStore {
       const actorUuid = await this.actorUuidForContext(client, context);
       const eScope = ownerScope(context);
       const existing = await client.query(
-        `select id, from_node_id, to_node_id, predicate, weight, created_at, valid_from, valid_until, expired_at, invalidated_by
+        `select id, from_node_id, to_node_id, predicate, weight, created_at, valid_from, valid_until, expired_at, invalidated_by, invalidation_reason
          from edge
          where id = $1 and deleted_at is null and ($2 or owner_id = $3)
          for update`,
@@ -1052,13 +1096,25 @@ export class PgGraphStore implements GraphStore {
         return current;
       }
 
+      // Validity cannot end before it began (edge_valid_range_check). A caller
+      // who says otherwise is refused, never clamped. With no validUntil the
+      // edge closes now -- or, for a future-dated validFrom, at validFrom,
+      // which records a belief that never held as an empty interval.
       const updated = await client.query(
         `update edge
-         set expired_at = now(), valid_until = coalesce($2::timestamptz, now())
-         where id = $1
-         returning id, from_node_id, to_node_id, predicate, weight, created_at, valid_from, valid_until, expired_at, invalidated_by`,
+         set expired_at = now(),
+             valid_until = coalesce($2::timestamptz, greatest(now(), valid_from)),
+             invalidation_reason = 'invalidated'
+         where id = $1 and ($2::timestamptz is null or $2::timestamptz >= valid_from)
+         returning id, from_node_id, to_node_id, predicate, weight, created_at, valid_from, valid_until, expired_at, invalidated_by, invalidation_reason`,
         [input.edgeId, input.validUntil ?? null],
       );
+      if (updated.rowCount === 0) {
+        throw new EdgeValidityConflictError(
+          `Cannot invalidate edge ${input.edgeId}: validUntil (${input.validUntil}) precedes its validFrom (${current.validFrom}).`,
+          input.edgeId,
+        );
+      }
       const edge = mapEdge(updated.rows[0]);
       await this.recordEvent(
         client,
@@ -1103,16 +1159,20 @@ export class PgGraphStore implements GraphStore {
           continue;
         }
 
-        // Expire every incident active edge. invalidated_by is a uuid FK to
-        // edge, so the tombstone reason is recorded in edge metadata and the
-        // graph event instead.
+        // Expire every incident active edge the caller owns, closing validity
+        // as well as belief so edge_valid_range_excl frees the triple. A
+        // future-dated validFrom closes at validFrom: an empty interval, the
+        // record of a belief that never held.
         const edges = await client.query(
           `update edge
-           set expired_at = now(), metadata = metadata || '{"invalidatedBy":"tombstone"}'::jsonb
+           set expired_at = now(),
+               valid_until = greatest(now(), valid_from),
+               invalidation_reason = 'tombstoned'
            where deleted_at is null and expired_at is null
              and (from_node_id = $1 or to_node_id = $1)
+             and ($2 or owner_id = $3)
            returning id`,
-          [id],
+          [id, !scope.scoped, scope.ownerId],
         );
 
         // A tombstoned node's revisions must never surface through semantic
@@ -1724,7 +1784,7 @@ export class PgGraphStore implements GraphStore {
       p,
     );
     const edgeResult = await this.pool.query(
-      `select e.id, e.from_node_id, e.to_node_id, e.predicate, e.weight, e.created_at, e.valid_from, e.valid_until, e.expired_at, e.invalidated_by
+      `select e.id, e.from_node_id, e.to_node_id, e.predicate, e.weight, e.created_at, e.valid_from, e.valid_until, e.expired_at, e.invalidated_by, e.invalidation_reason
        from edge e
        join node from_node on from_node.id = e.from_node_id and from_node.deleted_at is null
        join node to_node on to_node.id = e.to_node_id and to_node.deleted_at is null
@@ -2667,7 +2727,7 @@ export class PgGraphStore implements GraphStore {
     );
     const nodeIds = new Set(nodeResult.rows.map((row) => String(row.id)));
     const edgeResult = view.includedEdgeIds.length === 0 ? { rows: [] } : await this.pool.query(
-      `select e.id, e.from_node_id, e.to_node_id, e.predicate, e.weight, e.created_at, e.valid_from, e.valid_until, e.expired_at, e.invalidated_by
+      `select e.id, e.from_node_id, e.to_node_id, e.predicate, e.weight, e.created_at, e.valid_from, e.valid_until, e.expired_at, e.invalidated_by, e.invalidation_reason
        from edge e
        where e.deleted_at is null and e.expired_at is null
          and e.id = any($1::uuid[])
@@ -2810,6 +2870,9 @@ function mapEdge(row: Record<string, unknown>): GraphEdge {
     invalidatedBy: row.invalidated_by === null || row.invalidated_by === undefined
       ? null
       : String(row.invalidated_by),
+    invalidationReason: row.invalidation_reason === null || row.invalidation_reason === undefined
+      ? null
+      : (row.invalidation_reason as GraphEdge["invalidationReason"]),
   };
 }
 
@@ -2922,6 +2985,35 @@ function maxSemanticDistanceFor(input: SearchInput): number {
   const fromEnv = Number(process.env.TROVE_SEMANTIC_MAX_DISTANCE);
   if (process.env.TROVE_SEMANTIC_MAX_DISTANCE && Number.isFinite(fromEnv)) return fromEnv;
   return 0.55;
+}
+
+/**
+ * Closed versions of a triple whose world-time interval still covers
+ * [validFrom, infinity). The active version is deliberately excluded: link()
+ * upserts onto it. Parameters: from, to, predicate, validFrom (null = now()).
+ */
+const overlappingVersionSql = `
+  select id from edge
+  where from_node_id = $1 and to_node_id = $2 and predicate = $3
+    and deleted_at is null and expired_at is not null
+    and tstzrange(valid_from, valid_until, '[)') && tstzrange(coalesce($4::timestamptz, now()), null, '[)')
+  order by valid_until desc nulls first
+  limit 1`;
+
+function overlapError(conflictingEdgeId: string | null, predicate: string, validFrom: string | null): EdgeValidityConflictError {
+  const start = validFrom ?? "now";
+  return new EdgeValidityConflictError(
+    conflictingEdgeId
+      ? `Cannot link "${predicate}" from ${start}: edge ${conflictingEdgeId} is already valid over that interval. Start the new version at or after its validUntil.`
+      : `Cannot link "${predicate}" from ${start}: another version of this link is valid over that interval.`,
+    conflictingEdgeId,
+  );
+}
+
+function isExclusionViolation(error: unknown, constraint: string): boolean {
+  return typeof error === "object" && error !== null
+    && (error as { code?: string }).code === "23P01"
+    && (error as { constraint?: string }).constraint === constraint;
 }
 
 function isSlugUniqueViolation(error: unknown): boolean {

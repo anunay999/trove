@@ -71,6 +71,14 @@ export const graphNodeSchema = z.object({
   lastAccessedAt: z.string().nullable(),
 });
 
+// Why an edge stopped being believed. Exactly one of these is recorded
+// whenever expiredAt is set, and none while the edge is active:
+// - superseded: replaced through link({ supersedesEdgeId }); invalidatedBy
+//   names the successor.
+// - invalidated: retired directly via invalidateEdge / forget.
+// - tombstoned: an endpoint node was tombstoned.
+export const edgeInvalidationReasonSchema = z.enum(["superseded", "invalidated", "tombstoned"]);
+
 export const graphEdgeSchema = z.object({
   id: z.string().uuid(),
   fromNodeId: z.string().uuid(),
@@ -78,10 +86,13 @@ export const graphEdgeSchema = z.object({
   predicate: z.string().min(1),
   weight: z.number(),
   recordedAt: z.string(),
+  // World time. The stores never write null (valid_from is not null since
+  // migration 014); the type stays nullable for clients holding older exports.
   validFrom: z.string().nullable(),
   validUntil: z.string().nullable(),
   expiredAt: z.string().nullable(),
   invalidatedBy: z.string().uuid().nullable(),
+  invalidationReason: edgeInvalidationReasonSchema.nullable(),
 });
 
 export const graphAnnotationSchema = z.object({
@@ -396,6 +407,7 @@ export type GraphSource = z.infer<typeof graphSourceSchema>;
 export type TextUnit = z.infer<typeof textUnitSchema>;
 export type GraphNode = z.infer<typeof graphNodeSchema>;
 export type GraphEdge = z.infer<typeof graphEdgeSchema>;
+export type EdgeInvalidationReason = z.infer<typeof edgeInvalidationReasonSchema>;
 export type GraphAnnotation = z.infer<typeof graphAnnotationSchema>;
 export type SearchInput = z.infer<typeof searchInputSchema>;
 export type ReadInput = z.infer<typeof readInputSchema>;

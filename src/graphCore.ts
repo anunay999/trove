@@ -49,6 +49,26 @@ export class UnknownEvidenceReferenceError extends Error {
 }
 
 /**
+ * Thrown by both store drivers when a write would give one (from, to,
+ * predicate) triple two versions that are true at the same world-time
+ * instant, or would end a version before it began. Postgres enforces this
+ * with the edge_valid_range_excl exclusion constraint and the
+ * edge_valid_range_check check; the drivers check first so the refusal can
+ * name the edge that owns the overlapping interval. Callers get a refusal,
+ * never a silently clamped validFrom.
+ */
+export class EdgeValidityConflictError extends Error {
+  /** Null only when a concurrent writer won the race and its row is not yet visible. */
+  readonly conflictingEdgeId: string | null;
+
+  constructor(message: string, conflictingEdgeId: string | null) {
+    super(message);
+    this.name = "EdgeValidityConflictError";
+    this.conflictingEdgeId = conflictingEdgeId;
+  }
+}
+
+/**
  * Provenance quality (backlog #17): does the cited span actually support the
  * atom? Scored as containment — the share of the node's content terms that
  * appear in its best-matching cited unit. An atom is a distillation of its

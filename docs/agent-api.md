@@ -74,7 +74,9 @@ Visibility is tiered by credential scope: **core** tools are shown to every cred
 `connect`
 
 - For adding explicit edges between existing nodes.
-- Edges are bitemporal: `created_at` is transaction time, `valid_from`/`valid_until` are world time. Pass `supersedesEdgeId` to atomically invalidate the belief the new edge replaces — the old edge gets `expired_at`, `valid_until`, and `invalidated_by`, never a delete.
+- Edges are bitemporal: `created_at` is transaction time, `valid_from`/`valid_until` are world time. Pass `supersedesEdgeId` to atomically invalidate the belief the new edge replaces — the old edge gets `expired_at`, `valid_until` (= the new edge's `validFrom`), and `invalidated_by`, never a delete.
+- One version of a `(from, to, predicate)` link per world-time instant, expired versions included. `validFrom` defaults to now, which never conflicts; a `validFrom` that falls inside a closed version's `[validFrom, validUntil)`, or a superseding `validFrom` earlier than the superseded edge's own `validFrom`, is refused with HTTP 409 (`{ error, conflictingEdgeId }`; an MCP tool error naming the edge) rather than clamped. Start the new version at or after the old one's `validUntil`.
+- Every expired edge carries `invalidationReason`: `superseded` (via `supersedesEdgeId`), `invalidated` (via `forget`/`invalidate-edge`), or `tombstoned` (an endpoint node was tombstoned). Active edges carry `null`.
 
 `forget`
 

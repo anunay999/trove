@@ -91,7 +91,7 @@ import {
 } from "./graphCore.js";
 import { cosineSimilarity, createEmbeddingProviderFromEnv, type EmbeddingProvider } from "./embeddings.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
-import { ownerScope, UnknownEvidenceReferenceError } from "./graphCore.js";
+import { EdgeValidityConflictError, ownerScope, UnknownEvidenceReferenceError } from "./graphCore.js";
 import { performReconcileNode, type ReconcileJudge } from "./reconcile.js";
 import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
@@ -576,10 +576,12 @@ export class InMemoryGraphStore implements GraphStore {
       if (!this.nodes.has(id) || this.deletedNodeIds.has(id)) continue;
       const now = new Date().toISOString();
       this.deletedNodeIds.add(id);
+      // Close validity as well as belief, so the triple is free for a
+      // successor; the reason is its own field, never metadata.
       for (const edge of this.edges.values()) {
         if (edge.expiredAt !== null) continue;
         if (edge.fromNodeId !== id && edge.toNodeId !== id) continue;
-        this.edges.set(edge.id, { ...edge, expiredAt: now });
+        this.edges.set(edge.id, { ...edge, expiredAt: now, validUntil: closeAt(edge, now), invalidationReason: "tombstoned" });
       }
       this.recordEvent("tombstone", id, context, now);
       this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
@@ -657,12 +659,11 @@ export class InMemoryGraphStore implements GraphStore {
     if (!fromNodeId || !toNodeId) return null;
 
     const now = new Date().toISOString();
-    const existing = [...this.edges.values()].find((edge) =>
-      edge.expiredAt === null &&
+    const sameTriple = (edge: GraphEdge) =>
       edge.fromNodeId === fromNodeId &&
       edge.toNodeId === toNodeId &&
-      edge.predicate === input.predicate
-    );
+      edge.predicate === input.predicate;
+    const existing = [...this.edges.values()].find((edge) => edge.expiredAt === null && sameTriple(edge));
 
     const edge: GraphEdge = existing ?? {
       id: randomUUID(),
@@ -671,22 +672,53 @@ export class InMemoryGraphStore implements GraphStore {
       predicate: input.predicate,
       weight: input.weight,
       recordedAt: now,
-      validFrom: input.validFrom ?? now,
+      validFrom: input.validFrom ? new Date(input.validFrom).toISOString() : now,
       validUntil: null,
       expiredAt: null,
       invalidatedBy: null,
+      invalidationReason: null,
     };
+
+    // Mirrors edge_valid_range_excl: one version of a triple per world-time
+    // instant, expired versions included. The active version is not a
+    // conflict -- the call becomes a weight update on it, as in Postgres.
+    if (!existing) {
+      const overlapping = [...this.edges.values()]
+        .filter((candidate) => candidate.expiredAt !== null && sameTriple(candidate) && intervalCovers(candidate, edge.validFrom ?? now))
+        .sort((left, right) => (right.validUntil ?? "\uffff").localeCompare(left.validUntil ?? "\uffff"))[0];
+      if (overlapping) {
+        throw new EdgeValidityConflictError(
+          `Cannot link "${input.predicate}" from ${edge.validFrom}: edge ${overlapping.id} is already valid over that interval. Start the new version at or after its validUntil.`,
+          overlapping.id,
+        );
+      }
+    }
+
+    // Mirrors edge_valid_range_check on the superseded edge: its validUntil
+    // becomes the successor's validFrom, which therefore cannot precede its
+    // own validFrom. Checked before anything is written.
+    const previous = input.supersedesEdgeId && input.supersedesEdgeId !== edge.id
+      ? this.edges.get(input.supersedesEdgeId)
+      : undefined;
+    if (previous && previous.expiredAt === null && previous.validFrom !== null && edge.validFrom !== null && edge.validFrom < previous.validFrom) {
+      throw new EdgeValidityConflictError(
+        `Cannot supersede edge ${previous.id}: the new edge's validFrom (${edge.validFrom}) precedes the superseded edge's validFrom.`,
+        previous.id,
+      );
+    }
+
     if (!existing) {
       this.edges.set(edge.id, edge);
       this.recordEvent("link", edge.id, context, now);
       this.enqueueMaintenanceJobs(context, ["lint_graph"]);
     }
 
-    if (input.supersedesEdgeId && input.supersedesEdgeId !== edge.id) {
-      this.expireEdge(input.supersedesEdgeId, {
+    if (previous) {
+      this.expireEdge(previous.id, {
         expiredAt: now,
         validUntil: edge.validFrom,
         invalidatedBy: edge.id,
+        invalidationReason: "superseded",
       }, context);
     }
     return edge;
@@ -697,10 +729,18 @@ export class InMemoryGraphStore implements GraphStore {
     if (!edge) return null;
     if (edge.expiredAt !== null) return edge;
     const now = new Date().toISOString();
+    const validUntil = input.validUntil ? new Date(input.validUntil).toISOString() : null;
+    if (validUntil !== null && edge.validFrom !== null && validUntil < edge.validFrom) {
+      throw new EdgeValidityConflictError(
+        `Cannot invalidate edge ${edge.id}: validUntil (${validUntil}) precedes its validFrom (${edge.validFrom}).`,
+        edge.id,
+      );
+    }
     return this.expireEdge(edge.id, {
       expiredAt: now,
-      validUntil: input.validUntil ?? now,
+      validUntil: validUntil ?? closeAt(edge, now),
       invalidatedBy: null,
+      invalidationReason: "invalidated",
     }, context);
   }
 
@@ -710,7 +750,12 @@ export class InMemoryGraphStore implements GraphStore {
 
   private expireEdge(
     edgeId: string,
-    patch: { expiredAt: string; validUntil: string | null; invalidatedBy: string | null },
+    patch: {
+      expiredAt: string;
+      validUntil: string | null;
+      invalidatedBy: string | null;
+      invalidationReason: NonNullable<GraphEdge["invalidationReason"]>;
+    },
     context?: GraphOperationContext,
   ): GraphEdge | null {
     const edge = this.edges.get(edgeId);
@@ -720,6 +765,7 @@ export class InMemoryGraphStore implements GraphStore {
       expiredAt: patch.expiredAt,
       validUntil: patch.validUntil,
       invalidatedBy: patch.invalidatedBy,
+      invalidationReason: patch.invalidationReason,
     };
     this.edges.set(expired.id, expired);
     this.recordEvent("invalidate_edge", expired.id, context, patch.expiredAt);
@@ -1461,6 +1507,21 @@ function edgeVisible(edge: GraphEdge, asOf: string | undefined, includeExpired: 
     return edge.recordedAt <= asOf && (edge.expiredAt === null || edge.expiredAt > asOf);
   }
   return edge.expiredAt === null;
+}
+
+/**
+ * Does the edge's non-empty [validFrom, validUntil) still cover [t, infinity)?
+ * Mirrors `tstzrange(valid_from, valid_until, '[)') && tstzrange(t, null, '[)')`.
+ */
+function intervalCovers(edge: GraphEdge, t: string): boolean {
+  if (edge.validFrom === null) return false;
+  if (edge.validUntil === null) return true;
+  return edge.validUntil > edge.validFrom && edge.validUntil > t;
+}
+
+/** Where a closing edge's validity ends by default: now, or validFrom when that is later (an empty interval). */
+function closeAt(edge: GraphEdge, now: string): string {
+  return edge.validFrom !== null && edge.validFrom > now ? edge.validFrom : now;
 }
 
 /** Valid-time edge filter, mirroring `valid_from <= t and (valid_until is null or valid_until > t)`. */

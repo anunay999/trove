@@ -5,8 +5,11 @@ import pg from "pg";
 import { createGraphStore } from "../src/createStore.js";
 import { UserStore } from "../src/users.js";
 import { UnknownEvidenceReferenceError, type GraphStore } from "../src/graphCore.js";
-import { closeStore } from "./helpers.js";
+import { closeStore, isolateDatabase } from "./helpers.js";
 
+// Own database: this suite writes nodes, edges, and tombstones, and the shared
+// base DB is where the drain-then-count event-stats suite reads.
+await isolateDatabase("isolation");
 const databaseUrl = process.env.DATABASE_URL;
 
 // Per-user isolation is a property of the Postgres store (multi-user needs the
@@ -268,6 +271,66 @@ describe("per-user isolation", { skip: databaseUrl ? false : "requires a Postgre
     assert.ok(!aliceRecall.citations.some((c) => c.sourceId === bobSource.source.id), "Bob's source cited in Alice's recall");
     assert.ok(!aliceRecall.context.includes("INJECTED"), "Bob's text reached Alice's recall context");
     assert.ok(!aliceRecall.edges.some((e) => e.id === plantedEdgeId), "Bob's edge in Alice's recall");
+  });
+
+  it("does not let Bob's tombstone expire Alice's edges", async () => {
+    const bobTombstone = await store.tombstoneNodes([aliceNode.id], B);
+    assert.deepEqual(bobTombstone.tombstoned, [], "Bob was able to tombstone Alice's node");
+    const aliceHood = await store.neighborhood({ nodeId: aliceNode.id, depth: 1 }, A);
+    const edge = aliceHood.edges.find((e) => e.id === aliceEdge.id);
+    assert.ok(edge && edge.expiredAt === null, "Bob's tombstone expired Alice's edge");
+  });
+
+  it("scopes the tombstone's edge expiry to the tombstoning owner", async () => {
+    // A cross-owner edge can only be manufactured below the store: Bob's node
+    // pointing at Alice's, owned by Bob. Alice retiring her node must close
+    // her own incident edge and leave Bob's row alone.
+    const { default: pg } = await import("pg");
+    const client = new pg.Client({ connectionString: databaseUrl });
+    await client.connect();
+    try {
+      const doomed = await store.capture({
+        title: `Alice doomed ${MARK}`,
+        type: "claim",
+        summary: `An Alice node about to be tombstoned ${MARK}.`,
+        evidence: [],
+        links: [],
+      }, A);
+      const own = await store.link({ fromNodeId: aliceNode.id, toNodeId: doomed.id, predicate: "mentions", weight: 1 }, A);
+      assert.ok(own, "Alice's link should create an edge");
+      const bobNode = await store.capture({
+        title: `Bob cross-owner ${MARK}`,
+        type: "claim",
+        summary: `Bob's node that points at Alice's ${MARK}.`,
+        evidence: [],
+        links: [],
+      }, B);
+      const inserted = await client.query(
+        `insert into edge (from_node_id, to_node_id, predicate, owner_id)
+         values ($1, $2, 'mentions', $3) returning id`,
+        [bobNode.id, doomed.id, B.ownerId],
+      );
+      const bobEdgeId = String(inserted.rows[0].id);
+
+      const aliceTombstone = await store.tombstoneNodes([doomed.id], A);
+      assert.deepEqual(aliceTombstone.tombstoned, [doomed.id], "Alice could not tombstone her own node");
+
+      const ownRow = (await client.query(
+        "select expired_at, valid_until, invalidation_reason from edge where id = $1",
+        [own.id],
+      )).rows[0];
+      assert.ok(ownRow.expired_at, "Alice's tombstone must expire her own incident edge");
+      assert.ok(ownRow.valid_until, "Alice's tombstone must close her edge's validity");
+      assert.equal(ownRow.invalidation_reason, "tombstoned");
+      const foreignRow = (await client.query(
+        "select expired_at, invalidation_reason from edge where id = $1",
+        [bobEdgeId],
+      )).rows[0];
+      assert.equal(foreignRow.expired_at, null, "Alice's tombstone expired Bob's edge");
+      assert.equal(foreignRow.invalidation_reason, null);
+    } finally {
+      await client.end();
+    }
   });
 
   it("still lets Alice see her own data", async () => {

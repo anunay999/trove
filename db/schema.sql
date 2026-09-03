@@ -22,6 +22,7 @@
 create extension if not exists pgcrypto;
 create extension if not exists vector;
 create extension if not exists pg_trgm;
+create extension if not exists btree_gist;
 
 create type node_type as enum (
   'entity',
@@ -133,12 +134,29 @@ create table edge (
   created_by uuid references actor(id),
   -- Bitemporal belief tracking: created_at is transaction time, valid_from/valid_until
   -- are world time, expired_at marks when the system stopped believing the edge.
-  valid_from timestamptz,
+  valid_from timestamptz not null default now(),
   valid_until timestamptz,
   expired_at timestamptz,
   invalidated_by uuid references edge(id),
+  -- Why the edge stopped being believed; set iff expired_at is set (014).
+  invalidation_reason text,
   created_at timestamptz not null default now(),
-  deleted_at timestamptz
+  deleted_at timestamptz,
+  constraint edge_valid_range_check
+    check (valid_until is null or valid_until >= valid_from),
+  constraint edge_invalidation_reason_check
+    check (
+      (expired_at is null and invalidation_reason is null)
+      or (expired_at is not null and invalidation_reason in ('superseded', 'invalidated', 'tombstoned'))
+    ),
+  -- One version of a triple per world-time instant, expired versions included.
+  constraint edge_valid_range_excl
+    exclude using gist (
+      from_node_id with =,
+      to_node_id with =,
+      predicate with =,
+      tstzrange(valid_from, valid_until, '[)') with &&
+    ) where (deleted_at is null)
 );
 
 create unique index edge_active_unique_idx
