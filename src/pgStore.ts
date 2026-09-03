@@ -2768,6 +2768,33 @@ export class PgGraphStore implements GraphStore {
             and updated_at < now() - make_interval(secs => $2::numeric)`,
         [JOB_MAX_ATTEMPTS, jobLeaseSeconds()],
       );
+      // Retire failed rows that a live row of the same kind and dedupe key
+      // already covers. The retry branch below would otherwise flip such a row
+      // to 'running', and graph_job_open_dedupe_idx covers pending AND running,
+      // so the claim raises a unique violation, the transaction rolls back, and
+      // the error escapes the worker tick BEFORE anything is drained. That is
+      // not hypothetical: production wedged exactly this way from 2026-09-02,
+      // logging "duplicate key value violates unique constraint
+      // graph_job_open_dedupe_idx" every 30 seconds with 55 jobs pending and
+      // none running, after two jobs failed on a statement timeout during the
+      // disk-full outage. The retry is redundant anyway — the pending row does
+      // the same work — so retiring it loses nothing.
+      await client.query(
+        `update graph_job f
+            set status = 'dead',
+                finished_at = now(),
+                updated_at = now(),
+                error = coalesce(nullif(f.error, ''), 'Superseded before retry.')
+                        || ' | Retired: a live job of the same kind and dedupe key already covers this work.'
+          where f.status = 'failed'
+            and f.dedupe_key is not null
+            and exists (
+              select 1 from graph_job live
+               where live.kind = f.kind
+                 and live.dedupe_key = f.dedupe_key
+                 and live.status in ('pending', 'running')
+            )`,
+      );
       const result = await client.query(
         `select id
          from graph_job
@@ -2778,6 +2805,17 @@ export class PgGraphStore implements GraphStore {
                status = 'failed'
                and attempts < $3
                and updated_at < now() - make_interval(secs => power(attempts, 2) * 10)
+               -- Belt and braces against the wedge the retirement above clears:
+               -- never promote a failed row into a dedupe key a live row holds.
+               and (
+                 graph_job.dedupe_key is null
+                 or not exists (
+                   select 1 from graph_job live
+                    where live.kind = graph_job.kind
+                      and live.dedupe_key = graph_job.dedupe_key
+                      and live.status in ('pending', 'running')
+                 )
+               )
              )
              or (
                -- Lease expiry. A worker that dies mid-job -- or hangs on a call

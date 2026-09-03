@@ -100,6 +100,41 @@ describe("jobs", () => {
     assert.equal(finished?.attempts, 1, "the original claim finished its own attempt");
   });
 
+  it("a failed job never claims a dedupe key a live job holds", { skip: hasPostgres() ? false : "postgres only" }, async () => {
+    // Production wedge, 2026-09-02: two jobs failed on a statement timeout
+    // during the disk-full outage, a fresh pending job of each kind was
+    // enqueued behind them, and every claim then tried to retry the failed row
+    // into 'running' -- which graph_job_open_dedupe_idx already held for the
+    // pending one. The unique violation rolled back the claim and escaped the
+    // worker tick before anything drained, so 55 jobs sat pending for a day
+    // while the log repeated the same duplicate-key error every 30 seconds.
+    const dedupeKey = `maintenance:lint_graph:wedge-${stamp}`;
+    const failed = await store.enqueueJob({ kind: "lint_graph", payload: { reason: "wedge" }, priority: 60, dedupeKey }, context);
+    await sql(
+      `update graph_job set status = 'failed', attempts = 2, error = 'canceling statement due to statement timeout',
+              updated_at = now() - interval '1 hour' where id = $1`,
+      [failed.id],
+    );
+    // With the key free, a second job of the same kind enqueues behind it.
+    const pending = await store.enqueueJob({ kind: "lint_graph", payload: { reason: "wedge" }, priority: 60, dedupeKey }, context);
+    assert.notEqual(pending.id, failed.id, "the failed row must not absorb the new enqueue");
+
+    // The claim must succeed rather than raise 23505, and must run the live
+    // job, not the shadowed retry.
+    const restore = patchPerformJob(store, async () => ({ ownerId: null, lint: { nodes: 0, edges: 0, findings: [], errors: 0, warnings: 0 } }));
+    try {
+      const ran = await store.runJob({ jobId: pending.id }, context);
+      assert.equal(ran?.id, pending.id);
+      assert.equal(ran?.status, "succeeded");
+    } finally {
+      restore();
+    }
+    const [retired] = await sql<{ status: string; error: string }>("select status, error from graph_job where id = $1", [failed.id]);
+    assert.equal(retired?.status, "dead", "the shadowed failed row must be retired, not left to wedge the queue");
+    assert.match(String(retired?.error), /already covers this work/);
+    assert.match(String(retired?.error), /statement timeout/, "the original failure must survive in the audit trail");
+  });
+
   it("a stale claimant cannot finish a job another worker has reclaimed", { skip: hasPostgres() ? false : "postgres only" }, async (t) => {
     const restore = patchPerformJob(store, async () => {
       await sleep(600);
