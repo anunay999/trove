@@ -14,6 +14,7 @@ export default defineConfig({
     proxy: {
       "/v1": "http://localhost:8787",
       "/health": "http://localhost:8787",
+      "/skills": "http://localhost:8787",
     },
   },
 });

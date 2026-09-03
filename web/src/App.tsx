@@ -315,7 +315,7 @@ export default function App() {
         </main>
       ) : activeTab === "agents" ? (
         <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">
-          <Agents stats={stats} />
+          <Agents stats={stats} onOpenKeys={tabs.includes("keys") ? () => setTab("keys") : undefined} />
         </main>
       ) : activeTab === "keys" ? (
         <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">
