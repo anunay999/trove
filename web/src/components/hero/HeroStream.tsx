@@ -51,11 +51,11 @@ export function HeroStream({ onJoin, onLogin, onConnectKey }: HeroStreamProps) {
             className="flex items-center gap-2.5 font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground"
           >
             <span className="live-dot size-1.5 rounded-full bg-[var(--signal)]" />
-            Memory graph for agents
+            Memory infrastructure for agents
           </motion.p>
 
           <div className="mt-7">
-            <StaggeredHeadline lines={["Your agent forgets", "everything tonight.", "Trove doesn't."]} accent="forgets" />
+            <StaggeredHeadline lines={["Your agent remembers.", "Its sources", "come with it."]} accent="remembers" />
           </div>
 
           <motion.p
@@ -64,8 +64,8 @@ export function HeroStream({ onJoin, onLogin, onConnectKey }: HeroStreamProps) {
             transition={{ duration: 0.7, delay: 0.55 }}
             className="mt-7 max-w-[27rem] text-base leading-relaxed text-muted-foreground"
           >
-            A hosted evidence graph for agent memory. Your agents write what they learn over MCP
-            and recall it in later sessions — every fact traced to the source that justifies it.
+            Trove is an open-source, self-hostable memory layer for persistent AI agents — built to
+            preserve context, connect the dots, and make every remembered fact inspectable.
           </motion.p>
 
           <motion.div
@@ -92,7 +92,7 @@ export function HeroStream({ onJoin, onLogin, onConnectKey }: HeroStreamProps) {
               </button>
             </div>
             <p className="mt-6 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-              Open source · Self-hostable · Works with any MCP client
+              Source-linked · Self-hostable · History-aware
             </p>
           </motion.div>
         </div>
