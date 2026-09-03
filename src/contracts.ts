@@ -194,6 +194,22 @@ export const recallInputSchema = z.object({
   maxSemanticDistance: z.number().min(0).max(2).optional(),
 });
 
+/**
+ * A graph-chat turn (src/graphChat.ts): one question, answered from one recall
+ * whose traversal is streamed as it happens.
+ *
+ * Deliberately NOT recallInputSchema. The defaults differ because the audience
+ * does: this pack is read by a cheap model and shown beside the graph, so 4k
+ * tokens is the right size where an agent's recall wants 8k, and the ceiling is
+ * half recall's so a browser cannot ask the graph for a 32k pack. The question
+ * gets an explicit length cap for the same reason — it reaches an LLM prompt.
+ */
+export const graphChatInputSchema = z.object({
+  query: z.string().min(1).max(2000),
+  tokenBudget: z.number().int().min(100).max(16000).default(4000),
+  depth: z.number().int().min(0).max(2).default(1),
+});
+
 export const ingestInputSchema = z.object({
   kind: sourceKindSchema,
   title: z.string().min(1),
@@ -417,6 +433,7 @@ export type InvalidateEdgeInput = z.infer<typeof invalidateEdgeInputSchema>;
 export type ReadSourceInput = z.infer<typeof readSourceInputSchema>;
 export type ReadDocumentInput = z.infer<typeof readDocumentInputSchema>;
 export type RecallInput = z.input<typeof recallInputSchema>;
+export type GraphChatInput = z.input<typeof graphChatInputSchema>;
 export type IngestInput = z.infer<typeof ingestInputSchema>;
 export type CaptureInput = z.infer<typeof captureInputSchema>;
 export type AnnotateInput = z.infer<typeof annotateInputSchema>;

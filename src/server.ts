@@ -21,6 +21,7 @@ import {
   enqueueJobInputSchema,
   eventFeedInputSchema,
   forgetInputSchema,
+  graphChatInputSchema,
   grepInputSchema,
   ingestInputSchema,
   invalidateEdgeInputSchema,
@@ -60,6 +61,7 @@ import {
 import { createGraphStore } from "./createStore.js";
 import { EdgeValidityConflictError, isSmokeEvent } from "./graphCore.js";
 import { sourceDaySeries } from "./sourceStats.js";
+import { graphChatResponse } from "./graphChat.js";
 import { startJobWorker } from "./jobWorker.js";
 import { createTroveMcpServer } from "./mcpTools.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
@@ -335,6 +337,21 @@ app.post("/v1/recall", async (context) => {
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), recallInputSchema);
   return context.json(await store.recall(input, operationContextFromAuth(auth)));
+});
+
+// The dashboard's graph chat. The same read scope and the same owner scoping as
+// /v1/recall, because it IS a recall — narrated. The response is a Server-Sent
+// Event stream of the traversal as it happens, then the answer's tokens, then
+// the citations. A zod failure still lands on app.onError as a 400: the body is
+// parsed before any Response is constructed.
+app.post("/v1/graph-chat", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  if (auth instanceof Response) return auth;
+  const input = await parseJsonOrThrow(context.req.json(), graphChatInputSchema);
+  return graphChatResponse(store, input, operationContextFromAuth(auth), {
+    // A closed tab must abort the model call, not leave it streaming to nobody.
+    signal: context.req.raw.signal,
+  });
 });
 
 app.post("/v1/invalidate-edge", async (context) => {
