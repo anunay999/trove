@@ -55,6 +55,10 @@ import {
   EdgeValidityConflictError,
   UnknownEvidenceReferenceError,
   WEAK_EVIDENCE_FLOOR,
+  RECONCILE_FINDING_LIMIT,
+  reconcileLintFinding,
+  type ReconcileFlag,
+  type ReconcileFlagCode,
   type GraphEvent,
   type GraphEventFeed,
   type GraphEventStats,
@@ -1789,7 +1793,7 @@ export class PgGraphStore implements GraphStore {
   async lint(context?: GraphOperationContext): Promise<GraphLintReport> {
     const scope = ownerScope(context);
     const p: [boolean, string | null] = [!scope.scoped, scope.ownerId];
-    const [nodeCount, edgeCount, orphanNodes, missingEvidence, duplicateTitles, danglingEdges, evidenceRows] = await Promise.all([
+    const [nodeCount, edgeCount, orphanNodes, missingEvidence, duplicateTitles, danglingEdges, evidenceRows, reconcileFlags] = await Promise.all([
       this.pool.query("select count(*)::int as count from node where deleted_at is null and ($1 or owner_id = $2)", p),
       this.pool.query("select count(*)::int as count from edge where deleted_at is null and expired_at is null and ($1 or owner_id = $2)", p),
       this.pool.query(
@@ -1846,6 +1850,22 @@ export class PgGraphStore implements GraphStore {
          left join node_revision nr on nr.id = n.current_revision_id
          where n.deleted_at is null and ($1 or n.owner_id = $2)`,
         p,
+      ),
+      // reconcile_duplicate / reconcile_contradiction: what the write-time
+      // reconciliation judge already decided (022_reconcile_flag.sql). Joining
+      // through `node` twice both resolves the pair's slugs for the message and
+      // drops any flag whose endpoint has since been tombstoned.
+      this.pool.query(
+        `select f.code, f.detail,
+                n.id as node_id, n.title as node_title, n.slug as node_slug,
+                o.id as other_id, o.title as other_title, o.slug as other_slug
+         from reconcile_flag f
+         join node n on n.id = f.node_id and n.deleted_at is null
+         join node o on o.id = f.other_node_id and o.deleted_at is null
+         where ($1 or f.owner_id = $2)
+         order by f.created_at desc, f.node_id, f.code
+         limit $3`,
+        [...p, RECONCILE_FINDING_LIMIT],
       ),
     ]);
 
@@ -1920,6 +1940,15 @@ export class PgGraphStore implements GraphStore {
       }
     }
 
+    for (const row of reconcileFlags.rows) {
+      findings.push(reconcileLintFinding({
+        code: row.code as ReconcileFlagCode,
+        node: { id: String(row.node_id), title: String(row.node_title), slug: String(row.node_slug) },
+        other: { id: String(row.other_id), title: String(row.other_title), slug: String(row.other_slug) },
+        detail: String(row.detail ?? ""),
+      }));
+    }
+
     const errors = findings.filter((finding) => finding.severity === "error").length;
     const warnings = findings.filter((finding) => finding.severity === "warning").length;
 
@@ -1934,6 +1963,40 @@ export class PgGraphStore implements GraphStore {
       },
       findings,
     };
+  }
+
+  async recordReconcileFlags(
+    input: { nodeId: string; flags: ReconcileFlag[] },
+    context?: GraphOperationContext,
+  ): Promise<void> {
+    const scope = ownerScope(context);
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      // Replace, in one transaction: the pass that just ran is the whole truth
+      // about this node, so a stale flag never outlives the verdict behind it.
+      await client.query(
+        "delete from reconcile_flag where node_id = $1 and ($2 or owner_id = $3)",
+        [input.nodeId, !scope.scoped, scope.ownerId],
+      );
+      // At most MAX_CANDIDATES flags per pass, so the loop is bounded by
+      // construction; the upsert guards a concurrent pass on the same pair.
+      for (const flag of input.flags) {
+        await client.query(
+          `insert into reconcile_flag (owner_id, node_id, other_node_id, code, detail)
+           values ($1, $2, $3, $4, $5)
+           on conflict (node_id, other_node_id, code)
+           do update set detail = excluded.detail, created_at = now()`,
+          [scope.ownerId, input.nodeId, flag.otherNodeId, flag.code, flag.detail.slice(0, 500)],
+        );
+      }
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async exportMarkdown(context?: GraphOperationContext): Promise<Record<string, string>> {

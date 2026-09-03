@@ -71,6 +71,9 @@ import {
   type GraphEventFeed,
   type GraphEventStats,
   isSmokeEvent,
+  RECONCILE_FINDING_LIMIT,
+  reconcileLintFinding,
+  type ReconcileFlag,
   WRITE_ACTIONS,
   type GraphJob,
   type GraphOperationContext,
@@ -136,6 +139,11 @@ export class InMemoryGraphStore implements GraphStore {
   private deletedNodeIds = new Set<string>();
   /** Fake-provider vectors by content hash so semantic search stays cheap. */
   private embeddingCache = new Map<string, number[]>();
+  /**
+   * Judged reconcile verdicts by flagged node, mirroring the `reconcile_flag`
+   * table. Keyed by node because a pass REPLACES that node's whole set.
+   */
+  private reconcileFlags = new Map<string, ReconcileFlag[]>();
   /** Session-served provenance log (backlog #9b) — same shape as the pg driver's. */
   private servedUnits = new ServedUnitLog();
   /**
@@ -1145,6 +1153,23 @@ export class InMemoryGraphStore implements GraphStore {
       }
     }
 
+    // reconcile_duplicate / reconcile_contradiction: what the write-time
+    // reconciliation judge already decided. A flag whose node or counterpart
+    // has since been tombstoned is skipped, mirroring the pg driver's join.
+    let reconcileCount = 0;
+    for (const [nodeId, flags] of this.reconcileFlags) {
+      if (reconcileCount >= RECONCILE_FINDING_LIMIT) break;
+      const node = this.nodes.get(nodeId);
+      if (!node || this.deletedNodeIds.has(nodeId)) continue;
+      for (const flag of flags) {
+        if (reconcileCount >= RECONCILE_FINDING_LIMIT) break;
+        const other = this.nodes.get(flag.otherNodeId);
+        if (!other || this.deletedNodeIds.has(other.id)) continue;
+        findings.push(reconcileLintFinding({ code: flag.code, node, other, detail: flag.detail }));
+        reconcileCount += 1;
+      }
+    }
+
     const errors = findings.filter((finding) => finding.severity === "error").length;
     const warnings = findings.filter((finding) => finding.severity === "warning").length;
     return {
@@ -1158,6 +1183,13 @@ export class InMemoryGraphStore implements GraphStore {
       },
       findings,
     };
+  }
+
+  recordReconcileFlags(input: { nodeId: string; flags: ReconcileFlag[] }, _context?: GraphOperationContext): void {
+    // Replace, never append: the pass that just ran is the whole truth about
+    // this node. The driver is single-user, so there is no owner to key on.
+    if (input.flags.length === 0) this.reconcileFlags.delete(input.nodeId);
+    else this.reconcileFlags.set(input.nodeId, input.flags.map((flag) => ({ ...flag, detail: flag.detail.slice(0, 500) })));
   }
 
   exportMarkdown(): Record<string, string> {

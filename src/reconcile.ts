@@ -53,7 +53,7 @@
  */
 
 import type { GraphNode } from "./contracts.js";
-import type { GraphOperationContext, GraphStore, SearchResultNode } from "./graphCore.js";
+import type { GraphOperationContext, GraphStore, ReconcileFlagCode, SearchResultNode } from "./graphCore.js";
 
 export type ReconcileVerdict = "supersedes" | "duplicate" | "contradicts" | "related" | "distinct";
 
@@ -94,7 +94,7 @@ export type ReconcileResult = {
   judge: string;
   candidates: ReconcileCandidateResult[];
   supersedesEdgesCreated: Array<{ fromNodeId: string; toNodeId: string }>;
-  flags: Array<{ code: "contradiction_candidate" | "possible_duplicate" | "judge_budget_exceeded"; nodeId: string; otherNodeId: string; detail: string }>;
+  flags: Array<{ code: ReconcileFlagCode | "judge_budget_exceeded"; nodeId: string; otherNodeId: string; detail: string }>;
   /** LLM judge calls this job made: 0 or 1 under the batched policy. The
    *  number backlog #27 exists to drive down — reported, not assumed. */
   judgeCalls: number;
@@ -470,5 +470,38 @@ export async function performReconcileNode(
     }
   }
 
+  await persistFlags(store, node.id, result, judge !== null, context);
   return result;
+}
+
+/**
+ * Hand the pass's duplicate and contradiction verdicts to the store, which is
+ * where `lint` reads them from. Until this existed the flags lived only in
+ * `graph_job.result` and nothing ever read them: reconciliation and lint were
+ * two halves of one loop that had never been connected.
+ *
+ * Only the JUDGED path persists. The heuristic's "duplicate" is title-token
+ * overlap, which is what lint's `duplicate_title` pass already reports — a new
+ * code for it would double-report the same observation, and the judge is what
+ * makes the verdict new information. So with no judge configured the durable
+ * set is written empty, which also clears anything an earlier judged pass left
+ * on this node.
+ *
+ * A budget-exhausted pass judged nothing, so it is not evidence that the
+ * node's earlier flags are stale: it writes nothing rather than clearing them.
+ */
+async function persistFlags(
+  store: GraphStore,
+  nodeId: string,
+  result: ReconcileResult,
+  judged: boolean,
+  context: GraphOperationContext | undefined,
+): Promise<void> {
+  if (judged && result.flags.some((flag) => flag.code === "judge_budget_exceeded")) return;
+  const flags = judged
+    ? result.flags
+      .filter((flag): flag is typeof flag & { code: ReconcileFlagCode } => flag.code !== "judge_budget_exceeded")
+      .map((flag) => ({ code: flag.code, otherNodeId: flag.otherNodeId, detail: flag.detail }))
+    : [];
+  await store.recordReconcileFlags({ nodeId, flags }, context);
 }

@@ -1,6 +1,6 @@
 ---
 name: trove-lint
-description: Use to health-check the Trove memory graph - orphan nodes, missing evidence, duplicate titles, dangling edges. Interprets lint findings, separates real issues from noise, and proposes fixes (linking passes, evidence backfill, merges) without auto-applying them.
+description: Use to health-check the Trove memory graph - orphan nodes, missing evidence, duplicate titles, dangling edges, judged duplicates and contradictions. Interprets lint findings, separates real issues from noise, and proposes fixes (linking passes, evidence backfill, merges) without auto-applying them.
 ---
 
 # trove-lint
@@ -17,7 +17,7 @@ description: Use to health-check the Trove memory graph - orphan nodes, missing 
 
 ### Step 1 — run
 
-`lint` (or read the `trove://lint` resource). Findings: `orphan_node`, `missing_evidence`, `duplicate_title`, `dangling_edge`.
+`lint` (or read the `trove://lint` resource). Findings: `orphan_node`, `missing_evidence`, `duplicate_title`, `dangling_edge`, `reconcile_duplicate`, `reconcile_contradiction`.
 
 ### Step 2 — triage
 
@@ -25,6 +25,7 @@ description: Use to health-check the Trove memory graph - orphan nodes, missing 
 - **Missing evidence**: agent-captured claims without citations. Propose evidence backfill (`annotate` against a source span) or an explicit inference note via `remember`.
 - **Duplicate titles**: read both; propose merging (repoint edges to the survivor, then the loser is soft-deleted server-side) — surface, don't auto-merge.
 - **Dangling edges**: endpoints deleted; propose `forget`.
+- **Judged duplicates / contradictions** (`reconcile_duplicate`, `reconcile_contradiction`): write-time reconciliation already judged this pair. The message names both nodes with their slugs and ids — `read` both, then propose a `supersedes` connection (duplicate) or an explicit resolution (contradiction). These only appear when the reconciliation judge is enabled.
 
 ### Step 3 — propose, then apply
 

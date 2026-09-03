@@ -23,6 +23,8 @@ const LINT_LABEL: Record<string, string> = {
   missing_evidence: "notes without evidence",
   weak_evidence: "notes with weak evidence",
   dangling_edge: "dangling edges",
+  reconcile_duplicate: "judged duplicates",
+  reconcile_contradiction: "judged contradictions",
 };
 
 const CLIENTS = ["Claude Code", "Any MCP client"] as const;
