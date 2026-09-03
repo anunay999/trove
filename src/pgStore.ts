@@ -46,6 +46,8 @@ import {
   encodeEventCursor,
   evidenceSupportScore,
   performRecall,
+  reportSearchArm,
+  type SearchObserver,
   renderAgentContext,
   renderMarkdownProjection,
   sha256,
@@ -832,7 +834,11 @@ export class PgGraphStore implements GraphStore {
     return { matches: served, truncated: matches.length > limit };
   }
 
-  async search(input: SearchInput, context?: GraphOperationContext): Promise<SearchResult> {
+  async search(
+    input: SearchInput,
+    context?: GraphOperationContext,
+    observer?: SearchObserver,
+  ): Promise<SearchResult> {
     const scope = ownerScope(context);
     const provider = input.mode === "lexical" ? null : createEmbeddingProviderFromEnv();
 
@@ -841,17 +847,30 @@ export class PgGraphStore implements GraphStore {
     // the result away; they now do no lexical work at all.
     if (input.mode === "semantic") {
       result = provider ? await this.semanticSearch(input, provider, scope) : { nodes: [], textUnits: [] };
+      if (provider) reportSearchArm(observer, "semantic", result.nodes);
     } else if (input.mode === "lexical" || !provider) {
       // Lexical-only, or hybrid with no embedding provider configured.
       result = await this.lexicalSearch(input, scope);
+      reportSearchArm(observer, "lexical", result.nodes);
     } else {
       // The two arms are independent, and the semantic one blocks on an embedding
       // API round trip. Running them concurrently hides the lexical SQL entirely
       // behind that call rather than adding to it — recall (the hot path) and
       // view creation both call this with limit 50.
+      //
+      // The observer fires off each arm's OWN promise, so a watcher sees the
+      // fast SQL arm land while the embedding round trip is still in flight —
+      // the real shape of the race, not a pair of events synthesized after
+      // Promise.all resolved them both.
       const [lexical, semantic] = await Promise.all([
-        this.lexicalSearch(input, scope),
-        this.semanticSearch(input, provider, scope),
+        this.lexicalSearch(input, scope).then((arm) => {
+          reportSearchArm(observer, "lexical", arm.nodes);
+          return arm;
+        }),
+        this.semanticSearch(input, provider, scope).then((arm) => {
+          reportSearchArm(observer, "semantic", arm.nodes);
+          return arm;
+        }),
       ]);
       result = {
         nodes: reciprocalRankFusion(lexical.nodes, semantic.nodes),
