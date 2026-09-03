@@ -1,5 +1,23 @@
 -- Trove starter schema.
 -- This is intentionally plain Postgres: relational graph first, specialized indexes later.
+--
+-- STATUS: historical bootstrap snapshot, not the current schema. db/migrations/
+-- is the source of truth; a fresh database is bootstrapped as this file followed
+-- by every migration (src/migrate.ts records each in schema_migrations). Known
+-- drift, so nobody mistakes this file for either the baseline or the present:
+--   - migrations 003 (bitemporal edge columns), 008 (pg_trgm + node_title_trgm_idx),
+--     009 (embedding_hnsw_idx) and 012 (node_revision.title/summary) are merged
+--     in here, so a fresh bootstrap applies them as no-ops;
+--   - migration 006 (per-user isolation: owner_id on graph tables, the owner
+--     backfill and owner indexes) is NOT merged in, so it does real work on a
+--     fresh database;
+--   - this file still declares the global unique constraints that 006 and 007
+--     replace: source (kind, content_sha256) -> source_owner_content_key,
+--     node.slug -> node_owner_slug_key, graph_view.slug -> graph_view_owner_slug_key;
+--   - it still lists 'claim' in embedding.owner_table's check, which 010 drops
+--     alongside the claim table.
+-- Do not "fix" the drift by editing applied migrations: their checksums are
+-- recorded, and a changed file fails the next boot.
 
 create extension if not exists pgcrypto;
 create extension if not exists vector;

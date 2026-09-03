@@ -68,7 +68,7 @@ The container starts with:
 npm run db:migrate:prod && npm run start:prod
 ```
 
-This keeps migrations idempotent and close to startup. Postgres readiness is handled by the Compose health check.
+This keeps migrations close to startup. The runner (`src/migrate.ts`) records each applied file in `schema_migrations` with its checksum, so a migration runs once per database and later boots skip it; the first boot against a database that predates the ledger re-applies every file once (they are idempotent) and records it. Concurrent starts serialise on an advisory lock. Postgres readiness is handled by the Compose health check.
 
 Verify:
 

@@ -78,6 +78,10 @@ Official references:
 
 The storage decision is explicit in [storage-decision.md](/Users/anunay/dev/trove/docs/storage-decision.md): Postgres is the canonical write store, Kuzu is the preferred future traversal projection, and vector databases remain optional read indexes.
 
+#### Schema migrations
+
+`db/migrations/*.sql` is the source of truth for the schema; `db/schema.sql` is a historical bootstrap snapshot that fresh databases load first. `src/migrate.ts` applies the migrations on every container start and records each in `schema_migrations(filename, checksum, applied_at)`, so a file runs once and is skipped thereafter; a recorded file whose sha256 changed fails the boot and names the file, because applied migrations are immutable. The run holds a Postgres advisory lock so two instances booting side by side (a zero-downtime deploy) serialise instead of racing. Each file runs in its own transaction, unless its first line is exactly `-- trove:no-transaction`, which is for a single `create index concurrently ... if not exists` statement.
+
 ### Runtime: TypeScript Service
 
 Use a small TypeScript service with:

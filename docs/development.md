@@ -32,7 +32,7 @@ The deeper design docs:
 - [representation.md](representation.md) — data representation for long text, annotations, graph atoms, and projections
 - [storage-decision.md](storage-decision.md) — database, traversal, search, and storage choices
 - [memory-db-design.md](memory-db-design.md) — the deep-research synthesis the v2 design came from
-- [../db/schema.sql](../db/schema.sql) — starter relational graph schema (migrations live in [../db/migrations](../db/migrations))
+- [../db/schema.sql](../db/schema.sql) — historical bootstrap snapshot; the schema's source of truth is [../db/migrations](../db/migrations), applied once each and recorded in `schema_migrations` by [../src/migrate.ts](../src/migrate.ts)
 - [traversal-queries.sql](traversal-queries.sql) — Postgres traversal, evidence, search, and Kuzu projection query recipes
 
 ## Local storage
