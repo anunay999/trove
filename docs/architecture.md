@@ -104,6 +104,14 @@ Use layered retrieval:
 
 Do not make a vector database the source of truth. Embeddings are an index over knowledge, not the knowledge.
 
+### Activation
+
+An agent-facing `read` strengthens the atom it served: `node.access_count` and `node.last_accessed_at` feed the recency and frequency terms of recall's ranking. Those bumps are **batched**, not written one update per read. `node` is the hottest table in the graph, and a row version per read is pure churn — a round trip, a transaction and a dead tuple each time. Reads buffer their bump in process (`src/activation.ts`) and a timer drains a window's worth in a single `update node ... from unnest(...)`: repeated reads of one atom collapse into one row version, and reads of many atoms into one statement.
+
+The window is 1s by default (`TROVE_ACTIVATION_FLUSH_MS`). The buffer is bounded — it drains early at 1000 distinct nodes and drops oldest-first only if the database has been refusing writes for several windows — and it is flushed on `close()` and on `SIGTERM`/`SIGINT`, while its timer holds the event loop open so a process that exits normally still writes what it buffered.
+
+`access_count` is therefore eventually consistent within that window for anything that reads the column straight out of Postgres: recall's ranking arm, the dashboard's most-recalled list. Reads are not eventually consistent — a read folds its store's un-flushed delta onto the row it selected, so a caller always sees its own accesses counted, tracked or not. Projection and every internal read-back pass `trackAccess: false` and never inflate activation.
+
 ### Agent Protocol
 
 Expose MCP as the primary agent access path. MCP resources fit graph reads; MCP tools fit capture, ingest, update, lint, and export. HTTP JSON mirrors the same operations for non-agent interfaces.

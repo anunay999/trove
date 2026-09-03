@@ -75,6 +75,7 @@ import {
   type SearchResult,
   type TextQuoteMatch,
 } from "./graphCore.js";
+import { ActivationBuffer, type ActivationBump } from "./activation.js";
 import { createEmbeddingProviderFromEnv, vectorLiteral, type EmbeddingProvider } from "./embeddings.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
 import {
@@ -390,6 +391,14 @@ export class PgGraphStore implements GraphStore {
   private servedUnits = new ServedUnitLog();
   /** Resolved once per store: whether pgvector is 0.8+ (hnsw.iterative_scan). */
   private iterativeScanSupport: Promise<boolean> | null = null;
+  /**
+   * Read strengthening, batched. One `update` per tracked read was one round
+   * trip, one transaction and one dead tuple on the hottest table in the graph;
+   * bumps now accumulate here and drain in a single statement. See
+   * src/activation.ts for the window and why it is a timed buffer rather than a
+   * per-call flush.
+   */
+  private activation = new ActivationBuffer((bumps) => this.writeActivation(bumps));
 
   constructor(options: PgStoreOptions) {
     this.pool = new Pool({ connectionString: options.connectionString, keepAlive: true });
@@ -857,19 +866,17 @@ export class PgGraphStore implements GraphStore {
     if (nodeResult.rowCount === 0) return null;
 
     const node = mapNode(nodeResult.rows[0]);
-    if (opts?.trackAccess ?? true) {
-      const bump = await this.pool.query(
-        `update node set access_count = access_count + 1, last_accessed_at = now()
-         where id = $1 and deleted_at is null
-         returning access_count, last_accessed_at`,
-        [node.id],
-      );
-      if (bump.rowCount && bump.rowCount > 0) {
-        node.accessCount = Number(bump.rows[0].access_count ?? node.accessCount);
-        node.lastAccessedAt = bump.rows[0].last_accessed_at === null
-          ? node.lastAccessedAt
-          : toIso(bump.rows[0].last_accessed_at);
-      }
+    // The bump is buffered, not written here. The row above is the flushed
+    // baseline, so folding this store's un-flushed delta back on top keeps the
+    // count exact for every caller in the process — including the untracked
+    // reads (dedupe, read-backs, project) that must observe activation without
+    // adding to it.
+    const activation = (opts?.trackAccess ?? true)
+      ? this.activation.bump(node.id)
+      : this.activation.pendingFor(node.id);
+    if (activation.count > 0 && activation.lastAccessedAt) {
+      node.accessCount += activation.count;
+      node.lastAccessedAt = activation.lastAccessedAt;
     }
 
     // Evidence and annotations intentionally remain current for historical fact
@@ -2218,7 +2225,39 @@ export class PgGraphStore implements GraphStore {
     };
   }
 
+  /**
+   * Drain a window's worth of read strengthening in one statement. `unnest`
+   * keeps the parameter count at three however many nodes ride along (the same
+   * shape the embedding backfill uses), and `greatest` means a bump can only
+   * move `last_accessed_at` forward — an out-of-order flush cannot rewind it.
+   */
+  private async writeActivation(bumps: ActivationBump[]): Promise<void> {
+    const CHUNK = 1_000;
+    for (let start = 0; start < bumps.length; start += CHUNK) {
+      const slice = bumps.slice(start, start + CHUNK);
+      await this.pool.query(
+        `update node
+            set access_count = node.access_count + b.n,
+                last_accessed_at = greatest(node.last_accessed_at, b.read_at)
+           from unnest($1::uuid[], $2::bigint[], $3::timestamptz[]) as b(id, n, read_at)
+          where node.id = b.id and node.deleted_at is null`,
+        [
+          slice.map((bump) => bump.nodeId),
+          slice.map((bump) => bump.count),
+          slice.map((bump) => bump.lastAccessedAt.toISOString()),
+        ],
+      );
+    }
+  }
+
+  /** Write buffered activation immediately. Used by shutdown paths and tests. */
+  async flushActivation(): Promise<void> {
+    await this.activation.flush();
+  }
+
   async close(): Promise<void> {
+    // Before the pool goes away: buffered bumps have nowhere else to land.
+    await this.activation.close();
     await this.pool.end();
   }
 

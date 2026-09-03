@@ -23,7 +23,7 @@ Everything else — markdown, mind maps, search indexes, Obsidian vaults, chat s
 Key mechanics:
 
 - **Bitemporal edges** — edges carry `valid_from/valid_until` (world time) and `created_at/expired_at` (system time). Supersession is edge invalidation (`connect({supersedesEdgeId})`, `forget`), never deletion; `neighborhood` time-travels with `asOf`.
-- **Token-budgeted recall** — `recall` runs hybrid search → one-hop expansion → ACT-R-style activation ranking → a greedy packer with citations. Reads bump `access_count`, so recalled memories strengthen.
+- **Token-budgeted recall** — `recall` runs hybrid search → one-hop expansion → ACT-R-style activation ranking → a greedy packer with citations. An explicit `read` bumps `access_count`, so retrieved memories strengthen; the bumps are batched behind a short flush window (`TROVE_ACTIVATION_FLUSH_MS`, default 1s) instead of one update per read, and a read folds its own un-flushed delta so it still sees the count it just made.
 - **Provenance** — each write is appended to `graph_event` with actor, interface, and request attribution. HTTP callers can send `X-Trove-Interface` and `X-Request-Id`; hosted MCP defaults to `mcp`, local stdio MCP to `stdio-mcp`.
 
 The deeper design docs:

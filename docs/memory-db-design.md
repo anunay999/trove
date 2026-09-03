@@ -72,7 +72,8 @@ Ordered by leverage; the schema is already ~70% of the way there.
 > Status (updated 2026-08-06): items 1, 3, and 4 below are implemented — bitemporal edges with
 > `supersedesEdgeId`/`graph.invalidate_edge` (migration `003_bitemporal_activation.sql`) plus
 > recorded-time node fact snapshots and `read({ asOf })` (migration `012_fact_revision_snapshots.sql`),
-> `graph.recall` with `tokenBudget`, and activation columns bumped on read. Covered by
+> `graph.recall` with `tokenBudget`, and activation columns bumped on read (batched: bumps buffer in
+> process and drain in one `unnest` statement per window, `TROVE_ACTIVATION_FLUSH_MS`). Covered by
 > the `bitemporal`, `fact-time-travel`, and `recall` suites on both drivers. Reconciliation
 > is shipped (status below); embeddings index only the current node revision by design.
 

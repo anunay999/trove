@@ -769,16 +769,27 @@ serve({ fetch: app.fetch, port }, (info) => {
 // ingests become semantically searchable without a manual jobs:run. Claiming
 // uses `for update skip locked`, so extra instances stay safe. Opt out with
 // TROVE_AUTORUN_JOBS=0.
-if ((process.env.TROVE_AUTORUN_JOBS ?? "1") !== "0") {
-  const intervalMs = Number(process.env.TROVE_JOB_INTERVAL_MS ?? 30_000);
-  const worker = startJobWorker(store, {
-    intervalMs,
-    log: (message) => console.log(`[job-worker] ${message}`),
-  });
-  console.log(`Job worker running (every ${Math.round(intervalMs / 1000)}s; TROVE_AUTORUN_JOBS=0 disables).`);
-  for (const signal of ["SIGTERM", "SIGINT"] as const) {
-    process.once(signal, () => {
-      void worker.stop().finally(() => process.exit(0));
+const worker = (process.env.TROVE_AUTORUN_JOBS ?? "1") !== "0"
+  ? (() => {
+    const intervalMs = Number(process.env.TROVE_JOB_INTERVAL_MS ?? 30_000);
+    const started = startJobWorker(store, {
+      intervalMs,
+      log: (message) => console.log(`[job-worker] ${message}`),
     });
-  }
+    console.log(`Job worker running (every ${Math.round(intervalMs / 1000)}s; TROVE_AUTORUN_JOBS=0 disables).`);
+    return started;
+  })()
+  : null;
+
+// A signal exits before any timer can fire, so shutdown has to drain the store
+// itself: activation bumps sit in a one-second buffer (src/activation.ts) and
+// would otherwise be lost with the process. Registered whether or not the job
+// worker runs — the buffer fills from reads, not from jobs.
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.once(signal, () => {
+    void (async () => {
+      await worker?.stop();
+      if ("close" in store && typeof store.close === "function") await store.close();
+    })().catch(() => undefined).finally(() => process.exit(0));
+  });
 }

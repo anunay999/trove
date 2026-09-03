@@ -450,6 +450,10 @@ export class InMemoryGraphStore implements GraphStore {
       }
       : stored;
     if (opts?.trackAccess ?? true) {
+      // The pg driver buffers this bump and drains a window's worth in one
+      // statement (src/activation.ts). Here the write is a Map assignment: no
+      // round trip, no transaction, no dead tuple to amortize, so there is
+      // nothing to batch and the count is always current.
       const activated = {
         ...stored,
         accessCount: stored.accessCount + 1,
@@ -486,6 +490,15 @@ export class InMemoryGraphStore implements GraphStore {
       this.servedUnits.mark(evidence.filter(isTextUnit).map((unit) => unit.id), context);
     }
     return { ...node, evidence, annotations };
+  }
+
+  /**
+   * Driver parity with the pg store's buffered activation: nothing is ever
+   * pending here, so a flush is a no-op. Callers (shutdown paths, tests) can
+   * therefore ask either driver to settle without knowing which one they hold.
+   */
+  flushActivation(): Promise<void> {
+    return Promise.resolve();
   }
 
   getEvidenceForNodes(
