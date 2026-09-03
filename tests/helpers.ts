@@ -73,7 +73,9 @@ export async function isolateDatabase(suiteName: string): Promise<void> {
   const dbName = `trove_${prefix}${suiteName.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}_test`;
 
   const { default: pg } = await import("pg");
-  const { readdir, readFile } = await import("node:fs/promises");
+  const { readFile } = await import("node:fs/promises");
+  const { fileURLToPath } = await import("node:url");
+  const { applyMigrations } = await import("../src/migrate.js");
 
   const admin = new pg.Client({ connectionString: baseUrl });
   await admin.connect();
@@ -91,11 +93,7 @@ export async function isolateDatabase(suiteName: string): Promise<void> {
   await client.connect();
   try {
     await client.query(await readFile(new URL("../db/schema.sql", import.meta.url), "utf8"));
-    const migrationsDir = new URL("../db/migrations/", import.meta.url);
-    const migrations = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
-    for (const file of migrations) {
-      await client.query(await readFile(new URL(file, migrationsDir), "utf8"));
-    }
+    await applyMigrations(client, fileURLToPath(new URL("../db/migrations/", import.meta.url)));
   } finally {
     await client.end();
   }
