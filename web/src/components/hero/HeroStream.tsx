@@ -1,24 +1,7 @@
-import { Suspense, lazy } from "react";
 import { motion, useReducedMotion } from "motion/react";
+import { RecallScene } from "@/components/hero/RecallScene";
 import { StaggeredHeadline } from "@/components/hero/StaggeredHeadline";
 import { WaitlistForm } from "@/components/WaitlistForm";
-
-// Three.js is the heaviest thing on the page, and most visitors already have
-// what they came for. Split it out; the skeleton holds the card's exact
-// heights so nothing jumps when the scene streams in.
-const MemoryGraphScene = lazy(() =>
-  import("@/components/hero/MemoryGraphScene").then((m) => ({ default: m.MemoryGraphScene })),
-);
-
-function GraphSceneSkeleton() {
-  return (
-    <div className="overflow-hidden rounded-2xl border bg-[var(--card)]/70">
-      <div className="h-11 border-b 2xl:h-12" />
-      <div className="h-[23rem] md:h-[25rem] 2xl:h-[31rem]" />
-      <div className="h-[3.75rem] border-t" />
-    </div>
-  );
-}
 
 type HeroStreamProps = {
   onJoin: (email?: string) => void;
@@ -27,12 +10,12 @@ type HeroStreamProps = {
 };
 
 /**
- * The hero: the claim on the left, the graph running on the right.
+ * The hero: the claim on the left, one recall playing out on the right.
  *
- * The scene is not an illustration of the pitch — it is the pitch: the same
- * seed graph the inspectable MiniGraph draws, with one recall pulse at a
- * time tracing evidence toward memory. Copy stays left-aligned and
- * asymmetric; the centred-hero look was the generic one.
+ * The scene is not an illustration of the pitch — it is the pitch: an agent
+ * asks, the answer comes back with the sentence that justifies it, the
+ * related fact it didn't ask for, and what the belief used to be. Copy stays
+ * left-aligned and asymmetric; the centred-hero look was the generic one.
  */
 export function HeroStream({ onJoin, onLogin, onConnectKey }: HeroStreamProps) {
   const reduceMotion = useReducedMotion();
@@ -51,11 +34,11 @@ export function HeroStream({ onJoin, onLogin, onConnectKey }: HeroStreamProps) {
             className="flex items-center gap-2.5 font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground"
           >
             <span className="live-dot size-1.5 rounded-full bg-[var(--signal)]" />
-            Memory graph for agents
+            Memory infrastructure for agents
           </motion.p>
 
           <div className="mt-7">
-            <StaggeredHeadline lines={["Your agent forgets", "everything tonight.", "Trove doesn't."]} accent="forgets" />
+            <StaggeredHeadline lines={["Your agent remembers.", "Its sources", "come with it."]} accent="remembers" />
           </div>
 
           <motion.p
@@ -64,8 +47,8 @@ export function HeroStream({ onJoin, onLogin, onConnectKey }: HeroStreamProps) {
             transition={{ duration: 0.7, delay: 0.55 }}
             className="mt-7 max-w-[27rem] text-base leading-relaxed text-muted-foreground"
           >
-            A hosted evidence graph for agent memory. Your agents write what they learn over MCP
-            and recall it in later sessions — every fact traced to the source that justifies it.
+            Trove is an open-source, self-hostable memory layer for persistent AI agents — built to
+            preserve context, connect the dots, and make every remembered fact inspectable.
           </motion.p>
 
           <motion.div
@@ -92,7 +75,7 @@ export function HeroStream({ onJoin, onLogin, onConnectKey }: HeroStreamProps) {
               </button>
             </div>
             <p className="mt-6 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-              Open source · Self-hostable · Works with any MCP client
+              Cited · Connected · Versioned
             </p>
           </motion.div>
         </div>
@@ -102,9 +85,7 @@ export function HeroStream({ onJoin, onLogin, onConnectKey }: HeroStreamProps) {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.8, delay: 0.45, ease: [0.16, 1, 0.3, 1] }}
         >
-          <Suspense fallback={<GraphSceneSkeleton />}>
-            <MemoryGraphScene />
-          </Suspense>
+          <RecallScene />
         </motion.div>
       </div>
     </section>

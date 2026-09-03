@@ -7,22 +7,22 @@ const CONNECT_CMD =
 const STEPS = [
   {
     n: "01",
-    title: "Connect",
-    body: "One command points your agent at your graph. Any MCP client works — Claude Code, Codex, Cursor, or your own scripts.",
+    title: "Integrate",
+    body: "Connect agent tools and developer environments to preserve useful context as work happens. Any MCP client works — Claude Code, Codex, Cursor, or your own scripts.",
   },
   {
     n: "02",
-    title: "Let it remember",
-    body: "As your agents work, they distill what they learn into small nodes — each citing the exact source text that justifies it.",
+    title: "Recall",
+    body: "Retrieve the smallest useful slice, then follow relationships when the situation calls for more — packed into the token budget you set.",
   },
   {
     n: "03",
-    title: "Recall anywhere",
-    body: "Next session, next project, next machine. Recall packs the relevant memories, evidence attached, into the token budget you set.",
+    title: "Reuse",
+    body: "Bring cited, scoped knowledge into the next session — or export it for review in your own tools.",
   },
 ];
 
-/** Three steps from zero to first recall, anchored on the real connect command. */
+/** The agent loop, three moves, anchored on the real connect command. */
 export function HowItWorks() {
   const reduceMotion = useReducedMotion();
   const [copied, setCopied] = useState(false);
@@ -37,12 +37,15 @@ export function HowItWorks() {
   return (
     <section className="mx-auto w-full max-w-7xl px-6 py-24 md:py-32 lg:px-10 2xl:max-w-[88rem]">
       <div className="max-w-3xl">
-        <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--signal)]">How it works</p>
+        <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--signal)]">A calmer agent loop</p>
         <h2 className="mt-5 text-4xl font-medium leading-[1.02] tracking-[-0.045em] md:text-6xl">
-          Live in one command.
+          Context that compounds
+          <br />
+          between sessions.
         </h2>
         <p className="mt-6 max-w-[38rem] text-base leading-relaxed text-muted-foreground md:text-lg">
-          No SDK to adopt, no prompts to rewrite. If your agent speaks MCP, it already knows how to use Trove.
+          One command, no SDK to adopt, no prompts to rewrite. If your agent speaks MCP, it already knows how to
+          use Trove.
         </p>
       </div>
 
