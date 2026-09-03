@@ -29,8 +29,14 @@ import type { ObsidianManifest } from "./obsidianExport.js";
 import type { ReconcileResult } from "./reconcile.js";
 
 export type LintGraphJobResult = {
+  /** Owner the lint ran over; null is the whole graph (operator-triggered). */
+  ownerId: string | null;
   /** Summary counts plus the findings themselves (capped), never counts alone. */
   lint: Omit<GraphLintReport["summary"], "findings"> & { findings: GraphLintFinding[] };
+  /** Terminal job rows past TERMINAL_JOB_RETENTION_DAYS removed on this run. */
+  prunedJobs: number;
+  /** Audit events past TROVE_EVENT_RETENTION_DAYS removed on this run, capped per run. */
+  prunedEvents: number;
 };
 
 export type RefreshObsidianProjectionJobResult = {

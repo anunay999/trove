@@ -506,9 +506,10 @@ job cadence.
 ### 22. Stale documentation
 
 - `docs/architecture.md` describes the `claim` table and transactional
-  node/edge/claim writes. ✅ **verified stale** — migration `010` dropped the
-  table and repro `S2` asserts `to_regclass('public.claim') = null`;
-  `remember` performs node update, links and annotations as separate operations.
+  node/edge/claim writes. ✅ **fixed** — the doc now describes the dropped
+  table (migration `010`) and current-revision embeddings, and `remember`
+  hands evidence and links to `capture`/`update` so they land in the node's
+  own transaction (`tests/remember-atomicity.test.ts`).
 - `docs/deployment.md` says production needs an external scheduled worker, while
   `src/server.ts:686` starts one automatically. ⚠️ reported.
 - `README.md` now documents recorded-time node snapshots separately from edge bitemporality. ✅ fixed with #18.

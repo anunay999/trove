@@ -64,6 +64,10 @@ import {
   evidenceSupportScore,
   sha256,
   splitTextUnits,
+  buildTextChunks,
+  chunkEmbeddingInput,
+  isEmbeddableUnitText,
+  type TextChunk,
   ServedUnitLog,
   FUZZY_QUOTE_CANDIDATE_FLOOR,
   WEAK_EVIDENCE_FLOOR,
@@ -71,6 +75,9 @@ import {
   type GraphEventFeed,
   type GraphEventStats,
   isSmokeEvent,
+  RECONCILE_FINDING_LIMIT,
+  reconcileLintFinding,
+  type ReconcileFlag,
   WRITE_ACTIONS,
   type GraphJob,
   type GraphOperationContext,
@@ -91,7 +98,16 @@ import {
 } from "./graphCore.js";
 import { cosineSimilarity, createEmbeddingProviderFromEnv, type EmbeddingProvider } from "./embeddings.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
-import { ownerScope, UnknownEvidenceReferenceError } from "./graphCore.js";
+import {
+  EdgeValidityConflictError,
+  JOB_MAX_ATTEMPTS,
+  TERMINAL_JOB_RETENTION_DAYS,
+  lintMinIntervalSeconds,
+  eventPruneMaxRows,
+  eventRetentionDays,
+  ownerScope,
+  UnknownEvidenceReferenceError,
+} from "./graphCore.js";
 import { performReconcileNode, type ReconcileJudge } from "./reconcile.js";
 import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
@@ -114,6 +130,12 @@ export class InMemoryGraphStore implements GraphStore {
   /** Owner scope is internal metadata, mirroring source.owner_id in Postgres. */
   private sourceOwnerIds = new Map<string, string | null>();
   private textUnits = new Map<string, TextUnit>();
+  /**
+   * The chunk grain the pg driver keeps in `text_chunk` (migration 020) and
+   * builds its vector index on. Held here so semantic text-unit search scores
+   * the same texts on both drivers and expands a hit the same way.
+   */
+  private textChunks = new Map<string, TextChunk>();
   private nodes = new Map<string, GraphNode>();
   private slugIndex = new Map<string, string>();
   private revisions = new Map<string, Revision>();
@@ -127,6 +149,11 @@ export class InMemoryGraphStore implements GraphStore {
   private deletedNodeIds = new Set<string>();
   /** Fake-provider vectors by content hash so semantic search stays cheap. */
   private embeddingCache = new Map<string, number[]>();
+  /**
+   * Judged reconcile verdicts by flagged node, mirroring the `reconcile_flag`
+   * table. Keyed by node because a pass REPLACES that node's whole set.
+   */
+  private reconcileFlags = new Map<string, ReconcileFlag[]>();
   /** Session-served provenance log (backlog #9b) — same shape as the pg driver's. */
   private servedUnits = new ServedUnitLog();
   /**
@@ -178,6 +205,9 @@ export class InMemoryGraphStore implements GraphStore {
     this.sourceOwnerIds.set(source.id, ownerScope(context).ownerId);
     for (const unit of units) {
       this.textUnits.set(unit.id, unit);
+    }
+    for (const chunk of buildTextChunks(source.id, source.title, units)) {
+      this.textChunks.set(chunk.id, chunk);
     }
     this.recordEvent("ingest", source.id, context, now);
     this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
@@ -331,14 +361,22 @@ export class InMemoryGraphStore implements GraphStore {
     }
     scoredNodes.sort((left, right) => left.distance - right.distance || left.node.id.localeCompare(right.node.id));
 
+    // Chunks are scored, text units are returned — the pg driver's shape
+    // (SEMANTIC_UNIT_SEARCH_SQL): the chunk is the grain worth embedding, the
+    // unit is the grain that gets cited. A chunk's units all inherit its
+    // distance and come back in ordinal order, capped at the caller's limit.
     const scoredUnits: Array<{ unit: TextUnit; distance: number }> = [];
     if (input.includeTextUnits) {
-      for (const unit of this.textUnits.values()) {
-        const vector = await this.embeddingForText(provider, unit.text);
+      const scoredChunks: Array<{ chunk: TextChunk; distance: number }> = [];
+      for (const chunk of this.textChunks.values()) {
+        const vector = await this.embeddingForText(provider, chunkEmbeddingInput(chunk));
         const distance = queryDistance(vector);
-        if (distance < maxDistance) scoredUnits.push({ unit, distance });
+        if (distance < maxDistance) scoredChunks.push({ chunk, distance });
       }
-      scoredUnits.sort((left, right) => left.distance - right.distance || left.unit.id.localeCompare(right.unit.id));
+      scoredChunks.sort((left, right) => left.distance - right.distance || left.chunk.id.localeCompare(right.chunk.id));
+      for (const { chunk, distance } of scoredChunks.slice(0, input.limit)) {
+        for (const unit of this.unitsForChunk(chunk)) scoredUnits.push({ unit, distance });
+      }
     }
 
     return {
@@ -348,6 +386,21 @@ export class InMemoryGraphStore implements GraphStore {
       nodes: scoredNodes.slice(0, input.limit).map((entry) => ({ ...entry.node, distance: entry.distance })),
       textUnits: scoredUnits.slice(0, input.limit).map((entry) => entry.unit),
     };
+  }
+
+  /**
+   * The text units a chunk covers, in ordinal order. Mirrors the pg driver's
+   * range join on (source_id, ordinal), junk lines trimmed the same way — they
+   * ride inside a chunk but were never served as evidence.
+   */
+  private unitsForChunk(chunk: TextChunk): TextUnit[] {
+    return [...this.textUnits.values()]
+      .filter((unit) =>
+        unit.sourceId === chunk.sourceId
+        && unit.ordinal >= chunk.firstOrdinal
+        && unit.ordinal <= chunk.lastOrdinal
+        && isEmbeddableUnitText(unit.text))
+      .sort((left, right) => left.ordinal - right.ordinal);
   }
 
   private async embeddingForText(provider: EmbeddingProvider, text: string): Promise<number[]> {
@@ -441,6 +494,10 @@ export class InMemoryGraphStore implements GraphStore {
       }
       : stored;
     if (opts?.trackAccess ?? true) {
+      // The pg driver buffers this bump and drains a window's worth in one
+      // statement (src/activation.ts). Here the write is a Map assignment: no
+      // round trip, no transaction, no dead tuple to amortize, so there is
+      // nothing to batch and the count is always current.
       const activated = {
         ...stored,
         accessCount: stored.accessCount + 1,
@@ -477,6 +534,15 @@ export class InMemoryGraphStore implements GraphStore {
       this.servedUnits.mark(evidence.filter(isTextUnit).map((unit) => unit.id), context);
     }
     return { ...node, evidence, annotations };
+  }
+
+  /**
+   * Driver parity with the pg store's buffered activation: nothing is ever
+   * pending here, so a flush is a no-op. Callers (shutdown paths, tests) can
+   * therefore ask either driver to settle without knowing which one they hold.
+   */
+  flushActivation(): Promise<void> {
+    return Promise.resolve();
   }
 
   getEvidenceForNodes(
@@ -576,10 +642,12 @@ export class InMemoryGraphStore implements GraphStore {
       if (!this.nodes.has(id) || this.deletedNodeIds.has(id)) continue;
       const now = new Date().toISOString();
       this.deletedNodeIds.add(id);
+      // Close validity as well as belief, so the triple is free for a
+      // successor; the reason is its own field, never metadata.
       for (const edge of this.edges.values()) {
         if (edge.expiredAt !== null) continue;
         if (edge.fromNodeId !== id && edge.toNodeId !== id) continue;
-        this.edges.set(edge.id, { ...edge, expiredAt: now });
+        this.edges.set(edge.id, { ...edge, expiredAt: now, validUntil: closeAt(edge, now), invalidationReason: "tombstoned" });
       }
       this.recordEvent("tombstone", id, context, now);
       this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
@@ -651,18 +719,37 @@ export class InMemoryGraphStore implements GraphStore {
     };
   }
 
+  /**
+   * Mirrors edge_valid_range_excl: one version of a triple per world-time
+   * instant, expired versions included. The active version is never a
+   * conflict (link() turns the call into a weight update on it).
+   */
+  private assertNoOverlappingVersion(fromNodeId: string, toNodeId: string, predicate: string, validFrom: string): void {
+    const overlapping = [...this.edges.values()]
+      .filter((candidate) =>
+        candidate.expiredAt !== null
+        && candidate.fromNodeId === fromNodeId && candidate.toNodeId === toNodeId && candidate.predicate === predicate
+        && intervalCovers(candidate, validFrom))
+      .sort((left, right) => (right.validUntil ?? "\uffff").localeCompare(left.validUntil ?? "\uffff"))[0];
+    if (overlapping) {
+      throw new EdgeValidityConflictError(
+        `Cannot link "${predicate}" from ${validFrom}: edge ${overlapping.id} is already valid over that interval. Start the new version at or after its validUntil.`,
+        overlapping.id,
+      );
+    }
+  }
+
   link(input: LinkInput, context?: GraphOperationContext): GraphEdge | null {
     const fromNodeId = input.fromNodeId ?? this.nodeIdForSlug(input.fromSlug);
     const toNodeId = input.toNodeId ?? this.nodeIdForSlug(input.toSlug);
     if (!fromNodeId || !toNodeId) return null;
 
     const now = new Date().toISOString();
-    const existing = [...this.edges.values()].find((edge) =>
-      edge.expiredAt === null &&
+    const sameTriple = (edge: GraphEdge) =>
       edge.fromNodeId === fromNodeId &&
       edge.toNodeId === toNodeId &&
-      edge.predicate === input.predicate
-    );
+      edge.predicate === input.predicate;
+    const existing = [...this.edges.values()].find((edge) => edge.expiredAt === null && sameTriple(edge));
 
     const edge: GraphEdge = existing ?? {
       id: randomUUID(),
@@ -671,22 +758,43 @@ export class InMemoryGraphStore implements GraphStore {
       predicate: input.predicate,
       weight: input.weight,
       recordedAt: now,
-      validFrom: input.validFrom ?? now,
+      validFrom: input.validFrom ? new Date(input.validFrom).toISOString() : now,
       validUntil: null,
       expiredAt: null,
       invalidatedBy: null,
+      invalidationReason: null,
     };
+
+    // Mirrors edge_valid_range_excl: one version of a triple per world-time
+    // instant, expired versions included. The active version is not a
+    // conflict -- the call becomes a weight update on it, as in Postgres.
+    if (!existing) this.assertNoOverlappingVersion(fromNodeId, toNodeId, input.predicate, edge.validFrom ?? now);
+
+    // Mirrors edge_valid_range_check on the superseded edge: its validUntil
+    // becomes the successor's validFrom, which therefore cannot precede its
+    // own validFrom. Checked before anything is written.
+    const previous = input.supersedesEdgeId && input.supersedesEdgeId !== edge.id
+      ? this.edges.get(input.supersedesEdgeId)
+      : undefined;
+    if (previous && previous.expiredAt === null && previous.validFrom !== null && edge.validFrom !== null && edge.validFrom < previous.validFrom) {
+      throw new EdgeValidityConflictError(
+        `Cannot supersede edge ${previous.id}: the new edge's validFrom (${edge.validFrom}) precedes the superseded edge's validFrom.`,
+        previous.id,
+      );
+    }
+
     if (!existing) {
       this.edges.set(edge.id, edge);
       this.recordEvent("link", edge.id, context, now);
       this.enqueueMaintenanceJobs(context, ["lint_graph"]);
     }
 
-    if (input.supersedesEdgeId && input.supersedesEdgeId !== edge.id) {
-      this.expireEdge(input.supersedesEdgeId, {
+    if (previous) {
+      this.expireEdge(previous.id, {
         expiredAt: now,
         validUntil: edge.validFrom,
         invalidatedBy: edge.id,
+        invalidationReason: "superseded",
       }, context);
     }
     return edge;
@@ -697,10 +805,18 @@ export class InMemoryGraphStore implements GraphStore {
     if (!edge) return null;
     if (edge.expiredAt !== null) return edge;
     const now = new Date().toISOString();
+    const validUntil = input.validUntil ? new Date(input.validUntil).toISOString() : null;
+    if (validUntil !== null && edge.validFrom !== null && validUntil < edge.validFrom) {
+      throw new EdgeValidityConflictError(
+        `Cannot invalidate edge ${edge.id}: validUntil (${validUntil}) precedes its validFrom (${edge.validFrom}).`,
+        edge.id,
+      );
+    }
     return this.expireEdge(edge.id, {
       expiredAt: now,
-      validUntil: input.validUntil ?? now,
+      validUntil: validUntil ?? closeAt(edge, now),
       invalidatedBy: null,
+      invalidationReason: "invalidated",
     }, context);
   }
 
@@ -710,7 +826,12 @@ export class InMemoryGraphStore implements GraphStore {
 
   private expireEdge(
     edgeId: string,
-    patch: { expiredAt: string; validUntil: string | null; invalidatedBy: string | null },
+    patch: {
+      expiredAt: string;
+      validUntil: string | null;
+      invalidatedBy: string | null;
+      invalidationReason: NonNullable<GraphEdge["invalidationReason"]>;
+    },
     context?: GraphOperationContext,
   ): GraphEdge | null {
     const edge = this.edges.get(edgeId);
@@ -720,6 +841,7 @@ export class InMemoryGraphStore implements GraphStore {
       expiredAt: patch.expiredAt,
       validUntil: patch.validUntil,
       invalidatedBy: patch.invalidatedBy,
+      invalidationReason: patch.invalidationReason,
     };
     this.edges.set(expired.id, expired);
     this.recordEvent("invalidate_edge", expired.id, context, patch.expiredAt);
@@ -728,6 +850,11 @@ export class InMemoryGraphStore implements GraphStore {
   }
 
   capture(input: CaptureInput, context?: GraphOperationContext): GraphNode {
+    // Postgres parity: the whole write is one transaction there, so a bogus
+    // evidence ref must leave no node behind here either. Check every ref
+    // before the first mutation.
+    for (const evidence of input.evidence) this.assertEvidenceRefs(evidence, context);
+
     const now = new Date().toISOString();
     const id = randomUUID();
     const revisionId = randomUUID();
@@ -780,9 +907,14 @@ export class InMemoryGraphStore implements GraphStore {
     return node;
   }
 
-  annotate(input: AnnotateInput, context?: GraphOperationContext): GraphAnnotation {
-    // Parity with Postgres's FK constraints: annotations must point at real
-    // rows, and a bogus ref is the named error, not a silent store.
+  /**
+   * Parity with Postgres's FK constraints: annotations must point at real
+   * rows, and a bogus ref is the named error, not a silent store.
+   */
+  private assertEvidenceRefs(
+    input: { sourceId?: string | null | undefined; textUnitId?: string | null | undefined; nodeId?: string | null | undefined },
+    context?: GraphOperationContext,
+  ): void {
     if (input.sourceId != null && !this.sourceRows.has(input.sourceId)) {
       throw new UnknownEvidenceReferenceError(`annotation references an unknown source: ${input.sourceId}`);
     }
@@ -792,6 +924,22 @@ export class InMemoryGraphStore implements GraphStore {
     if (input.nodeId != null && (!this.nodes.has(input.nodeId) || this.deletedNodeIds.has(input.nodeId))) {
       throw new UnknownEvidenceReferenceError(`annotation references an unknown node: ${input.nodeId}`);
     }
+    // Owner parity with Postgres for what this driver tracks (sources, and so
+    // their units): a scoped caller citing another owner's row gets the same
+    // error as citing a nonexistent one, so existence never leaks.
+    const scope = ownerScope(context);
+    if (scope.scoped) {
+      const cited = [input.sourceId, input.textUnitId != null ? this.textUnits.get(input.textUnitId)?.sourceId : undefined];
+      if (cited.some((sourceId) => sourceId != null && this.sourceOwnerIds.get(sourceId) !== scope.ownerId)) {
+        throw new UnknownEvidenceReferenceError(
+          `annotation references an unknown source/text-unit: sourceId=${input.sourceId ?? "null"} textUnitId=${input.textUnitId ?? "null"}`,
+        );
+      }
+    }
+  }
+
+  annotate(input: AnnotateInput, context?: GraphOperationContext): GraphAnnotation {
+    this.assertEvidenceRefs(input, context);
     const now = new Date().toISOString();
     const annotation: GraphAnnotation = {
       id: randomUUID(),
@@ -817,6 +965,17 @@ export class InMemoryGraphStore implements GraphStore {
     if (!existing || this.deletedNodeIds.has(input.nodeId)) return null;
     if (existing.revisionId !== input.baseRevisionId) {
       return { conflict: true, currentRevisionId: existing.revisionId };
+    }
+    // Same rule as capture: nothing mutates until every evidence ref resolves.
+    for (const evidence of input.evidence ?? []) this.assertEvidenceRefs(evidence, context);
+    // Postgres rolls the revision back when a link's validity conflicts; here
+    // the check has to run before the first mutation to give the same result.
+    for (const link of input.links ?? []) {
+      const toNodeId = this.nodeIdForSlug(link.toSlug);
+      if (!toNodeId) continue;
+      const active = [...this.edges.values()].some((edge) =>
+        edge.expiredAt === null && edge.fromNodeId === existing.id && edge.toNodeId === toNodeId && edge.predicate === link.predicate);
+      if (!active) this.assertNoOverlappingVersion(existing.id, toNodeId, link.predicate, new Date().toISOString());
     }
 
     const now = new Date().toISOString();
@@ -861,6 +1020,20 @@ export class InMemoryGraphStore implements GraphStore {
         content: updated.content,
         createdAt: now,
       });
+    }
+    for (const evidence of input.evidence ?? []) {
+      const annotationInput: AnnotateInput = {
+        motivation: "supports",
+        nodeId: updated.id,
+        body: {},
+        selector: evidence.selector,
+      };
+      if (evidence.sourceId) annotationInput.sourceId = evidence.sourceId;
+      if (evidence.textUnitId) annotationInput.textUnitId = evidence.textUnitId;
+      this.annotate(annotationInput, context);
+    }
+    for (const link of input.links ?? []) {
+      this.link({ fromNodeId: updated.id, toSlug: link.toSlug, predicate: link.predicate, weight: 1 }, context);
     }
     this.recordEvent("update", updated.id, context, now);
     this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
@@ -1016,6 +1189,23 @@ export class InMemoryGraphStore implements GraphStore {
       }
     }
 
+    // reconcile_duplicate / reconcile_contradiction: what the write-time
+    // reconciliation judge already decided. A flag whose node or counterpart
+    // has since been tombstoned is skipped, mirroring the pg driver's join.
+    let reconcileCount = 0;
+    for (const [nodeId, flags] of this.reconcileFlags) {
+      if (reconcileCount >= RECONCILE_FINDING_LIMIT) break;
+      const node = this.nodes.get(nodeId);
+      if (!node || this.deletedNodeIds.has(nodeId)) continue;
+      for (const flag of flags) {
+        if (reconcileCount >= RECONCILE_FINDING_LIMIT) break;
+        const other = this.nodes.get(flag.otherNodeId);
+        if (!other || this.deletedNodeIds.has(other.id)) continue;
+        findings.push(reconcileLintFinding({ code: flag.code, node, other, detail: flag.detail }));
+        reconcileCount += 1;
+      }
+    }
+
     const errors = findings.filter((finding) => finding.severity === "error").length;
     const warnings = findings.filter((finding) => finding.severity === "warning").length;
     return {
@@ -1029,6 +1219,13 @@ export class InMemoryGraphStore implements GraphStore {
       },
       findings,
     };
+  }
+
+  recordReconcileFlags(input: { nodeId: string; flags: ReconcileFlag[] }, _context?: GraphOperationContext): void {
+    // Replace, never append: the pass that just ran is the whole truth about
+    // this node. The driver is single-user, so there is no owner to key on.
+    if (input.flags.length === 0) this.reconcileFlags.delete(input.nodeId);
+    else this.reconcileFlags.set(input.nodeId, input.flags.map((flag) => ({ ...flag, detail: flag.detail.slice(0, 500) })));
   }
 
   exportMarkdown(): Record<string, string> {
@@ -1129,6 +1326,7 @@ export class InMemoryGraphStore implements GraphStore {
       result: null,
       error: null,
       dedupeKey: input.dedupeKey ?? null,
+      ownerId: ownerScope(context).ownerId,
       attempts: 0,
       createdAt: now,
       updatedAt: now,
@@ -1140,8 +1338,12 @@ export class InMemoryGraphStore implements GraphStore {
     return job;
   }
 
-  jobs(input: ListJobsInput = { limit: 25 }): GraphJob[] {
+  jobs(input: ListJobsInput = { limit: 25 }, context?: GraphOperationContext): GraphJob[] {
+    // Mirrors pgStore: a scoped caller lists only rows stamped with their
+    // owner; global (null-owner) rows are operator work for unscoped readers.
+    const scope = ownerScope(context);
     return [...this.graphJobs.values()]
+      .filter((job) => !scope.scoped || job.ownerId === scope.ownerId)
       .filter((job) => !input.status || job.status === input.status)
       .filter((job) => !input.kind || job.kind === input.kind)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
@@ -1153,7 +1355,7 @@ export class InMemoryGraphStore implements GraphStore {
     // (attempts^2 x 10s since last update) has elapsed. Dead jobs never run.
     const claimable = (candidate: GraphJob): boolean => {
       if (candidate.status === "pending") return true;
-      if (candidate.status === "failed" && candidate.attempts < 5) {
+      if (candidate.status === "failed" && candidate.attempts < JOB_MAX_ATTEMPTS) {
         const backoffMs = Math.pow(candidate.attempts, 2) * 10_000;
         return Date.parse(candidate.updatedAt) + backoffMs <= Date.now();
       }
@@ -1195,7 +1397,7 @@ export class InMemoryGraphStore implements GraphStore {
       const failed: GraphJob = {
         ...running,
         // Out of retries: dead-letter, never reclaimed.
-        status: running.attempts >= 5 ? "dead" : "failed",
+        status: running.attempts >= JOB_MAX_ATTEMPTS ? "dead" : "failed",
         error: error instanceof Error ? error.message : "Unknown job error",
         updatedAt: finishedAt,
         finishedAt,
@@ -1212,9 +1414,20 @@ export class InMemoryGraphStore implements GraphStore {
 
   private async performJob(job: GraphJob): Promise<GraphJobResult> {
     if (job.kind === "lint_graph") {
+      // The memory driver is single-user, so lint always covers the whole
+      // store; the owner is still reported so the result shape matches pg.
+      const payloadOwner = (job.payload as Record<string, unknown>).ownerId;
+      const ownerId = typeof payloadOwner === "string" ? payloadOwner : null;
       const report = this.lint();
+      const prunedJobs = this.pruneTerminalJobs();
+      const prunedEvents = this.pruneEvents();
       // Carry the findings themselves (capped) — counts alone are not actionable.
-      const result: GraphJobResultMap["lint_graph"] = { lint: { ...report.summary, findings: report.findings.slice(0, 200) } };
+      const result: GraphJobResultMap["lint_graph"] = {
+        ownerId,
+        lint: { ...report.summary, findings: report.findings.slice(0, 200) },
+        prunedJobs,
+        prunedEvents,
+      };
       return result;
     }
 
@@ -1242,26 +1455,86 @@ export class InMemoryGraphStore implements GraphStore {
       model: "unconfigured",
       status: "skipped_no_embedding_provider",
       ownerId: null,
+      chunkedSources: 0,
       missing: {
         nodeRevisions: this.nodes.size,
-        textUnits: this.textUnits.size,
+        textChunks: this.textChunks.size,
       },
     };
     return result;
   }
 
+  /**
+   * Per-owner lint key and payload, global embedding refresh, and the lint
+   * throttle (no new lint within TROVE_LINT_MIN_INTERVAL_SECONDS of a
+   * successful one for the same key); see pgStore for the rationale.
+   */
   private enqueueMaintenanceJobs(
     context: GraphOperationContext | undefined,
     kinds: Array<GraphJob["kind"]>,
   ): void {
+    const scope = ownerScope(context);
     for (const kind of kinds) {
+      const scoped = kind === "lint_graph" && scope.scoped && scope.ownerId !== null;
+      const dedupeKey = scoped ? `maintenance:${kind}:${scope.ownerId}` : `maintenance:${kind}`;
+      if (kind === "lint_graph" && this.lintSucceededRecently(dedupeKey)) continue;
       this.enqueueJob({
         kind,
-        payload: { reason: "graph_mutation" },
+        payload: scoped ? { reason: "graph_mutation", ownerId: scope.ownerId } : { reason: "graph_mutation" },
         priority: kind === "refresh_embeddings" ? 40 : 60,
-        dedupeKey: `maintenance:${kind}`,
+        dedupeKey,
       }, context);
     }
+  }
+
+  private lintSucceededRecently(dedupeKey: string): boolean {
+    const intervalMs = lintMinIntervalSeconds() * 1000;
+    if (intervalMs <= 0) return false;
+    const floor = Date.now() - intervalMs;
+    return [...this.graphJobs.values()].some((job) =>
+      job.kind === "lint_graph" &&
+      job.dedupeKey === dedupeKey &&
+      job.status === "succeeded" &&
+      Date.parse(job.finishedAt ?? job.updatedAt) > floor
+    );
+  }
+
+  /** Drop terminal jobs past the retention window; open rows are never touched. */
+  private pruneTerminalJobs(): number {
+    const floor = Date.now() - TERMINAL_JOB_RETENTION_DAYS * 86_400_000;
+    let pruned = 0;
+    for (const [id, job] of this.graphJobs) {
+      const terminal = job.status === "succeeded" || job.status === "failed" || job.status === "cancelled" || (job.status as string) === "dead";
+      if (!terminal || Date.parse(job.finishedAt ?? job.updatedAt) >= floor) continue;
+      this.graphJobs.delete(id);
+      pruned += 1;
+    }
+    return pruned;
+  }
+
+  /**
+   * Drop audit events past the retention horizon, oldest first, at most
+   * eventPruneMaxRows() per run; see pgStore.pruneEvents for the rationale.
+   * The memory log dies with the process, but the driver has to agree with
+   * Postgres on which events a lint removes and what it reports.
+   */
+  private pruneEvents(): number {
+    const days = eventRetentionDays();
+    if (days <= 0) return 0;
+    const floor = Date.now() - days * 86_400_000;
+    const expired = this.eventLog
+      .filter((event) => Date.parse(event.createdAt) < floor)
+      .sort(compareEventsAsc)
+      .slice(0, eventPruneMaxRows());
+    if (expired.length === 0) return 0;
+    const doomed = new Set(expired.map((event) => event.id));
+    // Rewritten in place: the log is the array itself, never a reference the
+    // store swaps out, and a spread of the survivors would be argument-count
+    // bound on a long log.
+    const survivors = this.eventLog.filter((event) => !doomed.has(event.id));
+    this.eventLog.length = 0;
+    for (const event of survivors) this.eventLog.push(event);
+    return expired.length;
   }
 
   /** Per-node reconciliation enqueue; see pgStore for the rationale. */
@@ -1419,6 +1692,21 @@ function edgeVisible(edge: GraphEdge, asOf: string | undefined, includeExpired: 
     return edge.recordedAt <= asOf && (edge.expiredAt === null || edge.expiredAt > asOf);
   }
   return edge.expiredAt === null;
+}
+
+/**
+ * Does the edge's non-empty [validFrom, validUntil) still cover [t, infinity)?
+ * Mirrors `tstzrange(valid_from, valid_until, '[)') && tstzrange(t, null, '[)')`.
+ */
+function intervalCovers(edge: GraphEdge, t: string): boolean {
+  if (edge.validFrom === null) return false;
+  if (edge.validUntil === null) return true;
+  return edge.validUntil > edge.validFrom && edge.validUntil > t;
+}
+
+/** Where a closing edge's validity ends by default: now, or validFrom when that is later (an empty interval). */
+function closeAt(edge: GraphEdge, now: string): string {
+  return edge.validFrom !== null && edge.validFrom > now ? edge.validFrom : now;
 }
 
 /** Valid-time edge filter, mirroring `valid_from <= t and (valid_until is null or valid_until > t)`. */

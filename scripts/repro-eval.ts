@@ -721,7 +721,9 @@ await section("R15", async () => {
     if (q.includes("distinct on (n.id)")) return "semantic node search";
     if (q.startsWith("select tu.id") && q.includes("from embedding e")) return "semantic text-unit search";
     if (q.startsWith("with ranked as")) return "batched evidence (getEvidenceForNodes)";
-    if (q.startsWith("update node set access_count")) return "per-atom access bump";
+    // Activation is batched now (src/activation.ts): if one of these shows up
+    // it is a buffered window draining, never a per-atom write inside recall.
+    if (q.startsWith("update node set access_count")) return "batched activation flush";
     if (q.startsWith("select id, motivation")) return "per-atom annotations query";
     if (q.startsWith("select id, source_id") && q.includes("where id = $1")) return "per-annotation text_unit lookup";
     if (q.startsWith("select n.id")) return "per-atom node read";
@@ -734,7 +736,7 @@ await section("R15", async () => {
   }
   const sorted = [...buckets.entries()].sort((a, b) => b[1] - a[1]);
   for (const [shape, count] of sorted) console.log(`  ${String(count).padStart(4)}x  ${shape}`);
-  const perAtom = (buckets.get("per-atom node read") ?? 0) + (buckets.get("per-atom access bump") ?? 0)
+  const perAtom = (buckets.get("per-atom node read") ?? 0)
     + (buckets.get("per-atom annotations query") ?? 0) + (buckets.get("per-annotation text_unit lookup") ?? 0);
   const pass = r15Total <= 30 && perAtom === 0;
   report(

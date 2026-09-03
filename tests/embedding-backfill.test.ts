@@ -63,8 +63,8 @@ describe("embedding backfill: owner scoping and batching", { skip: !hasPostgres(
     assert.equal(done?.status, "succeeded");
     const result = done?.result as Record<string, unknown>;
     assert.equal(result.ownerId, ownerA);
-    const missingBefore = result.missingBefore as { nodeRevisions: number; textUnits: number };
-    const embedded = result.embedded as { nodeRevisions: number; textUnits: number };
+    const missingBefore = result.missingBefore as { nodeRevisions: number; textChunks: number };
+    const embedded = result.embedded as { nodeRevisions: number; textChunks: number };
     assert.equal(missingBefore.nodeRevisions, 2, "the scoped count sees only owner A's rows");
     assert.equal(embedded.nodeRevisions, 2, "the scoped backfill embeds only owner A's rows");
 
@@ -86,7 +86,7 @@ describe("embedding backfill: owner scoping and batching", { skip: !hasPostgres(
     const clean = await store.enqueueJob({ kind: "refresh_embeddings", payload: {}, priority: 40, dedupeKey: "test:refresh:clean" }, ctxA);
     const cleanDone = await store.runJob({ jobId: clean.id }, ctxA);
     const cleanResult = cleanDone?.result as Record<string, unknown>;
-    assert.deepEqual(cleanResult.missingBefore, { nodeRevisions: 0, textUnits: 0 });
+    assert.deepEqual(cleanResult.missingBefore, { nodeRevisions: 0, textChunks: 0 });
     assert.equal(embeddingDrainRemaining(cleanDone), 0);
   });
 

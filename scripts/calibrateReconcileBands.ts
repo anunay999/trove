@@ -18,7 +18,9 @@
  * access to drop/create the scratch DB, and OPENAI_API_KEY for embeddings)
  */
 import pg from "pg";
-import { readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { applyMigrations } from "../src/migrate.js";
 import { PgGraphStore } from "../src/pgStore.js";
 import { performReconcileNode, type ReconcileJudge } from "../src/reconcile.js";
 import type { GraphOperationContext } from "../src/graphCore.js";
@@ -47,10 +49,7 @@ async function createScratch(): Promise<string> {
   await client.connect();
   try {
     await client.query(await readFile(new URL("../db/schema.sql", import.meta.url), "utf8"));
-    const dir = new URL("../db/migrations/", import.meta.url);
-    for (const file of (await readdir(dir)).filter((f) => f.endsWith(".sql")).sort()) {
-      await client.query(await readFile(new URL(file, dir), "utf8"));
-    }
+    await applyMigrations(client, fileURLToPath(new URL("../db/migrations/", import.meta.url)));
   } finally {
     await client.end();
   }

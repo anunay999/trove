@@ -8,7 +8,7 @@ Trove is an information substrate with three canonical layers:
 
 1. **Raw long-form content** — documents, URLs, messages, PDFs, screenshots, notes, transcripts (`source`).
 2. **Addressable text units** — spans, sections, chunks, and annotations that point back to exact source ranges (`text_unit`).
-3. **Semantic graph atoms** — entities, claims, decisions, questions, tasks, relationships, communities, and views (`node`, `edge`, `claim`, `graph_view`).
+3. **Semantic graph atoms** — entities, claims, decisions, questions, tasks, relationships, communities, and views (`node`, `edge`, `graph_view`).
 
 Everything else — markdown, mind maps, search indexes, Obsidian vaults, chat summaries — is a **projection** of this substrate, exposed through an HTTP API plus an MCP server. That keeps the system lightweight but robust:
 
@@ -23,7 +23,7 @@ Everything else — markdown, mind maps, search indexes, Obsidian vaults, chat s
 Key mechanics:
 
 - **Bitemporal edges** — edges carry `valid_from/valid_until` (world time) and `created_at/expired_at` (system time). Supersession is edge invalidation (`connect({supersedesEdgeId})`, `forget`), never deletion; `neighborhood` time-travels with `asOf`.
-- **Token-budgeted recall** — `recall` runs hybrid search → one-hop expansion → ACT-R-style activation ranking → a greedy packer with citations. Reads bump `access_count`, so recalled memories strengthen.
+- **Token-budgeted recall** — `recall` runs hybrid search → one-hop expansion → ACT-R-style activation ranking → a greedy packer with citations. An explicit `read` bumps `access_count`, so retrieved memories strengthen; the bumps are batched behind a short flush window (`TROVE_ACTIVATION_FLUSH_MS`, default 1s) instead of one update per read, and a read folds its own un-flushed delta so it still sees the count it just made.
 - **Provenance** — each write is appended to `graph_event` with actor, interface, and request attribution. HTTP callers can send `X-Trove-Interface` and `X-Request-Id`; hosted MCP defaults to `mcp`, local stdio MCP to `stdio-mcp`.
 
 The deeper design docs:
@@ -32,7 +32,7 @@ The deeper design docs:
 - [representation.md](representation.md) — data representation for long text, annotations, graph atoms, and projections
 - [storage-decision.md](storage-decision.md) — database, traversal, search, and storage choices
 - [memory-db-design.md](memory-db-design.md) — the deep-research synthesis the v2 design came from
-- [../db/schema.sql](../db/schema.sql) — starter relational graph schema (migrations live in [../db/migrations](../db/migrations))
+- [../db/schema.sql](../db/schema.sql) — historical bootstrap snapshot; the schema's source of truth is [../db/migrations](../db/migrations), applied once each and recorded in `schema_migrations` by [../src/migrate.ts](../src/migrate.ts)
 - [traversal-queries.sql](traversal-queries.sql) — Postgres traversal, evidence, search, and Kuzu projection query recipes
 
 ## Local storage
@@ -130,7 +130,7 @@ Graph mutations enqueue maintenance jobs (`refresh_embeddings`, `lint_graph`, `r
 
 The API server runs a background worker (`src/jobWorker.ts`) that drains the queue every `TROVE_JOB_INTERVAL_MS` (default 30s). Each tick runs up to 20 jobs; when a `refresh_embeddings` batch reports more missing rows than it embedded, the worker re-enqueues a follow-up batch, so large imports catch up across ticks. Claiming uses `for update skip locked`, so multiple instances never double-run a job. Disable with `TROVE_AUTORUN_JOBS=0`; manual draining still works via `npm run jobs:run`, `POST /v1/jobs/run` (admin scope), or the `run_job` MCP tool.
 
-Embedding refresh is provider-gated (`TROVE_EMBEDDING_PROVIDER`) and embeds up to `TROVE_EMBEDDING_JOB_LIMIT` (default 256, clamped to 1000) missing rows per run, in provider-sized batches of 128 texts per embed call. A job can be scoped to one tenant by passing `ownerId` in the job payload — the missing-count and the backfill both honor it, and the worker's drain-follow-up preserves it. Search stays functional without embeddings via the lexical path.
+Embedding refresh is provider-gated (`TROVE_EMBEDDING_PROVIDER`) and embeds up to `TROVE_EMBEDDING_JOB_LIMIT` (default 256, clamped to 1000) missing rows per run, in provider-sized batches of 128 texts per embed call. What it embeds is node revisions and **text chunks** (`buildTextChunks` in `src/graphCore.ts`), not individual text units; each run also chunks up to 50 un-chunked sources and retires up to 500 per-line vectors whose source is fully indexed, which is the whole production backfill path. A job can be scoped to one tenant by passing `ownerId` in the job payload — the missing-count and the backfill both honor it, and the worker's drain-follow-up preserves it. Search stays functional without embeddings via the lexical path.
 
 ## Test suites
 

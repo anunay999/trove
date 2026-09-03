@@ -123,7 +123,7 @@ Tool visibility is tiered by credential scope: core tools are shown to every cre
 Core (the everyday agent vocabulary):
 
 - `remember` - distilled belief (not raw dump); revises on exact title/slug; check `similar`; mid-session small atoms + links
-- `recall` - open questions only; token-budgeted pack (default 8000); follow with `read` if thin
+- `recall` - open questions only; token-budgeted pack (default 8000); follow with `read` if thin; present belief only (no `asOf`)
 - `grep` - prefer over recall for ports/IPs/errors/flags; then `read` for full doc
 - `read` - full node body or raw source by id/slug; node reads accept `asOf` for recorded fact history
 - `connect` - typed edges; `supersedesEdgeId` replaces a belief on the record
@@ -219,7 +219,7 @@ Expected result:
 - Prompt list includes the `trove-*` workflows.
 - `grep` returns results from the configured store.
 - `events` returns a cursor-paginated feed with `nextCursor` and `hasMore`.
-- Lexical search uses Postgres full text ranking over nodes, revisions, and text units; semantic/hybrid search uses pgvector only when real embeddings exist.
+- Lexical search uses Postgres full text ranking over nodes, revisions, and text units; semantic/hybrid search uses pgvector over node revisions and text chunks, only when real embeddings exist. A chunk hit is returned as the text units it covers, so citations are unchanged.
 - `jobs` and `trove://jobs` expose queue state.
 - `views` and `trove://views` expose saved mind maps.
 - A read-only token sees only core tools and cannot remember or export.

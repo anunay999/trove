@@ -58,7 +58,7 @@ import {
   resourceMetadataUrl,
 } from "./oauthMetadata.js";
 import { createGraphStore } from "./createStore.js";
-import { isSmokeEvent } from "./graphCore.js";
+import { EdgeValidityConflictError, isSmokeEvent } from "./graphCore.js";
 import { startJobWorker } from "./jobWorker.js";
 import { createTroveMcpServer } from "./mcpTools.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
@@ -157,6 +157,21 @@ app.all("/mcp", async (context) => {
   }
 });
 
+// Every REST body is parsed with a zod schema; without this a bad body fell
+// through to Hono's default handler as a bare 500 and the caller never saw
+// which field was wrong. Auth errors keep their own status codes above.
+app.onError((error, context) => {
+  if (error instanceof z.ZodError) {
+    return context.json({
+      error: "invalid_input",
+      message: error.issues.map((issue) => `${issue.path.join(".") || "body"}: ${issue.message}`).join("; "),
+      issues: error.issues,
+    }, 400);
+  }
+  console.error(error);
+  return context.text("Internal Server Error", 500);
+});
+
 app.get("/v1/tools", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
@@ -185,7 +200,7 @@ app.get("/v1/stats", async (context) => {
   const owner = operationContextFromAuth(auth);
   const [snapshot, jobList, lintReport, latest, sourceRows] = await Promise.all([
     store.exportGraph(owner),
-    store.jobs({ limit: 100 }),
+    store.jobs({ limit: 100 }, owner),
     store.lint(owner),
     store.timeline(owner),
     store.sources({ limit: 5000 }, owner),
@@ -342,7 +357,8 @@ app.post("/v1/invalidate-edge", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:link"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), invalidateEdgeInputSchema);
-  const edge = await store.invalidateEdge(input, operationContextFromAuth(auth));
+  const edge = await withEdgeValidityConflict(context, () => store.invalidateEdge(input, operationContextFromAuth(auth)));
+  if (edge instanceof Response) return edge;
   if (!edge) return context.json({ error: "Edge not found" }, 404);
   return context.json({ edge });
 });
@@ -351,10 +367,28 @@ app.post("/v1/link", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:link"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), linkInputSchema);
-  const edge = await store.link(input, operationContextFromAuth(auth));
+  const edge = await withEdgeValidityConflict(context, () => store.link(input, operationContextFromAuth(auth)));
+  if (edge instanceof Response) return edge;
   if (!edge) return context.json({ error: "Unable to resolve link endpoints" }, 404);
   return context.json({ edge }, 201);
 });
+
+// A write that would give one link two versions at the same world-time
+// instant, or end a version before it began, is the caller's conflict (409),
+// not a server failure. The body names the edge that owns the interval.
+async function withEdgeValidityConflict<T>(
+  context: HonoContext,
+  run: () => T | Promise<T>,
+): Promise<T | Response> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof EdgeValidityConflictError) {
+      return context.json({ error: error.message, conflictingEdgeId: error.conflictingEdgeId }, 409);
+    }
+    throw error;
+  }
+}
 
 app.post("/v1/ingest", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:ingest"]);
@@ -439,15 +473,17 @@ app.get("/v1/lint", async (context) => {
   return context.json(await store.lint(operationContextFromAuth(auth)));
 });
 
+// Operator surface, like the MCP `jobs` tool: results carry lint findings and
+// reconcile candidates, and the list is owner-scoped besides.
 app.get("/v1/jobs", async (context) => {
-  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:admin"]);
   if (auth instanceof Response) return auth;
   const input = listJobsInputSchema.parse({
     status: context.req.query("status"),
     kind: context.req.query("kind"),
     limit: context.req.query("limit") ? Number(context.req.query("limit")) : undefined,
   });
-  return context.json({ jobs: await store.jobs(input) });
+  return context.json({ jobs: await store.jobs(input, operationContextFromAuth(auth)) });
 });
 
 app.get("/v1/views", async (context) => {
@@ -733,16 +769,27 @@ serve({ fetch: app.fetch, port }, (info) => {
 // ingests become semantically searchable without a manual jobs:run. Claiming
 // uses `for update skip locked`, so extra instances stay safe. Opt out with
 // TROVE_AUTORUN_JOBS=0.
-if ((process.env.TROVE_AUTORUN_JOBS ?? "1") !== "0") {
-  const intervalMs = Number(process.env.TROVE_JOB_INTERVAL_MS ?? 30_000);
-  const worker = startJobWorker(store, {
-    intervalMs,
-    log: (message) => console.log(`[job-worker] ${message}`),
-  });
-  console.log(`Job worker running (every ${Math.round(intervalMs / 1000)}s; TROVE_AUTORUN_JOBS=0 disables).`);
-  for (const signal of ["SIGTERM", "SIGINT"] as const) {
-    process.once(signal, () => {
-      void worker.stop().finally(() => process.exit(0));
+const worker = (process.env.TROVE_AUTORUN_JOBS ?? "1") !== "0"
+  ? (() => {
+    const intervalMs = Number(process.env.TROVE_JOB_INTERVAL_MS ?? 30_000);
+    const started = startJobWorker(store, {
+      intervalMs,
+      log: (message) => console.log(`[job-worker] ${message}`),
     });
-  }
+    console.log(`Job worker running (every ${Math.round(intervalMs / 1000)}s; TROVE_AUTORUN_JOBS=0 disables).`);
+    return started;
+  })()
+  : null;
+
+// A signal exits before any timer can fire, so shutdown has to drain the store
+// itself: activation bumps sit in a one-second buffer (src/activation.ts) and
+// would otherwise be lost with the process. Registered whether or not the job
+// worker runs — the buffer fills from reads, not from jobs.
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.once(signal, () => {
+    void (async () => {
+      await worker?.stop();
+      if ("close" in store && typeof store.close === "function") await store.close();
+    })().catch(() => undefined).finally(() => process.exit(0));
+  });
 }

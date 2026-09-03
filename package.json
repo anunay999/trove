@@ -22,6 +22,7 @@
     "db:schema": "tsx scripts/applySchema.ts",
     "db:migrate": "tsx scripts/applyMigrations.ts",
     "db:migrate:prod": "node dist/scripts/applyMigrations.js",
+    "db:convert:embeddings": "tsx scripts/convertEmbeddingStorage.ts",
     "db:reset": "docker compose down -v && npm run setup",
     "db:logs": "docker compose logs -f postgres",
     "web:dev": "npm --prefix web run dev",

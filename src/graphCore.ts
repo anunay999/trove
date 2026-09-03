@@ -1,6 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { recallInputSchema } from "./contracts.js";
 import { contentTerms } from "./queryNormalize.js";
+import { parseTemporalScope, temporalAffinity, type TemporalScope } from "./temporalScope.js";
+import {
+  createRecallRerankerFromEnv,
+  mmrOrder,
+  rerankCandidates,
+  toRerankCandidate,
+  RERANK_MAX_CANDIDATES,
+  type Reranker,
+} from "./rerank.js";
 import type {
   AnnotateInput,
   CaptureInput,
@@ -45,6 +54,26 @@ export class UnknownEvidenceReferenceError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "UnknownEvidenceReferenceError";
+  }
+}
+
+/**
+ * Thrown by both store drivers when a write would give one (from, to,
+ * predicate) triple two versions that are true at the same world-time
+ * instant, or would end a version before it began. Postgres enforces this
+ * with the edge_valid_range_excl exclusion constraint and the
+ * edge_valid_range_check check; the drivers check first so the refusal can
+ * name the edge that owns the overlapping interval. Callers get a refusal,
+ * never a silently clamped validFrom.
+ */
+export class EdgeValidityConflictError extends Error {
+  /** Null only when a concurrent writer won the race and its row is not yet visible. */
+  readonly conflictingEdgeId: string | null;
+
+  constructor(message: string, conflictingEdgeId: string | null) {
+    super(message);
+    this.name = "EdgeValidityConflictError";
+    this.conflictingEdgeId = conflictingEdgeId;
   }
 }
 
@@ -135,11 +164,34 @@ export type GraphEventStats = {
  * refresh_embeddings result should narrow through these types rather than
  * re-deriving the shape.
  */
-export type EmbeddingCounts = { nodeRevisions: number; textUnits: number };
+/**
+ * What a refresh_embeddings run counts. `textChunks`, not text units, since
+ * migration 020: the vector index is built on chunks (buildTextChunks) and the
+ * per-line vectors are being retired.
+ */
+export type EmbeddingCounts = { nodeRevisions: number; textChunks: number };
 
 export type RefreshEmbeddingsResult =
-  | { status: "refreshed"; ownerId: string | null; missingBefore: EmbeddingCounts; embedded: EmbeddingCounts; provider: string; model: string }
-  | { status: "skipped_no_embedding_provider"; ownerId: string | null; missing: EmbeddingCounts; provider: string; model: string };
+  | {
+      status: "refreshed";
+      ownerId: string | null;
+      missingBefore: EmbeddingCounts;
+      embedded: EmbeddingCounts;
+      /** Sources converted from units-only to chunked by this run. */
+      chunkedSources: number;
+      /** Per-line vectors deleted because their source's chunks are indexed. */
+      retiredTextUnitVectors: number;
+      provider: string;
+      model: string;
+    }
+  | {
+      status: "skipped_no_embedding_provider";
+      ownerId: string | null;
+      missing: EmbeddingCounts;
+      chunkedSources: number;
+      provider: string;
+      model: string;
+    };
 
 export type GraphJob = {
   id: string;
@@ -158,6 +210,13 @@ export type GraphJob = {
    * for genuinely global maintenance, but it must be observable).
    */
   dedupeJoined?: boolean;
+  /**
+   * app_user.id the job belongs to: stamped from the enqueuing context the way
+   * every other write stamps its rows. NULL is global/operator work (an
+   * unscoped context, or the background worker) and is listed only to
+   * unscoped readers, never to a scoped user.
+   */
+  ownerId: string | null;
   attempts: number;
   createdAt: string;
   updatedAt: string;
@@ -183,6 +242,108 @@ export type GraphOperationContext = {
  *   nothing, so an authed request that failed to resolve an owner fails closed.
  */
 export type OwnerScope = { scoped: boolean; ownerId: string | null };
+
+/**
+ * Attempts a job gets across all causes -- failures and lease reclaims alike.
+ * One constant for both drivers and every query: the claim filter, the
+ * dead-letter threshold and the lease-exhaustion retirement must agree, or a
+ * job can sit in a state none of them matches.
+ */
+export const JOB_MAX_ATTEMPTS = 5;
+
+/**
+ * How long a finished job (succeeded/failed/dead/cancelled) stays in the
+ * table. Rows are the audit trail of maintenance, not the graph; production
+ * had ~5,000 succeeded rows and nothing ever removed one. The lint job prunes
+ * past this age.
+ */
+export const TERMINAL_JOB_RETENTION_DAYS = 30;
+
+/**
+ * Minimum seconds between two maintenance lints of one scope. A write inside
+ * this window after a successful lint enqueues no new lint; the next write
+ * past it does. Time-based rather than write-counted because the cost being
+ * bounded is lint runs per unit time, and a per-owner counter would need its
+ * own table. 0 disables the throttle (tests).
+ */
+export function lintMinIntervalSeconds(): number {
+  const parsed = Number(process.env.TROVE_LINT_MIN_INTERVAL_SECONDS);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 600;
+}
+
+/**
+ * How long an audit event stays in `graph_event`, in days.
+ *
+ * The log is append-only and nothing ever removed a row: production carried
+ * 30,479 rows / 16 MB across four indexes, growing on every write, forever.
+ * Six months answers "who changed this, and when" for anything anybody
+ * actually asks, and the dashboard's rollups only ever draw the recent past.
+ *
+ * 0 disables pruning entirely -- for an operator who wants the whole history
+ * kept, and for tests that assert nothing is removed.
+ */
+export function eventRetentionDays(): number {
+  const parsed = Number(process.env.TROVE_EVENT_RETENTION_DAYS);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 180;
+}
+
+/**
+ * Ceiling on how many event rows one prune run removes. The prune rides on the
+ * lint job, which runs on a request thread; a first prune over a log that has
+ * never been trimmed must not turn one lint into a table-wide delete holding
+ * locks and bloating WAL. Steady state is far below this (production writes
+ * ~500 events a day), so the cap only bites on catch-up runs, and lint runs
+ * often enough to drain the backlog over a few of them.
+ */
+export function eventPruneMaxRows(): number {
+  const parsed = Number(process.env.TROVE_EVENT_PRUNE_MAX_ROWS);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 20_000;
+}
+
+/** Rows per delete statement inside one prune run; the cap above bounds the run. */
+export const EVENT_PRUNE_BATCH_ROWS = 2_000;
+
+/**
+ * Ceiling on the serialized size of one `before`/`after` audit payload.
+ *
+ * Every event stores both, and no reader reads either: `GraphEvent` does not
+ * expose them, so they are pure storage. The payloads recordEvent builds are
+ * small metadata objects, but two of them quote unbounded input -- `update`
+ * carries the node summary, `tombstone` the id of every edge it expired -- so
+ * one write can put a megabyte into columns nothing ever selects.
+ *
+ * Over the cap the payload keeps its shape: every top-level key survives, and
+ * only the oversized values become a `{ truncated, bytes }` marker. The audit
+ * still says which node changed and what kind of change it was; it stops
+ * promising to reproduce the value verbatim.
+ */
+export const EVENT_PAYLOAD_MAX_BYTES = 8_192;
+
+/** Longest single value retained verbatim once a payload is over the cap. */
+const EVENT_PAYLOAD_MAX_VALUE_BYTES = 512;
+
+function payloadBytes(value: unknown): number {
+  const json = JSON.stringify(value);
+  return json === undefined ? 0 : Buffer.byteLength(json, "utf8");
+}
+
+/**
+ * Bound one audit payload to EVENT_PAYLOAD_MAX_BYTES, keeping its top-level
+ * keys. Under the cap the value is returned untouched, which is every event
+ * the graph writes in normal use.
+ */
+export function capEventPayload(value: unknown): unknown {
+  if (value === null || value === undefined) return null;
+  const bytes = payloadBytes(value);
+  if (bytes <= EVENT_PAYLOAD_MAX_BYTES) return value;
+  if (typeof value !== "object" || Array.isArray(value)) return { truncated: true, bytes };
+  const capped: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    const entryBytes = payloadBytes(entry);
+    capped[key] = entryBytes <= EVENT_PAYLOAD_MAX_VALUE_BYTES ? entry : { truncated: true, bytes: entryBytes };
+  }
+  return capped;
+}
 
 export function ownerScope(context?: GraphOperationContext): OwnerScope {
   // Scoping requires an explicit owner. No context, superuser, or a context
@@ -388,6 +549,64 @@ export type GraphLintFinding = {
   count?: number;
 };
 
+/**
+ * The reconciliation verdicts worth keeping past the job row that produced
+ * them: a judged duplicate and a judged contradiction. `supersedes` is not
+ * here because it is already resolved — it becomes an edge, and recall reads
+ * it. These two are the ones that need a person, so they need somewhere to wait.
+ */
+export type ReconcileFlagCode = "possible_duplicate" | "contradiction_candidate";
+
+export type ReconcileFlag = {
+  code: ReconcileFlagCode;
+  /** The candidate the flagged node was judged against. */
+  otherNodeId: string;
+  /** The judge's reason, as written into the job result. */
+  detail: string;
+};
+
+/** Lint code per reconcile flag — what the dashboard and the curate prompt see. */
+export const RECONCILE_LINT_CODE: Record<ReconcileFlagCode, string> = {
+  possible_duplicate: "reconcile_duplicate",
+  contradiction_candidate: "reconcile_contradiction",
+};
+
+/** At most this many reconcile findings per lint run, matching its sibling passes. */
+export const RECONCILE_FINDING_LIMIT = 50;
+
+/**
+ * Render one reconcile flag as a lint finding. Shared by both drivers so they
+ * produce identical messages, and so the ids an agent needs in order to act on
+ * it (`read` both, `connect` the pair, `forget` one) survive inside the
+ * existing finding shape: `entityId` is the flagged node, and the other node's
+ * slug and id ride in the message.
+ *
+ * Both severities are `warning`, not `error`: lint reserves `error` for a
+ * structurally broken graph (an edge pointing at nothing). A judged
+ * contradiction is a fact-level conflict for a person to resolve — the same
+ * class as `duplicate_title`, however much it deserves attention.
+ */
+export function reconcileLintFinding(flag: {
+  code: ReconcileFlagCode;
+  node: { id: string; title: string; slug: string };
+  other: { id: string; title: string; slug: string };
+  detail: string;
+}): GraphLintFinding {
+  const duplicate = flag.code === "possible_duplicate";
+  const detail = flag.detail.trim().slice(0, 200);
+  return {
+    severity: "warning",
+    code: RECONCILE_LINT_CODE[flag.code],
+    entityTable: "node",
+    entityId: flag.node.id,
+    message:
+      `Reconciliation judged "${flag.node.title}" (${flag.node.slug}, ${flag.node.id}) ` +
+      `${duplicate ? "a duplicate of" : "in contradiction with"} ` +
+      `"${flag.other.title}" (${flag.other.slug}, ${flag.other.id})` +
+      (detail ? `: ${detail}` : "."),
+  };
+}
+
 export type GraphLintReport = {
   generatedAt: string;
   summary: {
@@ -417,6 +636,20 @@ export type RecallCitation = {
   textUnitId: string | null;
 };
 
+/**
+ * What recall understood the question to be asking about in time, when it
+ * understood anything at all. Additive and optional: absent from every pack
+ * whose query carried no temporal words, which is every pack today. It exists
+ * so an agent can say "as of January" instead of silently answering about a
+ * different time.
+ */
+export type RecallTemporalScope = TemporalScope & {
+  /** Always "reweight": a parsed scope moves ranking, it never removes candidates. */
+  applied: "reweight";
+  /** The text the lexical and semantic arms actually searched for, minus the date phrase. */
+  searchQuery: string;
+};
+
 export type RecallResult = {
   context: string;
   atoms: RecallAtom[];
@@ -426,6 +659,7 @@ export type RecallResult = {
   tokenBudget: number;
   spentTokens: number;
   truncated: boolean;
+  temporalScope?: RecallTemporalScope;
 };
 
 export type ProjectResult =
@@ -512,6 +746,17 @@ export type GraphStore = {
   events(input?: EventFeedInput, context?: GraphOperationContext): MaybePromise<GraphEventFeed>;
   eventStats(context?: GraphOperationContext): MaybePromise<GraphEventStats>;
   lint(context?: GraphOperationContext): MaybePromise<GraphLintReport>;
+  /**
+   * REPLACE one node's durable reconcile flags with the set a reconcile pass
+   * just produced (an empty list clears them). Internal plumbing —
+   * performReconcileNode is the only caller, and `lint` is the only reader.
+   * Replace, not append: the latest pass is the whole truth about that node,
+   * so a re-judged node that is no longer a duplicate loses the flag.
+   */
+  recordReconcileFlags(
+    input: { nodeId: string; flags: ReconcileFlag[] },
+    context?: GraphOperationContext,
+  ): MaybePromise<void>;
   createView(input: CreateViewInput, context?: GraphOperationContext): MaybePromise<GraphViewSnapshot>;
   views(input?: ListViewsInput, context?: GraphOperationContext): MaybePromise<GraphView[]>;
   readView(input: ReadViewInput, context?: GraphOperationContext): MaybePromise<GraphViewSnapshot | null>;
@@ -519,7 +764,7 @@ export type GraphStore = {
   exportMarkdown(context?: GraphOperationContext): MaybePromise<Record<string, string>>;
   exportGraph(context?: GraphOperationContext): MaybePromise<GraphSnapshot>;
   enqueueJob(input: EnqueueJobInput, context?: GraphOperationContext): MaybePromise<GraphJob>;
-  jobs(input?: ListJobsInput): MaybePromise<GraphJob[]>;
+  jobs(input?: ListJobsInput, context?: GraphOperationContext): MaybePromise<GraphJob[]>;
   runJob(input?: RunJobInput, context?: GraphOperationContext): MaybePromise<GraphJob | null>;
   health(): MaybePromise<{ ok: true }>;
 };
@@ -638,6 +883,64 @@ export function activationScore(node: GraphNode, nowMs: number): number {
   return 0.6 * recency + 0.4 * frequency;
 }
 
+/**
+ * Weight of the parsed temporal scope in the candidate score. Sized to flip a
+ * rank or two among otherwise comparable candidates — a note that was true in
+ * the asked-about window beats its neighbour — without outweighing the lexical
+ * match itself (0.35 at rank 0), because the parse is a heuristic.
+ */
+const TEMPORAL_SCOPE_WEIGHT = 0.25;
+/** Candidates with no dated evidence either way sit between a hit and a miss. */
+const TEMPORAL_NEUTRAL_AFFINITY = 0.5;
+
+/** Query-side temporal scoping is on by default; set TROVE_TEMPORAL_SCOPE=0/off/false to fall back to present-day recall. */
+export function temporalScopeEnabled(): boolean {
+  const raw = process.env.TROVE_TEMPORAL_SCOPE?.trim().toLowerCase();
+  return raw === undefined || raw === "" || !["0", "false", "off", "no"].includes(raw);
+}
+
+/**
+ * Reweight — never filter — the ranked candidates by how well each fits the
+ * temporal scope parsed out of the query.
+ *
+ * Filtering was the tempting option and is the wrong one. The parse is
+ * heuristic, world time in Trove lives on edges only, and a node carries
+ * recorded time that says nothing about when its fact was true; a filter would
+ * therefore drop the right note whenever the parse misfired or a fact simply
+ * had no dated edge. That is the same class of silent wrongness that got asOf
+ * removed from recall: a pack that looks coherent and is not. A boost can only
+ * reorder what present-day recall already found, so the worst case is the
+ * ranking recall would have produced anyway.
+ *
+ * The sort is stable and keyed on score alone, so every tie-break the caller's
+ * comparator established survives.
+ */
+function rescoreForTemporalScope<T extends { node: GraphNode; score: number }>(
+  scored: T[],
+  scope: TemporalScope,
+  edges: Iterable<GraphEdge>,
+  now: Date,
+): T[] {
+  const incident = new Map<string, { validFrom: string | null; validUntil: string | null }[]>();
+  for (const edge of edges) {
+    const validity = { validFrom: edge.validFrom, validUntil: edge.validUntil };
+    for (const nodeId of [edge.fromNodeId, edge.toNodeId]) {
+      const list = incident.get(nodeId);
+      if (list) list.push(validity);
+      else incident.set(nodeId, [validity]);
+    }
+  }
+  return scored
+    .map((candidate) => {
+      const affinity = temporalAffinity(scope, {
+        updatedAt: candidate.node.updatedAt,
+        edges: incident.get(candidate.node.id) ?? [],
+      }, now);
+      return { ...candidate, score: candidate.score + TEMPORAL_SCOPE_WEIGHT * (affinity ?? TEMPORAL_NEUTRAL_AFFINITY) };
+    })
+    .sort((left, right) => right.score - left.score);
+}
+
 /** Cosine distance (0..2; lower = closer) → alignment in [0,1] (higher = closer). */
 export function semanticAlignment(distance: number): number {
   return Math.min(1, Math.max(0, 1 - distance));
@@ -651,6 +954,23 @@ function isPlaceholderContent(content: string | null | undefined): boolean {
 
 /** Catalog/log-style pages are useful as pointers but starve the pack if dumped whole. */
 const GIANT_CONTENT_CHARS = 12_000;
+/**
+ * Soft rank penalty for those pages, applied by BOTH ranking paths — the hand
+ * blend and the reranked one. See the note at its second use for why a
+ * relevance reranker cannot subsume it.
+ */
+const GIANT_RANK_PENALTY = 0.12;
+function giantContentPenalty(node: GraphNode): number {
+  return (node.content?.length ?? 0) > GIANT_CONTENT_CHARS ? GIANT_RANK_PENALTY : 0;
+}
+/**
+ * Weights of the reranked score. Relevance dominates because that is the whole
+ * point of paying for a second pass; activation is a prior, not a competitor.
+ */
+const RERANK_RELEVANCE_WEIGHT = 0.85;
+const RERANK_ACTIVATION_WEIGHT = 0.15;
+/** Body slice the diversity pass compares. See its use in performRecall. */
+const MMR_TEXT_CHARS = 2_000;
 /** Hard cap for giant pages in a pack (summary + opening). */
 const GIANT_PACK_CHARS = 2_500;
 /** Soft cap for a single non-giant hop-0 page so one match doesn't exhaust the budget. */
@@ -728,14 +1048,37 @@ function renderRecallEvidence(unit: TextUnit, maxChars = 1200): string {
   return `> ${text} [source:${unit.sourceId}]\n`;
 }
 
-export async function performRecall(store: GraphStore, rawInput: RecallInput, context?: GraphOperationContext): Promise<RecallResult> {
+export async function performRecall(
+  store: GraphStore,
+  rawInput: RecallInput,
+  context?: GraphOperationContext,
+  options: { reranker?: Reranker | null } = {},
+): Promise<RecallResult> {
   const input = recallInputSchema.parse(rawInput);
+  // Temporal intent belongs in the question, not in a parameter: recall lost
+  // asOf because it reached only the expansion, but "what did we deploy in
+  // January" is still a question the graph can answer better than a present-
+  // day pack. parseTemporalScope reads the date out of the query text and
+  // returns nothing whenever the reading is ambiguous, so a query with no
+  // temporal words takes exactly the path it took before.
+  const temporal = temporalScopeEnabled()
+    ? parseTemporalScope(input.query)
+    : { scope: null, query: input.query };
+  // The lexical arm ANDs every term: a month name that appears in no note
+  // empties the result set, and it dilutes the query embedding besides. Search
+  // sees the question without its date phrase; ranking below sees the date.
+  const searchQuery = temporal.scope && contentTerms(temporal.query).length > 0
+    ? temporal.query
+    : input.query;
   const search = await store.search({
-    query: input.query,
+    query: searchQuery,
     ...(input.types ? { types: input.types } : {}),
     includeTextUnits: input.includeEvidence,
     mode: "hybrid",
-    limit: 10,
+    // The seed pool, not the pack size: the budgeter below decides how many of
+    // these fit. At 10 the pack was silently narrower than search, and a
+    // generous budget could never reach the eleventh hit.
+    limit: 50,
     ...(input.maxSemanticDistance !== undefined ? { maxSemanticDistance: input.maxSemanticDistance } : {}),
   }, context);
 
@@ -759,7 +1102,6 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
         nodeId: seed.id,
         depth: input.depth,
         includeExpired: false,
-        ...(input.asOf ? { asOf: input.asOf } : {}),
       }, context);
       for (const edge of expansion.edges) edgePool.set(edge.id, edge);
       for (const node of expansion.nodes) {
@@ -793,10 +1135,15 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     : 0.5;
   // Prefer hop-0 (direct matches) over linked neighbors so budget goes to full pages.
   // Soft-penalize giant catalog/log pages so they don't outrank a specific runbook.
-  const scored = [...candidates.values()]
+  const byScore = (left: Scored, right: Scored): number =>
+    right.score - left.score ||
+    left.hops - right.hops ||
+    // Prefer more specific (shorter) pages when scores tie.
+    (left.node.content?.length ?? 0) - (right.node.content?.length ?? 0) ||
+    left.node.slug.localeCompare(right.node.slug);
+  type Scored = Candidate & { score: number };
+  const blended = [...candidates.values()]
     .map((candidate) => {
-      const contentLen = candidate.node.content?.length ?? 0;
-      const giantPenalty = contentLen > GIANT_CONTENT_CHARS ? 0.12 : 0;
       const align = candidate.distance !== undefined
         ? semanticAlignment(candidate.distance)
         : neutralAlignment;
@@ -808,18 +1155,85 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
           0.20 * activationScore(candidate.node, nowMs) +
           0.15 * (candidate.degree / maxDegree) +
           (candidate.hops === 0 ? 0.15 : 0) -
-          giantPenalty,
+          giantContentPenalty(candidate.node),
       };
     })
-    .sort((left, right) =>
-      right.score - left.score ||
-      left.hops - right.hops ||
-      // Prefer more specific (shorter) pages when scores tie.
-      (left.node.content?.length ?? 0) - (right.node.content?.length ?? 0) ||
-      left.node.slug.localeCompare(right.node.slug),
-    );
+    .sort(byScore);
 
-  const header = `Recall: ${input.query}\n`;
+  // Reranking (finding 08 / R5). The blend above is seven hand-set constants
+  // nobody measured, and bench/FINDINGS.md prices them: Hit@K 100% against
+  // precision 23.3%. It stays exactly as it is as the CANDIDATE GENERATOR —
+  // RRF fusion plus expansion is cheap, recalls everything, and orders badly —
+  // and a reranker reorders its head when one is configured.
+  //
+  // Head only, and the tail keeps its place behind it. Scores either side of
+  // that boundary come from different scales and are deliberately not compared;
+  // what packing consumes is the order, not the number.
+  const reranker = options.reranker === undefined ? createRecallRerankerFromEnv() : options.reranker;
+  const rerankHead = blended.slice(0, RERANK_MAX_CANDIDATES);
+  const rerankScores = await rerankCandidates(reranker, {
+    query: input.query,
+    candidates: rerankHead.map((candidate) => toRerankCandidate(candidate.node)),
+  });
+  let scored: Scored[] = rerankScores
+    ? [
+      ...rerankHead
+        .map((candidate) => ({
+          ...candidate,
+          // Two terms, not seven. The reranker already weighs everything match
+          // rank, alignment, degree and the hop bonus were proxies for — it
+          // reads the candidate against the query instead of guessing from its
+          // position in a fused list — so those four go. Two survive:
+          //
+          // - activation, because it is the one thing a cross-encoder cannot
+          //   know: which atoms THIS owner actually works from. Small on
+          //   purpose. It breaks ties; it does not overturn relevance.
+          // - the giant penalty, because it is not a relevance signal at all.
+          //   It is a budget-shape signal: a 12k-char catalog page can be the
+          //   most relevant hit and still be the wrong thing to spend a pack
+          //   on, and renderRecallAtom truncates it to 2.5k anyway. The
+          //   reranker is asked about relevance and answers about relevance,
+          //   so it cannot subsume this.
+          score:
+            RERANK_RELEVANCE_WEIGHT * (rerankScores.get(candidate.node.id) ?? 0) +
+            RERANK_ACTIVATION_WEIGHT * activationScore(candidate.node, nowMs) -
+            giantContentPenalty(candidate.node),
+        }))
+        .sort(byScore),
+      ...blended.slice(RERANK_MAX_CANDIDATES),
+    ]
+    : blended;
+  // Diversity, over the reranked head only. A reranker is a relevance function
+  // and nothing more: shown four restatements of the one fact that answers the
+  // query, it scores all four at the top and they take the whole pack, so the
+  // budget buys one fact instead of four. MMR spends the slots after the first
+  // on atoms that add something. Deliberately not applied to the hand blend —
+  // with the flag off, recall is what it was.
+  if (rerankScores) {
+    const head = mmrOrder(scored.slice(0, RERANK_MAX_CANDIDATES), {
+      score: (candidate) => candidate.score,
+      // Redundancy is judged on the same text the reader would see. The body
+      // slice is bounded for the same reason the reranker's is: term extraction
+      // should cost the same on a runbook and on an event log.
+      text: (candidate) => [
+        candidate.node.title,
+        candidate.node.summary ?? "",
+        (candidate.node.content ?? "").slice(0, MMR_TEXT_CHARS),
+      ].filter(Boolean).join("\n"),
+    });
+    scored.splice(0, head.length, ...head);
+  }
+
+  // Temporal reweight last, so it applies to whichever ranking produced the
+  // order above: it is a preference about WHEN a fact was true, orthogonal to
+  // how relevant the ranker thinks it is.
+  if (temporal.scope) scored = rescoreForTemporalScope(scored, temporal.scope, edgePool.values(), new Date(nowMs));
+
+  // The header names the scope so the pack itself says which time it answers
+  // about; an agent reading only the context text can then say "as of January".
+  const header = `Recall: ${input.query}\n${temporal.scope
+    ? `Temporal scope: ${temporal.scope.label} — ranked toward facts true then; use read/neighborhood asOf for exact history.\n`
+    : ""}`;
   let spentTokens = estimateTokens(header);
   let truncated = false;
   const contextParts = [header];
@@ -1076,6 +1490,9 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     tokenBudget: input.tokenBudget,
     spentTokens,
     truncated,
+    ...(temporal.scope
+      ? { temporalScope: { ...temporal.scope, applied: "reweight" as const, searchQuery } }
+      : {}),
   };
   enforceRecallWireBudget(result);
   // Provenance guard (backlog #9b): only the evidence that survived EVERY cut
@@ -1152,6 +1569,142 @@ export function splitTextUnits(sourceId: string, contentText: string): TextUnit[
   }
 
   return units;
+}
+
+/**
+ * Target size of a text chunk, in characters of unit text. The context prefix
+ * rides on top and is not counted.
+ *
+ * Text units are LINES (splitTextUnits above splits on newlines), averaging 187
+ * bytes in production, and one vector per line is what filled the disk on
+ * 3 September: 70,479 of the 71,929 vectors were per-line, 98% of the vector
+ * bytes. A line is also the wrong grain to embed — "…and that is why we moved
+ * off Railway." carries almost no retrievable meaning on its own.
+ *
+ * 1200 characters is ~300 tokens, the size range Anthropic's contextual-
+ * retrieval work uses, and at the production average it gathers ~6 lines into
+ * one vector. Changing it changes nothing about citations: the chunk is only
+ * what gets EMBEDDED. See buildTextChunks.
+ */
+export const CHUNK_TARGET_CHARS = 1200;
+
+/**
+ * A contiguous run of text units within one source, and the grain the vector
+ * index is built on. `firstOrdinal`..`lastOrdinal` is the run it covers, which
+ * is how a semantic hit resolves back to the text units it must cite.
+ */
+export type TextChunk = {
+  id: string;
+  sourceId: string;
+  /** Dense index of the chunk within its source. */
+  ordinal: number;
+  /** First and last text_unit.ordinal covered, inclusive. */
+  firstOrdinal: number;
+  lastOrdinal: number;
+  /** Section the whole run belongs to; a chunk never straddles two. */
+  sectionPath: string[];
+  /** The written context the chunk is embedded WITH (never cited). */
+  contextPrefix: string;
+  /** The units' own text, joined by newlines. */
+  text: string;
+  /** sha256 of the exact embedding input, so a changed prefix re-embeds. */
+  contentSha256: string;
+};
+
+/**
+ * The context prefix Anthropic's contextual retrieval calls for, built from
+ * what we already know for free and can state truthfully: the source's title
+ * and the section the run sits in. No LLM call, so it costs nothing per chunk
+ * and cannot hallucinate — the reported win there came from situating the
+ * chunk in its document, which a title and a section path already do.
+ */
+export function chunkContextPrefix(sourceTitle: string, sectionPath: string[]): string {
+  const section = sectionPath.filter(Boolean).join(" › ");
+  return section ? `Source: ${sourceTitle} — Section: ${section}` : `Source: ${sourceTitle}`;
+}
+
+/** The exact text handed to the embedding provider for a chunk. */
+export function chunkEmbeddingInput(chunk: { contextPrefix: string; text: string }): string {
+  return `${chunk.contextPrefix}\n\n${chunk.text}`;
+}
+
+/**
+ * Whether a text unit is worth counting toward a chunk's substance.
+ *
+ * Must stay in step with EMBEDDABLE_TEXT_UNIT in pgStore, which is the same
+ * predicate in SQL: horizontal rules, markdown table separators and
+ * sub-12-character fragments carry no meaning. They still ride INSIDE a chunk
+ * (dropping them would break the contiguous ordinal range a chunk resolves
+ * through); what this decides is whether a chunk made of nothing else is worth
+ * a vector at all.
+ */
+export function isEmbeddableUnitText(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length < 12) return false;
+  if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(trimmed)) return false;
+  if (/^\|?(\s*:?-+:?\s*\|)+\s*$/.test(trimmed)) return false;
+  return true;
+}
+
+/**
+ * Group a source's text units into the chunks the vector index is built on.
+ *
+ * Two boundaries, in this order: a chunk never straddles a `section_path`
+ * change (a heading is a real topic break, and splitTextUnits already opens
+ * the new section with its heading line, so a chunk starts with its own
+ * heading), and a chunk closes before it would pass CHUNK_TARGET_CHARS. A
+ * single unit longer than the target becomes its own chunk rather than being
+ * split — the unit is the citation grain and must stay whole.
+ *
+ * Both drivers call this so the memory driver chunks exactly as Postgres does,
+ * and the refresh job calls it to chunk sources ingested before chunking
+ * existed — one implementation, so a backfilled chunk is byte-identical to a
+ * freshly ingested one.
+ */
+export function buildTextChunks(sourceId: string, sourceTitle: string, units: TextUnit[]): TextChunk[] {
+  const chunks: TextChunk[] = [];
+  const ordered = [...units].sort((left, right) => left.ordinal - right.ordinal);
+  const sectionKey = (path: string[]): string => path.join(" ");
+  let run: TextUnit[] = [];
+  let runChars = 0;
+
+  // Nothing embeddable in the whole run (a stretch of rules or separators) is
+  // not worth a vector; skipping it leaves those units unembedded, as before.
+  const emit = (grouped: TextUnit[]): void => {
+    const first = grouped[0];
+    const last = grouped[grouped.length - 1];
+    if (!first || !last) return;
+    if (!grouped.some((unit) => isEmbeddableUnitText(unit.text))) return;
+    const text = grouped.map((unit) => unit.text).join("\n");
+    const contextPrefix = chunkContextPrefix(sourceTitle, first.sectionPath);
+    chunks.push({
+      id: randomUUID(),
+      sourceId,
+      ordinal: chunks.length,
+      firstOrdinal: first.ordinal,
+      lastOrdinal: last.ordinal,
+      sectionPath: first.sectionPath,
+      contextPrefix,
+      text,
+      contentSha256: sha256(chunkEmbeddingInput({ contextPrefix, text })),
+    });
+  };
+
+  for (const unit of ordered) {
+    const head = run[0];
+    const sectionChanged = head !== undefined && sectionKey(head.sectionPath) !== sectionKey(unit.sectionPath);
+    const wouldOverflow = run.length > 0 && runChars + 1 + unit.text.length > CHUNK_TARGET_CHARS;
+    if (sectionChanged || wouldOverflow) {
+      emit(run);
+      run = [];
+      runChars = 0;
+    }
+    runChars += (run.length === 0 ? 0 : 1) + unit.text.length;
+    run.push(unit);
+  }
+  emit(run);
+
+  return chunks;
 }
 
 export function renderMarkdownProjection(

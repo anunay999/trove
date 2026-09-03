@@ -28,7 +28,7 @@ description: Use to clean up and maintain a Trove memory graph from inside an ag
 
 ### Pass 1 - duplicates and supersession (highest value)
 
-1. Run `lint`. Collect `duplicate_title` findings.
+1. Run `lint`. Collect `duplicate_title`, `reconcile_duplicate` and `reconcile_contradiction` findings — the reconcile ones already name both nodes and carry the judge's reason.
 2. For each pair (cap 10): `read` both. Decide one of:
    - **Same fact, one is newer** -> `connect` newer -> older with predicate `supersedes`. Apply.
    - **Same fact, same value, two wordings** -> propose a merge: keep the one with better evidence, `connect` the other with `supersedes`, note the survivor. Propose.

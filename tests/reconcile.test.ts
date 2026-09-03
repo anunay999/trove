@@ -161,6 +161,101 @@ describe("reconcile: LLM-judged path (fake judge)", () => {
   });
 });
 
+describe("reconcile: judged flags reach lint", () => {
+  // The other half of the loop: duplicate and contradiction verdicts used to
+  // terminate in graph_job.result, which nothing read.
+  const duplicateJudge: ReconcileJudge = async ({ candidates }) =>
+    candidates.map(() => ({ verdict: "duplicate", confidence: 0.95, reason: "same fact restated" }));
+  const contradictsJudge: ReconcileJudge = async ({ candidates }) =>
+    candidates.map(() => ({ verdict: "contradicts", confidence: 0.9, reason: "values disagree, recency unclear" }));
+
+  const reconcileFindings = async (store: GraphStore) =>
+    (await store.lint(context)).findings.filter((finding) => finding.code.startsWith("reconcile_"));
+
+  it("a judged duplicate becomes a reconcile_duplicate finding naming both nodes", async () => {
+    const store = new InMemoryGraphStore({ reconcileJudge: duplicateJudge });
+    const oldNode = await capture(store, "Standup is at nine", "The team standup starts at 09:00.");
+    const newNode = await capture(store, "Standup is at nine am", "The team standup starts at nine in the morning.");
+
+    const job = await reconcileJobFor(store, newNode.id);
+    assert.equal((await store.runJob({ jobId: job.id }, context))?.status, "succeeded");
+
+    const findings = await reconcileFindings(store);
+    const finding = findings.find((candidate) => candidate.code === "reconcile_duplicate");
+    assert.ok(finding, `expected a reconcile_duplicate finding; got ${JSON.stringify(findings)}`);
+    assert.equal(finding.severity, "warning");
+    assert.equal(finding.entityId, newNode.id, "the finding hangs off the node that was reconciled");
+    assert.ok(finding.message.includes(oldNode.id), "the other node's id must be actionable from the message");
+    assert.ok(finding.message.includes(oldNode.slug), "the other node's slug must be in the message");
+    assert.ok(finding.message.includes("same fact restated"), "the judge's reason must survive");
+  });
+
+  it("a judged contradiction becomes a reconcile_contradiction finding naming both nodes", async () => {
+    const store = new InMemoryGraphStore({ reconcileJudge: contradictsJudge });
+    const oldNode = await capture(store, "Deploy window is Tuesday", "Releases go out on Tuesdays.");
+    const newNode = await capture(store, "Deploy window is Thursday", "Releases go out on Thursdays.");
+
+    const job = await reconcileJobFor(store, newNode.id);
+    await store.runJob({ jobId: job.id }, context);
+
+    const findings = await reconcileFindings(store);
+    const finding = findings.find((candidate) => candidate.code === "reconcile_contradiction");
+    assert.ok(finding, `expected a reconcile_contradiction finding; got ${JSON.stringify(findings)}`);
+    assert.equal(finding.entityId, newNode.id);
+    assert.ok(finding.message.includes(oldNode.id));
+  });
+
+  it("re-judging a node that is no longer flagged clears its finding", async () => {
+    let verdict: "duplicate" | "related" = "duplicate";
+    const store = new InMemoryGraphStore({
+      reconcileJudge: async ({ candidates }) => candidates.map(() => ({ verdict, confidence: 0.95, reason: "judged" })),
+    });
+    await capture(store, "Standup is at nine", "The team standup starts at 09:00.");
+    const newNode = await capture(store, "Standup is at nine am", "The team standup starts at nine in the morning.");
+    await store.runJob({ jobId: (await reconcileJobFor(store, newNode.id)).id }, context);
+    assert.equal((await reconcileFindings(store)).length, 1);
+
+    verdict = "related";
+    const rerun = await store.enqueueJob({ kind: "reconcile_node", payload: { nodeId: newNode.id }, priority: 50 }, context);
+    await store.runJob({ jobId: rerun.id }, context);
+    assert.deepEqual(await reconcileFindings(store), [], "the latest pass is the whole truth about that node");
+  });
+
+  it("nothing surfaces before reconciliation has run", async () => {
+    const store = new InMemoryGraphStore({ reconcileJudge: duplicateJudge });
+    await capture(store, "Standup is at nine", "The team standup starts at 09:00.");
+    await capture(store, "Standup is at nine am", "The team standup starts at nine in the morning.");
+    assert.deepEqual(await reconcileFindings(store), [], "the job is enqueued, not run");
+  });
+
+  it("nothing surfaces with the judge disabled, even when the heuristic flags a duplicate", async () => {
+    // The heuristic's duplicate signal is title-token overlap, which is what
+    // duplicate_title already reports; only a judged verdict earns a new code.
+    const store = new InMemoryGraphStore();
+    const oldNode = await capture(store, "Team offsite venue decision", "The offsite will be at the lakeside center.");
+    const newNode = await capture(store, "Team offsite venue decision", "The offsite is at the lakeside center, confirmed.");
+
+    const done = await store.runJob({ jobId: (await reconcileJobFor(store, newNode.id)).id }, context);
+    const result = done?.result as Record<string, unknown>;
+    const flags = result.flags as Array<{ code: string; otherNodeId: string }>;
+    assert.ok(flags.some((flag) => flag.code === "possible_duplicate" && flag.otherNodeId === oldNode.id), "the job still flags it");
+    assert.deepEqual(await reconcileFindings(store), []);
+  });
+
+  it("caps reconcile findings so a mass re-judge cannot flood the report", async () => {
+    const store = new InMemoryGraphStore();
+    const other = await capture(store, "Cap fixture anchor", "Anchor node for the cap fixture.");
+    for (let i = 0; i < 60; i++) {
+      const node = await capture(store, `Cap fixture ${i}`, `Body ${i}.`);
+      await store.recordReconcileFlags(
+        { nodeId: node.id, flags: [{ code: "possible_duplicate", otherNodeId: other.id, detail: "fixture" }] },
+        context,
+      );
+    }
+    assert.equal((await reconcileFindings(store)).length, 50);
+  });
+});
+
 describe("reconcile: judge reply parsing", () => {
   it("parses a well-formed reply and clamps confidence", () => {
     const judgment = parseReconcileJudgment('{"verdict":"supersedes","confidence":1.4,"reason":"newer value"}');
@@ -270,6 +365,7 @@ describe("reconcile: distance gate (backlog #27)", () => {
       search: async (input: { mode?: string }) =>
         input.mode === "semantic" ? { nodes: semantic, textUnits: [] } : { nodes: lexical, textUnits: [] },
       link: async () => null,
+      recordReconcileFlags: async () => {},
     } as unknown as GraphStore;
   }
 

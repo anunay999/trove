@@ -4,9 +4,9 @@ try {
   // .env is optional; real environment variables always win.
 }
 
-import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import pg from "pg";
+import { applyMigrations } from "../src/migrate.js";
 
 const { Client } = pg;
 
@@ -15,18 +15,15 @@ if (!databaseUrl) {
   throw new Error("DATABASE_URL is required.");
 }
 
+// Relative to the working directory on purpose: the container runs the
+// compiled copy (dist/scripts/applyMigrations.js) from /app with db/ copied
+// beside dist/, so a module-relative path would point into dist/.
 const migrationsDir = resolve("db/migrations");
-const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
 const client = new Client({ connectionString: databaseUrl });
 
 await client.connect();
 try {
-  for (const file of files) {
-    const path = resolve(migrationsDir, file);
-    const sql = await readFile(path, "utf8");
-    await client.query(sql);
-    console.log(`Applied migration ${file}`);
-  }
+  await applyMigrations(client, migrationsDir, { log: console.log });
 } finally {
   await client.end();
 }

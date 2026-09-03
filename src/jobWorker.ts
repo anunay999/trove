@@ -18,7 +18,7 @@ export function embeddingDrainRemaining(job: GraphJob | null): number {
   const result = jobResultAs(job, "refresh_embeddings");
   if (!result || result.status !== "refreshed") return 0;
   const sum = (counts: EmbeddingCounts): number =>
-    Number(counts.nodeRevisions ?? 0) + Number(counts.textUnits ?? 0);
+    Number(counts.nodeRevisions ?? 0) + Number(counts.textChunks ?? 0);
   return Math.max(0, sum(result.missingBefore) - sum(result.embedded));
 }
 

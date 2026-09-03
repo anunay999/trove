@@ -45,8 +45,10 @@ Visibility is tiered by credential scope: **core** tools are shown to every cred
 
 `recall`
 
-- Input: `query`, `tokenBudget` (default **8000**), optional `types`, `depth`, `asOf`, `includeEvidence`, `maxSemanticDistance` (cosine-distance ceiling 0–2 for semantic hits; server default 0.55, configurable via `TROVE_SEMANTIC_MAX_DISTANCE`)
-- Output: a token-budgeted context pack — packed atoms with scores, connecting edges, evidence text units, citations, `spentTokens`, and `truncated`
+- Input: `query`, `tokenBudget` (default **8000**), optional `types`, `depth`, `includeEvidence`, `maxSemanticDistance` (cosine-distance ceiling 0–2 for semantic hits; server default 0.55, configurable via `TROVE_SEMANTIC_MAX_DISTANCE`)
+- Present belief only: there is no `asOf`. A request that sends one is rejected with a pointer to `read` (fact snapshots) and `neighborhood` (edge history), the two time-travel surfaces.
+- Output: a token-budgeted context pack — packed atoms with scores, connecting edges, evidence text units, citations, `spentTokens`, `truncated`, and `temporalScope` when the query carried a time
+- Temporal intent is read from the query text ("in January", "since March", "last week", "currently"): the date phrase is stripped before the lexical and semantic arms see it, and the scope **reweights** ranking toward facts whose world time overlaps the window — it never filters candidates and never swaps a body for an older revision. Ambiguous or event-relative phrasings ("before the migration", "from January to March") parse to nothing and recall behaves exactly as it does without them. Set `TROVE_TEMPORAL_SCOPE=0` to turn the parse off.
 - Open-ended questions only: hybrid search seeds a graph expansion, candidates are ranked by match plus ACT-R-style activation (recency, frequency) plus degree, and a greedy packer fills the budget. The budget covers the whole serialized response: atoms carry the packed body slice (`contentTruncated` marks cut bodies — `read` the slug for the full note), `hops` is the true graph distance from the match, and per-node evidence is relevance-ranked to the query, capped at 5 units each.
 - The pack is a **brief**, not always a full note. Packing never counts as a read — only an explicit `read` strengthens activation. Primary hits pack deeply; giant catalog notes are teaser-capped. Prefer one good `recall` for open questions; follow with `read` when you need the complete note.
 
@@ -73,7 +75,9 @@ Visibility is tiered by credential scope: **core** tools are shown to every cred
 `connect`
 
 - For adding explicit edges between existing nodes.
-- Edges are bitemporal: `created_at` is transaction time, `valid_from`/`valid_until` are world time. Pass `supersedesEdgeId` to atomically invalidate the belief the new edge replaces — the old edge gets `expired_at`, `valid_until`, and `invalidated_by`, never a delete.
+- Edges are bitemporal: `created_at` is transaction time, `valid_from`/`valid_until` are world time. Pass `supersedesEdgeId` to atomically invalidate the belief the new edge replaces — the old edge gets `expired_at`, `valid_until` (= the new edge's `validFrom`), and `invalidated_by`, never a delete.
+- One version of a `(from, to, predicate)` link per world-time instant, expired versions included. `validFrom` defaults to now, which never conflicts; a `validFrom` that falls inside a closed version's `[validFrom, validUntil)`, or a superseding `validFrom` earlier than the superseded edge's own `validFrom`, is refused with HTTP 409 (`{ error, conflictingEdgeId }`; an MCP tool error naming the edge) rather than clamped. Start the new version at or after the old one's `validUntil`.
+- Every expired edge carries `invalidationReason`: `superseded` (via `supersedesEdgeId`), `invalidated` (via `forget`/`invalidate-edge`), or `tombstoned` (an endpoint node was tombstoned). Active edges carry `null`.
 
 `forget`
 

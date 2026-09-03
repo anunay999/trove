@@ -42,7 +42,7 @@ Also verified: memory interop is greenfeld — no framework's wire format has be
 If "MemDB" were a product, its data model and query surface would be:
 
 ### 1. Bitemporal belief atoms
-The target model gives facts and relationships both world time and recorded time, with supersession represented by expiry rather than deletion. Trove's shipped model is deliberately narrower: edges carry `valid_from`/`valid_until`, `created_at`/`expired_at`, and `invalidated_by`; node revisions snapshot title, summary, and content on recorded time only. `read({ asOf })` reconstructs a node fact from `node_revision`, while `neighborhood`/`recall` apply recorded-time visibility to edges. Historical node reads currently keep evidence and annotations at their present state.
+The target model gives facts and relationships both world time and recorded time, with supersession represented by expiry rather than deletion. Trove's shipped model is deliberately narrower: edges carry `valid_from`/`valid_until`, `created_at`/`expired_at`, and `invalidated_by`; node revisions snapshot title, summary, and content on recorded time only. `read({ asOf })` reconstructs a node fact from `node_revision`, while `neighborhood` applies recorded-time visibility to edges. `recall` answers from present belief only and rejects `asOf`: its search, supersession marks, and evidence have no historical form, and a pack that mixed present bodies with past edge visibility would be temporally incoherent. Historical node reads currently keep evidence and annotations at their present state.
 
 ### 2. Mandatory provenance
 No semantic atom without a path back to an episode/span (or an explicit `agent_inference` marker). Trove already has this via `annotation` + `text_unit`; it is the right call and rarer than it should be — Graphiti's episode subgraph is the only major production analogue.
@@ -72,7 +72,8 @@ Ordered by leverage; the schema is already ~70% of the way there.
 > Status (updated 2026-08-06): items 1, 3, and 4 below are implemented — bitemporal edges with
 > `supersedesEdgeId`/`graph.invalidate_edge` (migration `003_bitemporal_activation.sql`) plus
 > recorded-time node fact snapshots and `read({ asOf })` (migration `012_fact_revision_snapshots.sql`),
-> `graph.recall` with `tokenBudget`, and activation columns bumped on read. Covered by
+> `graph.recall` with `tokenBudget`, and activation columns bumped on read (batched: bumps buffer in
+> process and drain in one `unnest` statement per window, `TROVE_ACTIVATION_FLUSH_MS`). Covered by
 > the `bitemporal`, `fact-time-travel`, and `recall` suites on both drivers. Reconciliation
 > is shipped (status below); embeddings index only the current node revision by design.
 
@@ -103,7 +104,7 @@ Ordered by leverage; the schema is already ~70% of the way there.
 2. **Reconciliation in the write path.** On `capture`/`ingest` extraction: candidate-match against existing node facts (slug, FTS, embedding), auto-link or flag, and generate contradiction candidates for temporally overlapping facts. Wire the invalidation primitive into `graph.lint`'s contradiction pass.
 3. **`graph.recall` with `token_budget`.** Compose the pieces that already exist (hybrid search, `neighborhood`, nodes, annotations) into one budgeted context-pack operator. This replaces "agent calls search then read then neighborhood" with one call — and it is the single biggest agent-UX win.
 4. **Activation columns.** `access_count`, `last_accessed_at` on `node`; bump on read (batched); fold into ranking. Add a nightly `graph_job` that computes decay and tags dormant atoms.
-5. **Embed facts, not just text units.** Shipped for the current `node_revision`: the searchable vector covers revision title, summary, and content. Superseded revision vectors are pruned so search cannot resurrect stale facts.
+5. **Embed facts, not just text units.** Shipped for the current `node_revision`: the searchable vector covers revision title, summary, and content. Superseded revision vectors are pruned so search cannot resurrect stale facts. The raw-text side moved off the line grain too: `text_chunk` gathers a section's contiguous units into one vector carrying a title/section context prefix, Anthropic's contextual-retrieval shape, and a hit resolves back to the text units it covers.
 6. **Keep deferring Kuzu** until multi-hop traversal is demonstrably the bottleneck — the step-back research strengthened, not weakened, that call. Same for a separate vector DB.
 
 ## What Stays True From v1

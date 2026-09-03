@@ -67,10 +67,15 @@ export function hasPostgres(): boolean {
 export async function isolateDatabase(suiteName: string): Promise<void> {
   if (!hasPostgres()) return;
   const baseUrl = process.env.DATABASE_URL as string;
-  const dbName = `trove_${suiteName.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}_test`;
+  // TROVE_TEST_DB_PREFIX lets several checkouts (worktrees, parallel CI jobs)
+  // share one Postgres without dropping each other's suite databases.
+  const prefix = (process.env.TROVE_TEST_DB_PREFIX ?? "").replace(/[^a-z0-9_]+/gi, "_").toLowerCase();
+  const dbName = `trove_${prefix}${suiteName.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}_test`;
 
   const { default: pg } = await import("pg");
-  const { readdir, readFile } = await import("node:fs/promises");
+  const { readFile } = await import("node:fs/promises");
+  const { fileURLToPath } = await import("node:url");
+  const { applyMigrations } = await import("../src/migrate.js");
 
   const admin = new pg.Client({ connectionString: baseUrl });
   await admin.connect();
@@ -88,11 +93,7 @@ export async function isolateDatabase(suiteName: string): Promise<void> {
   await client.connect();
   try {
     await client.query(await readFile(new URL("../db/schema.sql", import.meta.url), "utf8"));
-    const migrationsDir = new URL("../db/migrations/", import.meta.url);
-    const migrations = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
-    for (const file of migrations) {
-      await client.query(await readFile(new URL(file, migrationsDir), "utf8"));
-    }
+    await applyMigrations(client, fileURLToPath(new URL("../db/migrations/", import.meta.url)));
   } finally {
     await client.end();
   }

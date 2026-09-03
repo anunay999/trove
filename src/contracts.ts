@@ -71,6 +71,14 @@ export const graphNodeSchema = z.object({
   lastAccessedAt: z.string().nullable(),
 });
 
+// Why an edge stopped being believed. Exactly one of these is recorded
+// whenever expiredAt is set, and none while the edge is active:
+// - superseded: replaced through link({ supersedesEdgeId }); invalidatedBy
+//   names the successor.
+// - invalidated: retired directly via invalidateEdge / forget.
+// - tombstoned: an endpoint node was tombstoned.
+export const edgeInvalidationReasonSchema = z.enum(["superseded", "invalidated", "tombstoned"]);
+
 export const graphEdgeSchema = z.object({
   id: z.string().uuid(),
   fromNodeId: z.string().uuid(),
@@ -78,10 +86,13 @@ export const graphEdgeSchema = z.object({
   predicate: z.string().min(1),
   weight: z.number(),
   recordedAt: z.string(),
+  // World time. The stores never write null (valid_from is not null since
+  // migration 014); the type stays nullable for clients holding older exports.
   validFrom: z.string().nullable(),
   validUntil: z.string().nullable(),
   expiredAt: z.string().nullable(),
   invalidatedBy: z.string().uuid().nullable(),
+  invalidationReason: edgeInvalidationReasonSchema.nullable(),
 });
 
 export const graphAnnotationSchema = z.object({
@@ -167,7 +178,17 @@ export const recallInputSchema = z.object({
   tokenBudget: z.number().int().min(100).max(32000).default(8000),
   types: z.array(nodeTypeSchema).optional(),
   depth: z.number().int().min(0).max(2).default(1),
-  asOf: z.string().optional(),
+  // recall answers from present belief only. It once accepted asOf and passed
+  // it to the neighbourhood expansion alone, so search, supersession marks,
+  // and evidence stayed current while edge visibility went back in time: a
+  // pack that looked coherent and was not. Time travel lives on read (fact
+  // snapshots) and neighborhood (edge history). z.object strips unknown keys,
+  // so an old client sending asOf would otherwise get a silent present-day
+  // pack; declaring it as never rejects it by name with a pointer instead.
+  asOf: z
+    .never({ error: "asOf is not supported on recall; use read (fact snapshots) or neighborhood (edge history) for time travel." })
+    .optional()
+    .describe("Not supported: recall answers from present belief. Use read or neighborhood for asOf."),
   includeEvidence: z.boolean().default(true),
   // Cosine-distance ceiling for semantic seed hits (0..2). See searchInputSchema.
   maxSemanticDistance: z.number().min(0).max(2).optional(),
@@ -206,16 +227,18 @@ export const quoteEvidenceRefSchema = z.object({
   message: "Evidence must reference a source, a text unit, or quote span text.",
 });
 
+export const captureLinkSchema = z.object({
+  toSlug: z.string().min(1),
+  predicate: z.string().min(1).default("relates_to"),
+});
+
 export const captureInputSchema = z.object({
   title: z.string().min(1),
   type: nodeTypeSchema.default("claim"),
   summary: z.string().min(1),
   content: z.string().optional(),
   evidence: z.array(evidenceRefSchema).default([]),
-  links: z.array(z.object({
-    toSlug: z.string().min(1),
-    predicate: z.string().min(1).default("relates_to"),
-  })).default([]),
+  links: z.array(captureLinkSchema).default([]),
 });
 
 export const rememberInputSchema = z.object({
@@ -278,6 +301,12 @@ export const updateInputSchema = z.object({
   summary: z.string().min(1).optional(),
   content: z.string().min(1).optional(),
   slug: z.string().min(1).optional(),
+  // Evidence and links attach inside the same transaction as the revision,
+  // exactly as capture does, so a revise-with-citations lands whole or not
+  // at all. A missing link target is skipped (capture parity); an evidence ref
+  // that does not resolve aborts the write.
+  evidence: z.array(evidenceRefSchema).optional(),
+  links: z.array(captureLinkSchema).optional(),
 });
 
 export const projectInputSchema = z.object({
@@ -378,6 +407,7 @@ export type GraphSource = z.infer<typeof graphSourceSchema>;
 export type TextUnit = z.infer<typeof textUnitSchema>;
 export type GraphNode = z.infer<typeof graphNodeSchema>;
 export type GraphEdge = z.infer<typeof graphEdgeSchema>;
+export type EdgeInvalidationReason = z.infer<typeof edgeInvalidationReasonSchema>;
 export type GraphAnnotation = z.infer<typeof graphAnnotationSchema>;
 export type SearchInput = z.infer<typeof searchInputSchema>;
 export type ReadInput = z.infer<typeof readInputSchema>;

@@ -25,7 +25,7 @@ flowchart LR
   DB --> Units["Text units + annotations"]
   DB --> Graph["Semantic atoms + edges"]
   DB --> Jobs["Durable maintenance jobs"]
-  Units --> Search["FTS + embeddings"]
+  Units --> Search["FTS over units + embeddings over chunks"]
   Graph --> Views["Materialized graph views"]
   Jobs --> Views
   Views --> Markdown["Obsidian markdown export"]
@@ -78,6 +78,10 @@ Official references:
 
 The storage decision is explicit in [storage-decision.md](/Users/anunay/dev/trove/docs/storage-decision.md): Postgres is the canonical write store, Kuzu is the preferred future traversal projection, and vector databases remain optional read indexes.
 
+#### Schema migrations
+
+`db/migrations/*.sql` is the source of truth for the schema; `db/schema.sql` is a historical bootstrap snapshot that fresh databases load first. `src/migrate.ts` applies the migrations on every container start and records each in `schema_migrations(filename, checksum, applied_at)`, so a file runs once and is skipped thereafter; a recorded file whose sha256 changed fails the boot and names the file, because applied migrations are immutable. The run holds a Postgres advisory lock so two instances booting side by side (a zero-downtime deploy) serialise instead of racing. Each file runs in its own transaction, unless its first line is exactly `-- trove:no-transaction`, which is for a single `create index concurrently ... if not exists` statement.
+
 ### Runtime: TypeScript Service
 
 Use a small TypeScript service with:
@@ -99,6 +103,14 @@ Use layered retrieval:
 3. Graph expansion to pull nearby canonical context.
 
 Do not make a vector database the source of truth. Embeddings are an index over knowledge, not the knowledge.
+
+### Activation
+
+An agent-facing `read` strengthens the atom it served: `node.access_count` and `node.last_accessed_at` feed the recency and frequency terms of recall's ranking. Those bumps are **batched**, not written one update per read. `node` is the hottest table in the graph, and a row version per read is pure churn — a round trip, a transaction and a dead tuple each time. Reads buffer their bump in process (`src/activation.ts`) and a timer drains a window's worth in a single `update node ... from unnest(...)`: repeated reads of one atom collapse into one row version, and reads of many atoms into one statement.
+
+The window is 1s by default (`TROVE_ACTIVATION_FLUSH_MS`). The buffer is bounded — it drains early at 1000 distinct nodes and drops oldest-first only if the database has been refusing writes for several windows — and it is flushed on `close()` and on `SIGTERM`/`SIGINT`, while its timer holds the event loop open so a process that exits normally still writes what it buffered.
+
+`access_count` is therefore eventually consistent within that window for anything that reads the column straight out of Postgres: recall's ranking arm, the dashboard's most-recalled list. Reads are not eventually consistent — a read folds its store's un-flushed delta onto the row it selected, so a caller always sees its own accesses counted, tracked or not. Projection and every internal read-back pass `trackAccess: false` and never inflate activation.
 
 ### Agent Protocol
 
@@ -127,15 +139,15 @@ Official references:
 The substrate should separate durable primitives:
 
 - `source`: immutable raw input or imported long-form document
-- `text_unit`: addressable section, paragraph, chunk, quote, transcript segment, or OCR block
+- `text_unit`: addressable section, paragraph, chunk, quote, transcript segment, or OCR block. The CITATION grain: evidence quotes, annotations and the served-unit log all point here.
+- `text_chunk`: a contiguous run of text units inside one section, capped by `CHUNK_TARGET_CHARS` (1200) and carrying the context prefix it is embedded with. The EMBEDDING grain, and nothing else — a chunk is never cited.
 - `annotation`: meaning attached to a source span or text unit
-- `node`: canonical semantic atom such as project, pattern, person, domain, claim, decision, task, question, or view
-- `edge`: typed relationship between nodes
-- `claim`: factual assertion with provenance, confidence, status, and validity window
-- `revision`: materialized page/content version for a node
+- `node`: canonical semantic atom such as project, pattern, person, domain, claim, decision, task, question, or view. A claim is a node type with provenance through its annotations; the separate `claim` table was dropped in migration 010 (nothing wrote to it).
+- `edge`: typed relationship between nodes, bitemporal (`valid_from`/`valid_until` world time, `expired_at` belief time)
+- `revision`: the full fact (title, summary, content) at each version of a node
 - `event`: append-only audit log of every graph mutation
 - `view`: saved mind map/query projection
-- `embedding`: vector index rows scoped to node, revision, source, or claim
+- `embedding`: vector rows for each node's current revision and for each text chunk. Not one per text unit: a unit is a LINE (averaging 187 bytes in production), one vector per line was 98% of the vector bytes and filled the disk on 3 September, and a line carries too little to retrieve on. A semantic hit on a chunk expands back through its `first_ordinal..last_ordinal` range to the text units it covers, so citations are unchanged. Superseded revisions lose their vectors on update, so semantic search cannot resurrect replaced content. Storage and tenancy live in [deployment.md](/Users/anunay/dev/trove/docs/deployment.md#embedding-storage).
 - `job`: durable maintenance work for projection refresh, graph lint, and embedding refresh
 
 This avoids the main markdown trap: a page can contain many facts, a long source can support many facts, and a fact can belong to multiple pages/views.
@@ -194,12 +206,10 @@ This makes mind maps durable artifacts agents can edit. Example views:
 Agent writes should be proposal-shaped, even when applied automatically:
 
 1. Agent calls `remember`, `connect`, or `ingest`.
-2. Service validates schema, permissions, citations, and revision token.
-3. Service writes all node/edge/claim/revision changes in one transaction.
-4. Service appends events.
-5. Service enqueues durable maintenance jobs.
-6. Worker refreshes search vectors, markdown export, and affected mind-map views.
-7. Interfaces poll `events` from their last cursor to update local UI/projections.
+2. Service validates schema, permissions, citations, and revision token. `remember` resolves every citation ({ quote } to a text unit, raw ids fail-closed in the caller's scope) and every link target before it writes; refs that do not resolve come back as `evidenceRejected` / `linkRejected` and are never written.
+3. Service writes the node, its revision, its evidence annotations, its edges, the audit event, and the maintenance `graph_job` rows in one transaction (`capture` on create, `update` on revise). A failure anywhere rolls back everything: no node is ever left with half its citations.
+4. Worker refreshes search vectors, markdown export, and affected mind-map views.
+5. Interfaces poll `events` from their last cursor to update local UI/projections.
 
 ```mermaid
 sequenceDiagram
@@ -208,12 +218,11 @@ sequenceDiagram
   participant DB as Postgres
   participant Worker
 
-  Agent->>API: remember(slug, changes)
-  API->>API: validate scopes, schema, citations
-  API->>DB: transaction: nodes, edges, claims, revision, event
-  API->>DB: enqueue graph_job rows
-  DB-->>API: graph_tx_id
-  API-->>Agent: committed revision + warnings
+  Agent->>API: remember(title, changes, evidence, links)
+  API->>API: validate scopes, schema; resolve citations and link targets
+  API->>DB: one transaction: node, revision, annotations, edges, event, graph_job rows
+  DB-->>API: commit
+  API-->>Agent: committed revision + rejected refs/links as warnings
   Worker->>DB: claim pending graph_job
   Worker->>DB: refresh indexes and projections
 ```
