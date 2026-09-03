@@ -116,9 +116,9 @@ export function Landing({ onJoin, onLogin, onConnectKey }: LandingProps) {
 
       {/* Closer: one claim, one action, nothing else. */}
       <section className="border-t border-border px-6 py-28 md:py-40 lg:px-10">
-        <div className="mx-auto flex max-w-3xl flex-col items-center text-center">
+        <div className="mx-auto flex max-w-5xl flex-col items-center text-center">
           <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--signal)]">Keep your memory close</p>
-          <h2 className="mt-6 text-[clamp(2.6rem,5.8vw,5.25rem)] font-medium leading-[1.0] tracking-[-0.05em]">
+          <h2 className="mt-6 text-[clamp(2.5rem,5.2vw,4.75rem)] font-medium leading-[1.0] tracking-[-0.05em]">
             The next session should
             <br />
             start <span className="font-serif italic">further ahead.</span>
