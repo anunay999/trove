@@ -203,14 +203,6 @@ export default function App() {
                 Refresh
               </button>
             )}
-            {isFrontDoor && (
-              <a
-                href={appOrigin}
-                className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground transition-colors hover:text-foreground"
-              >
-                Open app
-              </a>
-            )}
             {tokenMode && (
               <button
                 type="button"
@@ -248,7 +240,17 @@ export default function App() {
             {isAdmin && identity && dashboardReady && (
               <UserSwitcher self={identity} impersonating={impersonating} />
             )}
-            {clerkEnabled && <AuthControls onOpenLogin={openLogin} onSessionChange={onSessionChange} dark={dark} />}
+            {/* The front door has no session of its own to show: Log in always goes to the app. */}
+            {clerkEnabled && isFrontDoor && (
+              <button
+                type="button"
+                onClick={openLogin}
+                className="h-8 rounded-md bg-primary px-3.5 text-[13px] font-medium text-primary-foreground transition-transform active:scale-[0.98]"
+              >
+                Log in
+              </button>
+            )}
+            {clerkEnabled && !isFrontDoor && <AuthControls onOpenLogin={openLogin} onSessionChange={onSessionChange} dark={dark} />}
           </div>
         </div>
       </header>
