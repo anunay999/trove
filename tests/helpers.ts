@@ -67,7 +67,10 @@ export function hasPostgres(): boolean {
 export async function isolateDatabase(suiteName: string): Promise<void> {
   if (!hasPostgres()) return;
   const baseUrl = process.env.DATABASE_URL as string;
-  const dbName = `trove_${suiteName.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}_test`;
+  // TROVE_TEST_DB_PREFIX lets several checkouts (worktrees, parallel CI jobs)
+  // share one Postgres without dropping each other's suite databases.
+  const prefix = (process.env.TROVE_TEST_DB_PREFIX ?? "").replace(/[^a-z0-9_]+/gi, "_").toLowerCase();
+  const dbName = `trove_${prefix}${suiteName.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}_test`;
 
   const { default: pg } = await import("pg");
   const { readdir, readFile } = await import("node:fs/promises");
