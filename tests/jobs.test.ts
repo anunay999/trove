@@ -135,6 +135,87 @@ describe("jobs", () => {
     await sql("update graph_job set status = 'cancelled', finished_at = now(), updated_at = now() where id = $1", [job.id]);
   });
 
+  it("a lint that succeeded recently throttles the next write's lint enqueue", async (t) => {
+    const previous = process.env.TROVE_LINT_MIN_INTERVAL_SECONDS;
+    process.env.TROVE_LINT_MIN_INTERVAL_SECONDS = "600";
+    t.after(() => {
+      if (previous === undefined) delete process.env.TROVE_LINT_MIN_INTERVAL_SECONDS;
+      else process.env.TROVE_LINT_MIN_INTERVAL_SECONDS = previous;
+    });
+
+    const owner = await freshOwner("jobs-throttle");
+    const asOwner: GraphOperationContext = { ...context, ownerId: owner };
+    const key = `maintenance:lint_graph:${owner}`;
+    const lintsForOwner = async (): Promise<GraphJob[]> =>
+      (await store.jobs({ kind: "lint_graph", limit: 200 })).filter((job) => job.dedupeKey === key);
+    const write = async (title: string): Promise<void> => {
+      await store.capture({
+        title: `${title} ${stamp}`,
+        type: "claim",
+        summary: "Every write used to enqueue a full lint.",
+        content: "Steady state was one lint per write; dedupe only collapsed bursts.",
+        evidence: [],
+        links: [],
+      }, asOwner);
+    };
+
+    await write("Throttle first");
+    const [first] = await lintsForOwner();
+    assert.ok(first, "the first write enqueues the owner's lint");
+    assert.equal(first.status, "pending");
+    const done = await store.runJob({ jobId: first.id }, context);
+    assert.equal(done?.status, "succeeded");
+
+    await write("Throttle second");
+    const afterSecond = await lintsForOwner();
+    assert.equal(afterSecond.length, 1, "a write inside the interval enqueues no new lint");
+    assert.ok(!afterSecond.some((job) => job.status === "pending"), "nothing pending while the last lint is fresh");
+
+    process.env.TROVE_LINT_MIN_INTERVAL_SECONDS = "0";
+    await write("Throttle third");
+    const pending = (await lintsForOwner()).find((job) => job.status === "pending");
+    assert.ok(pending, "with the throttle off a write enqueues lint again");
+    await store.runJob({ jobId: pending.id }, context);
+  });
+
+  it("a lint run prunes terminal jobs older than thirty days", { skip: hasPostgres() ? false : "postgres only" }, async () => {
+    const insert = async (status: string, age: string, finished: boolean): Promise<string> => {
+      const [row] = await sql<{ id: string }>(
+        `insert into graph_job (kind, status, priority, payload, dedupe_key, created_at, updated_at, finished_at)
+         values ('lint_graph', $1, 0, '{}'::jsonb, $2, now() - $3::interval, now() - $3::interval,
+                 case when $4 then now() - $3::interval else null end)
+         returning id`,
+        [status, `smoke:prune:${status}:${age}:${randomUUID()}`, age, finished],
+      );
+      return row!.id;
+    };
+    const stale = await insert("succeeded", "40 days", true);
+    const staleFailed = await insert("dead", "31 days", true);
+    const recent = await insert("failed", "1 day", true);
+    const oldButOpen = await insert("pending", "40 days", false);
+
+    const lint = await store.enqueueJob({
+      kind: "lint_graph",
+      payload: { smoke: "prune" },
+      priority: 90,
+      dedupeKey: `smoke:prune:${stamp}`,
+    }, context);
+    const done = await store.runJob({ jobId: lint.id }, context);
+    assert.equal(done?.status, "succeeded");
+    assert.ok(Number((done?.result as { prunedJobs?: number } | null)?.prunedJobs) >= 2, "the lint reports what it pruned");
+
+    const remaining = new Set(
+      (await sql<{ id: string }>("select id from graph_job where id = any($1::uuid[])", [[stale, staleFailed, recent, oldButOpen]]))
+        .map((row) => row.id),
+    );
+    assert.ok(!remaining.has(stale), "a month-old succeeded job is pruned");
+    assert.ok(!remaining.has(staleFailed), "a month-old dead job is pruned");
+    assert.ok(remaining.has(recent), "a recent terminal job is kept");
+    assert.ok(remaining.has(oldButOpen), "an open job is never pruned, whatever its age");
+
+    await sql("delete from graph_job where id = any($1::uuid[])", [[recent, oldButOpen]]);
+  });
+
   it("the retry budget is JOB_MAX_ATTEMPTS: the last failure dead-letters", async (t) => {
     const restore = patchPerformJob(store, () => {
       throw new Error("boom");

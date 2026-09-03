@@ -33,6 +33,8 @@ export type LintGraphJobResult = {
   ownerId: string | null;
   /** Summary counts plus the findings themselves (capped), never counts alone. */
   lint: Omit<GraphLintReport["summary"], "findings"> & { findings: GraphLintFinding[] };
+  /** Terminal job rows past TERMINAL_JOB_RETENTION_DAYS removed on this run. */
+  prunedJobs: number;
 };
 
 export type RefreshObsidianProjectionJobResult = {

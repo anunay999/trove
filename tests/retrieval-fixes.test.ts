@@ -10,6 +10,9 @@ import { UserStore } from "../src/users.js";
 // Self-contained semantic behavior: the deterministic offline provider runs in
 // both store modes and the default distance floor (0.55) applies.
 process.env.TROVE_EMBEDDING_PROVIDER = "fake";
+// F12b asserts that a capture enqueues lint; the write-path lint throttle
+// (pgStore.enqueueMaintenanceJobs) would suppress that right after drainJobs.
+process.env.TROVE_LINT_MIN_INTERVAL_SECONDS = "0";
 delete process.env.TROVE_SEMANTIC_MAX_DISTANCE;
 // This suite runs many captures and asserts on queue state; it gets its own
 // database so it can neither break nor be broken by concurrent suites.

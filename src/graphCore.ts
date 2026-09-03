@@ -219,6 +219,26 @@ export type OwnerScope = { scoped: boolean; ownerId: string | null };
  */
 export const JOB_MAX_ATTEMPTS = 5;
 
+/**
+ * How long a finished job (succeeded/failed/dead/cancelled) stays in the
+ * table. Rows are the audit trail of maintenance, not the graph; production
+ * had ~5,000 succeeded rows and nothing ever removed one. The lint job prunes
+ * past this age.
+ */
+export const TERMINAL_JOB_RETENTION_DAYS = 30;
+
+/**
+ * Minimum seconds between two maintenance lints of one scope. A write inside
+ * this window after a successful lint enqueues no new lint; the next write
+ * past it does. Time-based rather than write-counted because the cost being
+ * bounded is lint runs per unit time, and a per-owner counter would need its
+ * own table. 0 disables the throttle (tests).
+ */
+export function lintMinIntervalSeconds(): number {
+  const parsed = Number(process.env.TROVE_LINT_MIN_INTERVAL_SECONDS);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 600;
+}
+
 export function ownerScope(context?: GraphOperationContext): OwnerScope {
   // Scoping requires an explicit owner. No context, superuser, or a context
   // without an ownerId (internal/maintenance callers) all see the whole graph.

@@ -36,6 +36,8 @@ import {
   ownerScope,
   type OwnerScope,
   JOB_MAX_ATTEMPTS,
+  TERMINAL_JOB_RETENTION_DAYS,
+  lintMinIntervalSeconds,
   decodeEventCursor,
   encodeEventCursor,
   evidenceSupportScore,
@@ -2053,6 +2055,14 @@ export class PgGraphStore implements GraphStore {
    * Embedding refresh stays under the global key: its result is counts, not
    * data, and one drain over every owner's missing rows is cheaper than one
    * per tenant. The importer's owner-scoped drain keys itself.
+   *
+   * Lint is also throttled here, at the one place every mutation funnels
+   * through: dedupe collapses a burst into one row, but steady state was
+   * still a full lint after every single write. A scope whose lint succeeded
+   * within TROVE_LINT_MIN_INTERVAL_SECONDS (default 600) gets no new lint;
+   * the first write past the window does. The check is keyed on the same
+   * dedupe key the job would take, so operator-triggered lints with their own
+   * keys never count.
    */
   private async enqueueMaintenanceJobs(
     client: pg.PoolClient,
@@ -2063,13 +2073,46 @@ export class PgGraphStore implements GraphStore {
     const scope = ownerScope(context);
     for (const kind of kinds) {
       const scoped = kind === "lint_graph" && scope.scoped && scope.ownerId !== null;
+      const dedupeKey = scoped ? `maintenance:${kind}:${scope.ownerId}` : `maintenance:${kind}`;
+      if (kind === "lint_graph" && await this.lintSucceededRecently(client, dedupeKey)) continue;
       await this.enqueueJobWithClient(client, {
         kind,
         payload: scoped ? { reason: "graph_mutation", ownerId: scope.ownerId } : { reason: "graph_mutation" },
         priority: kind === "refresh_embeddings" ? 40 : 60,
-        dedupeKey: scoped ? `maintenance:${kind}:${scope.ownerId}` : `maintenance:${kind}`,
+        dedupeKey,
       }, context, actorUuid);
     }
+  }
+
+  private async lintSucceededRecently(client: pg.PoolClient, dedupeKey: string): Promise<boolean> {
+    const interval = lintMinIntervalSeconds();
+    if (interval <= 0) return false;
+    const recent = await client.query(
+      `select 1
+       from graph_job
+       where kind = 'lint_graph'
+         and dedupe_key = $1
+         and status = 'succeeded'
+         and finished_at > now() - make_interval(secs => $2::numeric)
+       limit 1`,
+      [dedupeKey, interval],
+    );
+    return (recent.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * Housekeeping that rides on the lint job, which already runs at most once
+   * per interval per scope: drop terminal rows past the retention window. An
+   * open row is never touched, whatever its age -- the lease handles those.
+   */
+  private async pruneTerminalJobs(): Promise<number> {
+    const pruned = await this.pool.query(
+      `delete from graph_job
+       where status in ('succeeded', 'failed', 'dead', 'cancelled')
+         and coalesce(finished_at, updated_at) < now() - make_interval(days => $1::int)`,
+      [TERMINAL_JOB_RETENTION_DAYS],
+    );
+    return pruned.rowCount ?? 0;
   }
 
   /**
@@ -2285,10 +2328,12 @@ export class PgGraphStore implements GraphStore {
       const payloadOwner = asRecord(job.payload).ownerId;
       const ownerId = typeof payloadOwner === "string" ? payloadOwner : null;
       const report = await this.lint(ownerId ? { ownerId } : undefined);
+      const prunedJobs = await this.pruneTerminalJobs();
       // Carry the findings themselves (capped) — counts alone are not actionable.
       const result: GraphJobResultMap["lint_graph"] = {
         ownerId,
         lint: { ...report.summary, findings: report.findings.slice(0, 200) },
+        prunedJobs,
       };
       return result;
     }

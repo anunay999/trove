@@ -91,7 +91,14 @@ import {
 } from "./graphCore.js";
 import { cosineSimilarity, createEmbeddingProviderFromEnv, type EmbeddingProvider } from "./embeddings.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
-import { EdgeValidityConflictError, JOB_MAX_ATTEMPTS, ownerScope, UnknownEvidenceReferenceError } from "./graphCore.js";
+import {
+  EdgeValidityConflictError,
+  JOB_MAX_ATTEMPTS,
+  TERMINAL_JOB_RETENTION_DAYS,
+  lintMinIntervalSeconds,
+  ownerScope,
+  UnknownEvidenceReferenceError,
+} from "./graphCore.js";
 import { performReconcileNode, type ReconcileJudge } from "./reconcile.js";
 import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
@@ -1310,10 +1317,12 @@ export class InMemoryGraphStore implements GraphStore {
       const payloadOwner = (job.payload as Record<string, unknown>).ownerId;
       const ownerId = typeof payloadOwner === "string" ? payloadOwner : null;
       const report = this.lint();
+      const prunedJobs = this.pruneTerminalJobs();
       // Carry the findings themselves (capped) — counts alone are not actionable.
       const result: GraphJobResultMap["lint_graph"] = {
         ownerId,
         lint: { ...report.summary, findings: report.findings.slice(0, 200) },
+        prunedJobs,
       };
       return result;
     }
@@ -1350,7 +1359,11 @@ export class InMemoryGraphStore implements GraphStore {
     return result;
   }
 
-  /** Per-owner lint key and payload, global embedding refresh; see pgStore. */
+  /**
+   * Per-owner lint key and payload, global embedding refresh, and the lint
+   * throttle (no new lint within TROVE_LINT_MIN_INTERVAL_SECONDS of a
+   * successful one for the same key); see pgStore for the rationale.
+   */
   private enqueueMaintenanceJobs(
     context: GraphOperationContext | undefined,
     kinds: Array<GraphJob["kind"]>,
@@ -1358,13 +1371,40 @@ export class InMemoryGraphStore implements GraphStore {
     const scope = ownerScope(context);
     for (const kind of kinds) {
       const scoped = kind === "lint_graph" && scope.scoped && scope.ownerId !== null;
+      const dedupeKey = scoped ? `maintenance:${kind}:${scope.ownerId}` : `maintenance:${kind}`;
+      if (kind === "lint_graph" && this.lintSucceededRecently(dedupeKey)) continue;
       this.enqueueJob({
         kind,
         payload: scoped ? { reason: "graph_mutation", ownerId: scope.ownerId } : { reason: "graph_mutation" },
         priority: kind === "refresh_embeddings" ? 40 : 60,
-        dedupeKey: scoped ? `maintenance:${kind}:${scope.ownerId}` : `maintenance:${kind}`,
+        dedupeKey,
       }, context);
     }
+  }
+
+  private lintSucceededRecently(dedupeKey: string): boolean {
+    const intervalMs = lintMinIntervalSeconds() * 1000;
+    if (intervalMs <= 0) return false;
+    const floor = Date.now() - intervalMs;
+    return [...this.graphJobs.values()].some((job) =>
+      job.kind === "lint_graph" &&
+      job.dedupeKey === dedupeKey &&
+      job.status === "succeeded" &&
+      Date.parse(job.finishedAt ?? job.updatedAt) > floor
+    );
+  }
+
+  /** Drop terminal jobs past the retention window; open rows are never touched. */
+  private pruneTerminalJobs(): number {
+    const floor = Date.now() - TERMINAL_JOB_RETENTION_DAYS * 86_400_000;
+    let pruned = 0;
+    for (const [id, job] of this.graphJobs) {
+      const terminal = job.status === "succeeded" || job.status === "failed" || job.status === "cancelled" || (job.status as string) === "dead";
+      if (!terminal || Date.parse(job.finishedAt ?? job.updatedAt) >= floor) continue;
+      this.graphJobs.delete(id);
+      pruned += 1;
+    }
+    return pruned;
   }
 
   /** Per-node reconciliation enqueue; see pgStore for the rationale. */
