@@ -111,7 +111,6 @@ create table node_revision (
   title text,
   summary text,
   content text,
-  projection_markdown text,
   frontmatter jsonb not null default '{}'::jsonb,
   content_sha256 text not null,
   created_by uuid references actor(id),
@@ -264,7 +263,7 @@ create index node_search_idx on node using gin(
 ) where deleted_at is null;
 
 create index revision_content_search_idx on node_revision using gin(
-  to_tsvector('english', coalesce(content, '') || ' ' || coalesce(projection_markdown, ''))
+  to_tsvector('english', coalesce(content, ''))
 );
 
 create index text_unit_search_idx on text_unit using gin(

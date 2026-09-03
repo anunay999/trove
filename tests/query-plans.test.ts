@@ -86,7 +86,7 @@ describe("query plans", { skip: shouldRun ? false : "requires a Postgres DATABAS
     await probe.query(`
       create type node_type as enum ('claim');
       create table node_revision (
-        id serial primary key, node_id int, content text, projection_markdown text
+        id serial primary key, node_id int, content text
       );
       create table node (
         id int primary key, current_revision_id int, deleted_at timestamptz, title text, summary text,
@@ -103,8 +103,8 @@ describe("query plans", { skip: shouldRun ? false : "requires a Postgres DATABAS
       );
     `);
     await probe.query(`
-      insert into node_revision (node_id, content, projection_markdown)
-        select g, 'revision body ' || g, null from generate_series(1, ${ROWS}) g;
+      insert into node_revision (node_id, content)
+        select g, 'revision body ' || g from generate_series(1, ${ROWS}) g;
       insert into node (id, current_revision_id, deleted_at, title, summary, slug, type, owner_id)
         select g, g, null, 'node ' || g, 'summary ' || g, 'node-' || g, 'claim',
                case when g > ${ROWS - SMALL_OWNER_ROWS} then '${SMALL_OWNER}'::uuid else '${LARGE_OWNER}'::uuid end
@@ -140,7 +140,7 @@ describe("query plans", { skip: shouldRun ? false : "requires a Postgres DATABAS
         to_tsvector('english', coalesce(title, '') || ' ' || coalesce(summary, ''))
       ) where deleted_at is null;
       create index revision_content_search_idx on node_revision using gin(
-        to_tsvector('english', coalesce(content, '') || ' ' || coalesce(projection_markdown, ''))
+        to_tsvector('english', coalesce(content, ''))
       );
       create index text_unit_search_idx on text_unit using gin(to_tsvector('english', text));
       create index node_title_trgm_idx on node using gin (title gin_trgm_ops);

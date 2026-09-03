@@ -242,13 +242,13 @@ export const LEXICAL_NODE_SEARCH_SQL = `with q as (select $7::tsquery as query),
          select nr.node_id as id
          from node_revision nr
          cross join q
-         where to_tsvector('english', coalesce(nr.content, '') || ' ' || coalesce(nr.projection_markdown, '')) @@ q.query
+         where to_tsvector('english', coalesce(nr.content, '')) @@ q.query
             or nr.content ilike $4
        )
        select n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id, n.updated_at, n.access_count, n.last_accessed_at,
               greatest(
                 ts_rank_cd(to_tsvector('english', coalesce(n.title, '') || ' ' || coalesce(n.summary, '')), q.query),
-                ts_rank_cd(to_tsvector('english', coalesce(nr.content, '') || ' ' || coalesce(nr.projection_markdown, '')), q.query),
+                ts_rank_cd(to_tsvector('english', coalesce(nr.content, '')), q.query),
                 case when n.slug = lower(replace($1, ' ', '-')) then 1.0 else 0 end,
                 case when n.title ilike $4 then 0.2 else 0 end,
                 case when coalesce(n.summary, '') ilike $4 then 0.1 else 0 end,
@@ -270,7 +270,7 @@ export const LEXICAL_NODE_SEARCH_SQL = `with q as (select $7::tsquery as query),
          )
          and (
            to_tsvector('english', coalesce(n.title, '') || ' ' || coalesce(n.summary, '')) @@ q.query
-           or to_tsvector('english', coalesce(nr.content, '') || ' ' || coalesce(nr.projection_markdown, '')) @@ q.query
+           or to_tsvector('english', coalesce(nr.content, '')) @@ q.query
            or n.slug = lower(replace($1, ' ', '-'))
            or n.title ilike $4
            or coalesce(n.summary, '') ilike $4
