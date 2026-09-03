@@ -2656,6 +2656,14 @@ export class PgGraphStore implements GraphStore {
     for (const link of links) {
       const toNodeId = await this.nodeIdForSlug(link.toSlug, client, scope);
       if (!toNodeId) continue;
+      // Same world-time rule as link(): a previous version of this triple
+      // closed with a future validUntil still owns "now", and the exclusion
+      // constraint would abort the whole capture with a bare 23P01. Name the
+      // conflict instead; the transaction rolls back either way.
+      const overlapping = await client.query(overlappingVersionSql, [nodeId, toNodeId, link.predicate, null]);
+      if (overlapping.rowCount) {
+        throw overlapError(String(overlapping.rows[0].id), link.predicate, null);
+      }
       const inserted = await client.query(
         `insert into edge (id, from_node_id, to_node_id, predicate, valid_from, created_by, owner_id)
          values ($1, $2, $3, $4, now(), $5, $6)

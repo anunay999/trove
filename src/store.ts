@@ -660,6 +660,26 @@ export class InMemoryGraphStore implements GraphStore {
     };
   }
 
+  /**
+   * Mirrors edge_valid_range_excl: one version of a triple per world-time
+   * instant, expired versions included. The active version is never a
+   * conflict (link() turns the call into a weight update on it).
+   */
+  private assertNoOverlappingVersion(fromNodeId: string, toNodeId: string, predicate: string, validFrom: string): void {
+    const overlapping = [...this.edges.values()]
+      .filter((candidate) =>
+        candidate.expiredAt !== null
+        && candidate.fromNodeId === fromNodeId && candidate.toNodeId === toNodeId && candidate.predicate === predicate
+        && intervalCovers(candidate, validFrom))
+      .sort((left, right) => (right.validUntil ?? "\uffff").localeCompare(left.validUntil ?? "\uffff"))[0];
+    if (overlapping) {
+      throw new EdgeValidityConflictError(
+        `Cannot link "${predicate}" from ${validFrom}: edge ${overlapping.id} is already valid over that interval. Start the new version at or after its validUntil.`,
+        overlapping.id,
+      );
+    }
+  }
+
   link(input: LinkInput, context?: GraphOperationContext): GraphEdge | null {
     const fromNodeId = input.fromNodeId ?? this.nodeIdForSlug(input.fromSlug);
     const toNodeId = input.toNodeId ?? this.nodeIdForSlug(input.toSlug);
@@ -689,17 +709,7 @@ export class InMemoryGraphStore implements GraphStore {
     // Mirrors edge_valid_range_excl: one version of a triple per world-time
     // instant, expired versions included. The active version is not a
     // conflict -- the call becomes a weight update on it, as in Postgres.
-    if (!existing) {
-      const overlapping = [...this.edges.values()]
-        .filter((candidate) => candidate.expiredAt !== null && sameTriple(candidate) && intervalCovers(candidate, edge.validFrom ?? now))
-        .sort((left, right) => (right.validUntil ?? "\uffff").localeCompare(left.validUntil ?? "\uffff"))[0];
-      if (overlapping) {
-        throw new EdgeValidityConflictError(
-          `Cannot link "${input.predicate}" from ${edge.validFrom}: edge ${overlapping.id} is already valid over that interval. Start the new version at or after its validUntil.`,
-          overlapping.id,
-        );
-      }
-    }
+    if (!existing) this.assertNoOverlappingVersion(fromNodeId, toNodeId, input.predicate, edge.validFrom ?? now);
 
     // Mirrors edge_valid_range_check on the superseded edge: its validUntil
     // becomes the successor's validFrom, which therefore cannot precede its
@@ -899,6 +909,15 @@ export class InMemoryGraphStore implements GraphStore {
     }
     // Same rule as capture: nothing mutates until every evidence ref resolves.
     for (const evidence of input.evidence ?? []) this.assertEvidenceRefs(evidence, context);
+    // Postgres rolls the revision back when a link's validity conflicts; here
+    // the check has to run before the first mutation to give the same result.
+    for (const link of input.links ?? []) {
+      const toNodeId = this.nodeIdForSlug(link.toSlug);
+      if (!toNodeId) continue;
+      const active = [...this.edges.values()].some((edge) =>
+        edge.expiredAt === null && edge.fromNodeId === existing.id && edge.toNodeId === toNodeId && edge.predicate === link.predicate);
+      if (!active) this.assertNoOverlappingVersion(existing.id, toNodeId, link.predicate, new Date().toISOString());
+    }
 
     const now = new Date().toISOString();
     const titleChanged = input.title !== undefined && input.title !== existing.title;

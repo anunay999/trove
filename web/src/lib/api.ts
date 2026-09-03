@@ -26,6 +26,7 @@ export type GraphEdge = {
   validUntil: string | null;
   expiredAt: string | null;
   invalidatedBy: string | null;
+  invalidationReason: "superseded" | "invalidated" | "tombstoned" | null;
 };
 
 export type GraphSnapshot = {

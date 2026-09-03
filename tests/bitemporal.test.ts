@@ -194,6 +194,31 @@ describe("edge temporal integrity", () => {
     assert.ok(again.validFrom && again.validFrom >= closed.validUntil, "the new version must start at or after the old one closed");
   });
 
+  it("capture-path links obey the same rule, and a refused link rolls the revision back", async () => {
+    const from = await capture("capture-link from");
+    const to = await capture("capture-link to");
+    const first = await store.link({ fromNodeId: from.id, toNodeId: to.id, predicate: "depends_on", weight: 1 }, context);
+    assert.ok(first);
+    // Close the version in the future: it still owns "now", so a fresh
+    // version starting now would overlap it.
+    const future = new Date(Date.now() + 3_600_000).toISOString();
+    const closed = await store.invalidateEdge({ edgeId: first.id, validUntil: future }, context);
+    assert.ok(closed?.validUntil);
+
+    await assert.rejects(
+      async () => store.update({
+        nodeId: from.id,
+        baseRevisionId: from.revisionId,
+        summary: "revised with a link that cannot be valid yet",
+        links: [{ toSlug: to.slug, predicate: "depends_on" }],
+      }, context),
+      conflictsWith(first.id),
+      "a capture-path link into a future-closed version must raise the named error, not a raw constraint error",
+    );
+    const unchanged = await store.read({ nodeId: from.id }, context);
+    assert.equal(unchanged?.revisionId, from.revisionId, "the refused update must roll back the revision too");
+  });
+
   it("supersession closes the old edge at the new validFrom, and refuses to start before the old one did", async () => {
     const from = await capture("supersede from");
     const oldTarget = await capture("supersede old target");
