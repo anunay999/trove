@@ -93,6 +93,26 @@ export default function App() {
     void load();
   }, [load]);
 
+  // /v1/me is where the API says whether it wants a credential at all. A local
+  // or demo server started with auth off answers mode "disabled" to anyone, and
+  // then parking on the connect form asks for a key that server would ignore —
+  // which is how the dashboard managed to render with no tab row at all. A
+  // Clerk session change is not the only way to learn this, so ask once at
+  // mount, on every path. Kept apart from `me`: this is the server's mode, not
+  // the caller's identity, and it must never race the session's own answer.
+  const [authDisabled, setAuthDisabled] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void fetchMe()
+      .then((result) => {
+        if (live) setAuthDisabled(result.mode === "disabled");
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, []);
+
   const onSessionChange = useCallback((isSignedIn: boolean, loaded: boolean) => {
     setClerkLoaded(loaded);
     setSignedIn(isSignedIn);
@@ -116,7 +136,7 @@ export default function App() {
   const isAdmin = identity?.role === "admin" && identity.status === "active";
   const hasApiToken = !!window.localStorage.getItem("trove_token");
   const tokenMode = !signedIn && hasApiToken && (tokenDashboard || !clerkEnabled);
-  const dashboardReady = !error && (signedIn ? !isWaitlisted : tokenMode);
+  const dashboardReady = !error && (signedIn ? !isWaitlisted : tokenMode || authDisabled);
   const clerkSettling = clerkEnabled && !clerkLoaded;
   const showLanding = isFrontDoor;
   const showConnect = !signedIn && !dashboardReady && signedOutView === "connect";
