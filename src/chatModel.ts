@@ -19,9 +19,10 @@
  * - CHEAP BY INTENT. The owner named DeepSeek and GLM. Any OpenAI-compatible
  *   endpoint works: point `OPENAI_BASE_URL` at the provider and name the model
  *   in `TROVE_CHAT_MODEL` (see .env.example). The default stays `gpt-4o-mini`
- *   — cheap, and the one model that actually resolves against the DEFAULT base
- *   URL, which a `deepseek-chat` default would 404 against for anyone who set
- *   only the key.
+ *   in the classic body shape: it is cheap, it resolves against the DEFAULT
+ *   base URL, and it is the shape DeepSeek and GLM speak. A provider-specific
+ *   default would 404 for anyone who set only the key, and a reasoning-shaped
+ *   default would 400 against the very providers this feature is aimed at.
  * - BOUNDED PROMPT. The model sees the recall pack and nothing else: no graph
  *   dump, no second retrieval, no chat history. The pack is already
  *   token-budgeted by `performRecall`, and CHAT_PACK_CHARS is a backstop for a
@@ -57,6 +58,29 @@ export function chatTimeoutMs(): number {
 /** Same tolerant reading of opt-in flags as reconcile.ts and rerank.ts. */
 function isEnabled(value: string | undefined): boolean {
   return value !== undefined && ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+/**
+ * Reasoning models and the older chat models disagree about the request body,
+ * and the disagreement is a hard 400 rather than something to discover in
+ * production: a reasoning model rejects `max_tokens` ("use
+ * max_completion_tokens instead") and rejects `temperature` outright, while
+ * DeepSeek, GLM and every other OpenAI-compatible endpoint built against the
+ * older shape only understand `max_tokens`.
+ *
+ * So it is configuration, not detection — a model-name prefix test would be
+ * wrong the first time a provider named something differently.
+ * TROVE_CHAT_REASONING_EFFORT defaults to "none" — the classic
+ * `max_tokens` + `temperature` body that DeepSeek, GLM and gpt-4o-mini all
+ * accept. Set it to minimal|low|medium|high when pointing at a reasoning
+ * model, which then gets `max_completion_tokens` + `reasoning_effort`.
+ */
+export function chatReasoningEffort(): "minimal" | "low" | "medium" | "high" | null {
+  const raw = (process.env.TROVE_CHAT_REASONING_EFFORT ?? "none").trim().toLowerCase();
+  if (raw === "none" || raw === "off" || raw === "") return null;
+  return ["minimal", "low", "medium", "high"].includes(raw)
+    ? (raw as "minimal" | "low" | "medium" | "high")
+    : "low";
 }
 
 const SYSTEM_PROMPT = [
@@ -152,6 +176,7 @@ export function createGraphChatModelFromEnv(): GraphChatModel | null {
   if (!apiKey) return null;
   const model = process.env.TROVE_CHAT_MODEL ?? "gpt-4o-mini";
   const baseUrl = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+  const effort = chatReasoningEffort();
 
   return {
     name: model,
@@ -166,9 +191,13 @@ export function createGraphChatModelFromEnv(): GraphChatModel | null {
         body: JSON.stringify({
           model,
           stream: true,
-          temperature: 0.2,
-          max_tokens: CHAT_MAX_OUTPUT_TOKENS,
           messages,
+          // The reasoning budget is spent before the first visible token, so a
+          // reasoning model needs headroom above the answer length or it
+          // finishes on the cap having written nothing.
+          ...(effort
+            ? { max_completion_tokens: CHAT_MAX_OUTPUT_TOKENS * 4, reasoning_effort: effort }
+            : { max_tokens: CHAT_MAX_OUTPUT_TOKENS, temperature: 0.2 }),
         }),
       });
       if (!response.ok || !response.body) {

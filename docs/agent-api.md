@@ -67,7 +67,10 @@ that line produced. Nothing is replayed on a timer; a node counts as *cited*
 only when the answer writes its `[[slug]]`.
 
 The answering model is opt-in (`TROVE_GRAPH_CHAT=1` plus `OPENAI_API_KEY`, any
-OpenAI-compatible `OPENAI_BASE_URL`, model named by `TROVE_CHAT_MODEL`). With no
+OpenAI-compatible `OPENAI_BASE_URL`, model named by `TROVE_CHAT_MODEL`,
+defaulting to `gpt-4o-mini`; set `TROVE_CHAT_REASONING_EFFORT` to
+minimal|low|medium|high when pointing at a reasoning model, which needs a
+different request body). With no
 model the endpoint still streams the whole traversal and returns the pack, and
 `done.finish` is `no_model` — the graph demonstration is the part that needs no
 LLM.
