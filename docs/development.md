@@ -8,7 +8,7 @@ Trove is an information substrate with three canonical layers:
 
 1. **Raw long-form content** — documents, URLs, messages, PDFs, screenshots, notes, transcripts (`source`).
 2. **Addressable text units** — spans, sections, chunks, and annotations that point back to exact source ranges (`text_unit`).
-3. **Semantic graph atoms** — entities, claims, decisions, questions, tasks, relationships, communities, and views (`node`, `edge`, `claim`, `graph_view`).
+3. **Semantic graph atoms** — entities, claims, decisions, questions, tasks, relationships, communities, and views (`node`, `edge`, `graph_view`).
 
 Everything else — markdown, mind maps, search indexes, Obsidian vaults, chat summaries — is a **projection** of this substrate, exposed through an HTTP API plus an MCP server. That keeps the system lightweight but robust:
 

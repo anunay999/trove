@@ -133,13 +133,12 @@ The substrate should separate durable primitives:
 - `source`: immutable raw input or imported long-form document
 - `text_unit`: addressable section, paragraph, chunk, quote, transcript segment, or OCR block
 - `annotation`: meaning attached to a source span or text unit
-- `node`: canonical semantic atom such as project, pattern, person, domain, claim, decision, task, question, or view
-- `edge`: typed relationship between nodes
-- `claim`: factual assertion with provenance, confidence, status, and validity window
-- `revision`: materialized page/content version for a node
+- `node`: canonical semantic atom such as project, pattern, person, domain, claim, decision, task, question, or view. A claim is a node type with provenance through its annotations; the separate `claim` table was dropped in migration 010 (nothing wrote to it).
+- `edge`: typed relationship between nodes, bitemporal (`valid_from`/`valid_until` world time, `expired_at` belief time)
+- `revision`: the full fact (title, summary, content) at each version of a node
 - `event`: append-only audit log of every graph mutation
 - `view`: saved mind map/query projection
-- `embedding`: vector index rows scoped to node, revision, source, or claim
+- `embedding`: vector rows for each node's current revision and for text units. Superseded revisions lose theirs on update, so semantic search cannot resurrect replaced content.
 - `job`: durable maintenance work for projection refresh, graph lint, and embedding refresh
 
 This avoids the main markdown trap: a page can contain many facts, a long source can support many facts, and a fact can belong to multiple pages/views.
@@ -198,12 +197,10 @@ This makes mind maps durable artifacts agents can edit. Example views:
 Agent writes should be proposal-shaped, even when applied automatically:
 
 1. Agent calls `remember`, `connect`, or `ingest`.
-2. Service validates schema, permissions, citations, and revision token.
-3. Service writes all node/edge/claim/revision changes in one transaction.
-4. Service appends events.
-5. Service enqueues durable maintenance jobs.
-6. Worker refreshes search vectors, markdown export, and affected mind-map views.
-7. Interfaces poll `events` from their last cursor to update local UI/projections.
+2. Service validates schema, permissions, citations, and revision token. `remember` resolves every citation ({ quote } to a text unit, raw ids fail-closed in the caller's scope) and every link target before it writes; refs that do not resolve come back as `evidenceRejected` / `linkRejected` and are never written.
+3. Service writes the node, its revision, its evidence annotations, its edges, the audit event, and the maintenance `graph_job` rows in one transaction (`capture` on create, `update` on revise). A failure anywhere rolls back everything: no node is ever left with half its citations.
+4. Worker refreshes search vectors, markdown export, and affected mind-map views.
+5. Interfaces poll `events` from their last cursor to update local UI/projections.
 
 ```mermaid
 sequenceDiagram
@@ -212,12 +209,11 @@ sequenceDiagram
   participant DB as Postgres
   participant Worker
 
-  Agent->>API: remember(slug, changes)
-  API->>API: validate scopes, schema, citations
-  API->>DB: transaction: nodes, edges, claims, revision, event
-  API->>DB: enqueue graph_job rows
-  DB-->>API: graph_tx_id
-  API-->>Agent: committed revision + warnings
+  Agent->>API: remember(title, changes, evidence, links)
+  API->>API: validate scopes, schema; resolve citations and link targets
+  API->>DB: one transaction: node, revision, annotations, edges, event, graph_job rows
+  DB-->>API: commit
+  API-->>Agent: committed revision + rejected refs/links as warnings
   Worker->>DB: claim pending graph_job
   Worker->>DB: refresh indexes and projections
 ```
