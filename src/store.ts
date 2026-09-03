@@ -728,6 +728,11 @@ export class InMemoryGraphStore implements GraphStore {
   }
 
   capture(input: CaptureInput, context?: GraphOperationContext): GraphNode {
+    // Postgres parity: the whole write is one transaction there, so a bogus
+    // evidence ref must leave no node behind here either. Check every ref
+    // before the first mutation.
+    for (const evidence of input.evidence) this.assertEvidenceRefs(evidence, context);
+
     const now = new Date().toISOString();
     const id = randomUUID();
     const revisionId = randomUUID();
@@ -780,9 +785,14 @@ export class InMemoryGraphStore implements GraphStore {
     return node;
   }
 
-  annotate(input: AnnotateInput, context?: GraphOperationContext): GraphAnnotation {
-    // Parity with Postgres's FK constraints: annotations must point at real
-    // rows, and a bogus ref is the named error, not a silent store.
+  /**
+   * Parity with Postgres's FK constraints: annotations must point at real
+   * rows, and a bogus ref is the named error, not a silent store.
+   */
+  private assertEvidenceRefs(
+    input: { sourceId?: string | null | undefined; textUnitId?: string | null | undefined; nodeId?: string | null | undefined },
+    context?: GraphOperationContext,
+  ): void {
     if (input.sourceId != null && !this.sourceRows.has(input.sourceId)) {
       throw new UnknownEvidenceReferenceError(`annotation references an unknown source: ${input.sourceId}`);
     }
@@ -804,6 +814,10 @@ export class InMemoryGraphStore implements GraphStore {
         );
       }
     }
+  }
+
+  annotate(input: AnnotateInput, context?: GraphOperationContext): GraphAnnotation {
+    this.assertEvidenceRefs(input, context);
     const now = new Date().toISOString();
     const annotation: GraphAnnotation = {
       id: randomUUID(),
@@ -830,6 +844,8 @@ export class InMemoryGraphStore implements GraphStore {
     if (existing.revisionId !== input.baseRevisionId) {
       return { conflict: true, currentRevisionId: existing.revisionId };
     }
+    // Same rule as capture: nothing mutates until every evidence ref resolves.
+    for (const evidence of input.evidence ?? []) this.assertEvidenceRefs(evidence, context);
 
     const now = new Date().toISOString();
     const titleChanged = input.title !== undefined && input.title !== existing.title;
@@ -873,6 +889,20 @@ export class InMemoryGraphStore implements GraphStore {
         content: updated.content,
         createdAt: now,
       });
+    }
+    for (const evidence of input.evidence ?? []) {
+      const annotationInput: AnnotateInput = {
+        motivation: "supports",
+        nodeId: updated.id,
+        body: {},
+        selector: evidence.selector,
+      };
+      if (evidence.sourceId) annotationInput.sourceId = evidence.sourceId;
+      if (evidence.textUnitId) annotationInput.textUnitId = evidence.textUnitId;
+      this.annotate(annotationInput, context);
+    }
+    for (const link of input.links ?? []) {
+      this.link({ fromNodeId: updated.id, toSlug: link.toSlug, predicate: link.predicate, weight: 1 }, context);
     }
     this.recordEvent("update", updated.id, context, now);
     this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);

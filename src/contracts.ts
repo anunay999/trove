@@ -216,16 +216,18 @@ export const quoteEvidenceRefSchema = z.object({
   message: "Evidence must reference a source, a text unit, or quote span text.",
 });
 
+export const captureLinkSchema = z.object({
+  toSlug: z.string().min(1),
+  predicate: z.string().min(1).default("relates_to"),
+});
+
 export const captureInputSchema = z.object({
   title: z.string().min(1),
   type: nodeTypeSchema.default("claim"),
   summary: z.string().min(1),
   content: z.string().optional(),
   evidence: z.array(evidenceRefSchema).default([]),
-  links: z.array(z.object({
-    toSlug: z.string().min(1),
-    predicate: z.string().min(1).default("relates_to"),
-  })).default([]),
+  links: z.array(captureLinkSchema).default([]),
 });
 
 export const rememberInputSchema = z.object({
@@ -288,6 +290,12 @@ export const updateInputSchema = z.object({
   summary: z.string().min(1).optional(),
   content: z.string().min(1).optional(),
   slug: z.string().min(1).optional(),
+  // Evidence and links attach inside the same transaction as the revision,
+  // exactly as capture does, so a revise-with-citations lands whole or not
+  // at all. A missing link target is skipped (capture parity); an evidence ref
+  // that does not resolve aborts the write.
+  evidence: z.array(evidenceRefSchema).optional(),
+  links: z.array(captureLinkSchema).optional(),
 });
 
 export const projectInputSchema = z.object({

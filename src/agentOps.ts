@@ -1,6 +1,6 @@
-import type { ForgetInput, GraphEdge, GraphNode, QuoteEvidenceRef, ReadAnyInput, RememberInput } from "./contracts.js";
+import type { CaptureInput, ForgetInput, GraphEdge, GraphNode, QuoteEvidenceRef, ReadAnyInput, RememberInput } from "./contracts.js";
 import type { GraphOperationContext, GraphSourceDocument, GraphStore, ReadResult, TextQuoteMatch } from "./graphCore.js";
-import { evidenceSupportScore, UnknownEvidenceReferenceError, WEAK_EVIDENCE_FLOOR } from "./graphCore.js";
+import { evidenceSupportScore, WEAK_EVIDENCE_FLOOR } from "./graphCore.js";
 import { slugify } from "./slug.js";
 
 export type RememberResult = {
@@ -188,183 +188,137 @@ export async function remember(
       .map((match) => ({ nodeId: match.node.id, slug: match.node.slug, title: match.node.title, score: match.score }));
   }
 
-  // Evidence attaches the same way on create and revise: each ref is attempted
-  // individually, refs that don't resolve come back in `evidenceRejected`
-  // (loud, actionable), and any other failure still throws — the old catch-all
-  // made a bogus citation indistinguishable from a database on fire.
-  // { quote } refs are resolved to units BEFORE attaching (cite-by-quote);
-  // raw UUID refs are resolved and attached individually, then support-scored
-  // together; attached-but-weak or unserved refs remain visible warnings.
+  // Evidence and links are resolved read-only up front, then handed to the
+  // store so they are written inside the same transaction as the node (create
+  // or revise). Refs that do not resolve come back in evidenceRejected /
+  // linkRejected (loud, actionable, and the node still lands); a ref that
+  // resolves here and still fails to write is a real failure, and the store
+  // rolls the whole write back -- no node with half its citations.
+  //
+  // { quote } refs are resolved to units (cite-by-quote); raw UUID refs are
+  // checked fail-closed in the caller's owner scope, then support-scored
+  // together after the write; attached-but-weak or unserved refs remain
+  // visible warnings.
   const evidenceRejected: NonNullable<RememberResult["evidenceRejected"]> = [];
   const evidenceUnserved: NonNullable<RememberResult["evidenceUnserved"]> = [];
   const evidenceUnsupported: NonNullable<RememberResult["evidenceUnsupported"]> = [];
   const linkRejected: NonNullable<RememberResult["linkRejected"]> = [];
-  const attachEvidence = async (node: GraphNode): Promise<void> => {
-    const nodeText = `${node.title}\n${node.summary ?? ""}\n${(node.content ?? "").slice(0, 2000)}`;
-    const nodeId = node.id;
-    const attachedRawUnits: Array<{ sourceId: string | null; textUnitId: string; text: string }> = [];
-    let hasAttachedQuote = false;
-    for (const evidence of input.evidence ?? []) {
-      if (evidence.quote) {
-        const resolved = await resolveQuoteRef(store, evidence, context);
-        if (!resolved.ok) {
-          evidenceRejected.push({
-            sourceId: evidence.sourceId ?? null,
-            textUnitId: evidence.textUnitId ?? null,
-            quote: evidence.quote,
-            reason: resolved.reason,
-          });
-          continue;
-        }
-        try {
-          await store.annotate({
-            motivation: "supports",
-            sourceId: resolved.sourceId,
-            textUnitId: resolved.textUnitId,
-            nodeId,
-            body: {},
-            selector: {
-              ...evidence.selector,
-              // W3C TextQuoteSelector shape — the field was always meant for this.
-              type: "TextQuoteSelector",
-              exact: evidence.quote,
-              match: resolved.match,
-              ...(resolved.match === "fuzzy" ? { score: resolved.score } : {}),
-            },
-          }, context);
-        } catch (error) {
-          if (error instanceof UnknownEvidenceReferenceError) {
-            evidenceRejected.push({
-              sourceId: resolved.sourceId,
-              textUnitId: resolved.textUnitId,
-              quote: evidence.quote,
-              reason: error.message,
-            });
-            continue;
-          }
-          throw error;
-        }
-        hasAttachedQuote = true;
-        continue;
-      }
+  const evidence: CaptureInput["evidence"] = [];
+  const attachedRawUnits: Array<{ sourceId: string | null; textUnitId: string; text: string }> = [];
+  let hasResolvedQuote = false;
 
-      // A source identifies a document, not the exact span supporting this
-      // claim. Refuse to turn a bare source id into a citation: the caller can
-      // repair it with a served text-unit id or with the span's own words.
-      if (evidence.sourceId && !evidence.textUnitId) {
+  for (const ref of input.evidence ?? []) {
+    if (ref.quote) {
+      const resolved = await resolveQuoteRef(store, ref, context);
+      if (!resolved.ok) {
         evidenceRejected.push({
-          sourceId: evidence.sourceId,
-          textUnitId: null,
-          reason:
-            `source ${evidence.sourceId} does not identify an exact supporting span. ` +
-            "Add a textUnitId from served output, or cite { quote } (optionally narrowed with sourceId).",
+          sourceId: ref.sourceId ?? null,
+          textUnitId: ref.textUnitId ?? null,
+          quote: ref.quote,
+          reason: resolved.reason,
         });
         continue;
       }
-
-      let rawUnit: { sourceId: string | null; textUnitId: string; text: string } | null = null;
-      if (evidence.textUnitId) {
-        const unitText = await store.textUnitText({ textUnitId: evidence.textUnitId }, context);
-        if (unitText === null) {
-          evidenceRejected.push({
-            sourceId: evidence.sourceId ?? null,
-            textUnitId: evidence.textUnitId,
-            reason: `annotation references an unknown text unit: ${evidence.textUnitId}`,
-          });
-          continue;
-        }
-        rawUnit = {
-          sourceId: evidence.sourceId ?? null,
-          textUnitId: evidence.textUnitId,
-          text: unitText,
-        };
-      }
-
-      try {
-        await store.annotate({
-          motivation: "supports",
-          sourceId: evidence.sourceId,
-          textUnitId: evidence.textUnitId,
-          nodeId,
-          body: {},
-          selector: evidence.selector ?? {},
-        }, context);
-      } catch (error) {
-        if (error instanceof UnknownEvidenceReferenceError) {
-          evidenceRejected.push({
-            sourceId: evidence.sourceId ?? null,
-            textUnitId: evidence.textUnitId ?? null,
-            reason: error.message,
-          });
-          continue;
-        }
-        throw error;
-      }
-
-      if (rawUnit) attachedRawUnits.push(rawUnit);
-
-      // (b) A UUID ref that attached but was never served to this session is a
-      // hallucination by definition — flag it (warning, not rejection).
-      if (evidence.textUnitId) {
-        const served = await store.textUnitWasServed({ textUnitId: evidence.textUnitId }, context);
-        if (!served) {
-          evidenceUnserved.push({
-            sourceId: evidence.sourceId ?? null,
-            textUnitId: evidence.textUnitId,
-            reason:
-              `text unit ${evidence.textUnitId} was never served to this session (ingest/recall/grep/read). ` +
-              "If you have the span's words, re-cite as { quote } so it resolves against the corpus; " +
-              "otherwise fetch the span first (grep/read the source) and cite again.",
-          });
-        }
-      }
+      evidence.push({
+        sourceId: resolved.sourceId,
+        textUnitId: resolved.textUnitId,
+        selector: {
+          ...ref.selector,
+          // W3C TextQuoteSelector shape -- the field was always meant for this.
+          type: "TextQuoteSelector",
+          exact: ref.quote,
+          match: resolved.match,
+          ...(resolved.match === "fuzzy" ? { score: resolved.score } : {}),
+        },
+      });
+      hasResolvedQuote = true;
+      continue;
     }
 
-    if (!hasAttachedQuote && attachedRawUnits.length > 0) {
-      let bestUnit = attachedRawUnits[0]!;
-      let bestScore = evidenceSupportScore(nodeText, [bestUnit.text]);
-      for (const unit of attachedRawUnits.slice(1)) {
-        const score = evidenceSupportScore(nodeText, [unit.text]);
-        if (score > bestScore) {
-          bestUnit = unit;
-          bestScore = score;
-        }
-      }
-      if (bestScore < WEAK_EVIDENCE_FLOOR) {
-        evidenceUnsupported.push({
-          sourceId: bestUnit.sourceId,
-          textUnitId: bestUnit.textUnitId,
-          reason:
-            `This note's raw-UUID evidence supports only ${(bestScore * 100).toFixed(0)}% of its content terms ` +
-            `(floor ${WEAK_EVIDENCE_FLOOR * 100}%). Re-cite the supporting span as { quote } so it grounds the note by construction, or use stronger evidence.`,
-        });
+    // A source identifies a document, not the exact span supporting this
+    // claim. Refuse to turn a bare source id into a citation: the caller can
+    // repair it with a served text-unit id or with the span's own words.
+    if (!ref.textUnitId) {
+      evidenceRejected.push({
+        sourceId: ref.sourceId ?? null,
+        textUnitId: null,
+        reason: ref.sourceId
+          ? `source ${ref.sourceId} does not identify an exact supporting span. ` +
+            "Add a textUnitId from served output, or cite { quote } (optionally narrowed with sourceId)."
+          : "Evidence must reference a source, a text unit, or quote span text.",
+      });
+      continue;
+    }
+
+    const unitText = await store.textUnitText({ textUnitId: ref.textUnitId }, context);
+    if (unitText === null) {
+      evidenceRejected.push({
+        sourceId: ref.sourceId ?? null,
+        textUnitId: ref.textUnitId,
+        reason: `annotation references an unknown text unit: ${ref.textUnitId}`,
+      });
+      continue;
+    }
+    if (ref.sourceId && !(await store.readSource({ sourceId: ref.sourceId }, context))) {
+      evidenceRejected.push({
+        sourceId: ref.sourceId,
+        textUnitId: ref.textUnitId,
+        reason: `annotation references an unknown source: ${ref.sourceId}`,
+      });
+      continue;
+    }
+    evidence.push({ sourceId: ref.sourceId, textUnitId: ref.textUnitId, selector: ref.selector ?? {} });
+    attachedRawUnits.push({ sourceId: ref.sourceId ?? null, textUnitId: ref.textUnitId, text: unitText });
+
+    // A UUID ref that was never served to this session is a hallucination by
+    // definition -- flag it (warning, not rejection).
+    if (!(await store.textUnitWasServed({ textUnitId: ref.textUnitId }, context))) {
+      evidenceUnserved.push({
+        sourceId: ref.sourceId ?? null,
+        textUnitId: ref.textUnitId,
+        reason:
+          `text unit ${ref.textUnitId} was never served to this session (ingest/recall/grep/read). ` +
+          "If you have the span's words, re-cite as { quote } so it resolves against the corpus; " +
+          "otherwise fetch the span first (grep/read the source) and cite again.",
+      });
+    }
+  }
+
+  const links: CaptureInput["links"] = [];
+  for (const link of input.links ?? []) {
+    const predicate = link.predicate ?? "relates_to";
+    const found = await store.read({ slug: link.toSlug }, context, { trackAccess: false });
+    if (!found) {
+      linkRejected.push({
+        toSlug: link.toSlug,
+        predicate,
+        reason: `Link target not found: ${link.toSlug}. Remember the target first, then retry this link.`,
+      });
+      continue;
+    }
+    links.push({ toSlug: link.toSlug, predicate });
+  }
+
+  const scoreSupport = (node: GraphNode): void => {
+    if (hasResolvedQuote || attachedRawUnits.length === 0) return;
+    const nodeText = `${node.title}\n${node.summary ?? ""}\n${(node.content ?? "").slice(0, 2000)}`;
+    let bestUnit = attachedRawUnits[0]!;
+    let bestScore = evidenceSupportScore(nodeText, [bestUnit.text]);
+    for (const unit of attachedRawUnits.slice(1)) {
+      const score = evidenceSupportScore(nodeText, [unit.text]);
+      if (score > bestScore) {
+        bestUnit = unit;
+        bestScore = score;
       }
     }
-  };
-  const attachLinks = async (nodeId: string): Promise<void> => {
-    for (const link of input.links ?? []) {
-      const predicate = link.predicate ?? "relates_to";
-      try {
-        const attached = await store.link({
-          fromNodeId: nodeId,
-          toSlug: link.toSlug,
-          predicate,
-          weight: 1,
-        }, context);
-        if (!attached) {
-          linkRejected.push({
-            toSlug: link.toSlug,
-            predicate,
-            reason: `Link target not found: ${link.toSlug}. Remember the target first, then retry this link.`,
-          });
-        }
-      } catch (error) {
-        linkRejected.push({
-          toSlug: link.toSlug,
-          predicate,
-          reason: error instanceof Error ? error.message : String(error),
-        });
-      }
+    if (bestScore < WEAK_EVIDENCE_FLOOR) {
+      evidenceUnsupported.push({
+        sourceId: bestUnit.sourceId,
+        textUnitId: bestUnit.textUnitId,
+        reason:
+          `This note's raw-UUID evidence supports only ${(bestScore * 100).toFixed(0)}% of its content terms ` +
+          `(floor ${WEAK_EVIDENCE_FLOOR * 100}%). Re-cite the supporting span as { quote } so it grounds the note by construction, or use stronger evidence.`,
+      });
     }
   };
   const finish = (
@@ -384,11 +338,10 @@ export async function remember(
       type: input.type ?? "claim",
       summary: input.summary,
       content: input.content,
-      evidence: [],
-      links: [],
+      evidence,
+      links,
     }, context);
-    await attachLinks(node.id);
-    await attachEvidence(node);
+    scoreSupport(node);
     return finish({ action: "created", node, similar });
   }
 
@@ -397,6 +350,8 @@ export async function remember(
     title: input.title,
     summary: input.summary,
     ...(input.content !== undefined ? { content: input.content } : {}),
+    evidence,
+    links,
   };
   let updated = await store.update({ ...updateFields, baseRevisionId: target.revisionId }, context);
   if (updated && "conflict" in updated) {
@@ -407,10 +362,7 @@ export async function remember(
   if (!updated || "conflict" in updated) {
     throw new Error(`remember: update of ${target.id} kept conflicting; re-read and retry.`);
   }
-
-  await attachLinks(target.id);
-  await attachEvidence(updated);
-
+  scoreSupport(updated);
   return finish({ action: "updated", node: updated, similar });
 }
 

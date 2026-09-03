@@ -1214,28 +1214,7 @@ export class PgGraphStore implements GraphStore {
       );
       await client.query("update node set current_revision_id = $1 where id = $2", [revisionId, id]);
 
-      for (const evidence of input.evidence) {
-        await this.insertAnnotation(client, {
-          motivation: "supports",
-          sourceId: evidence.sourceId,
-          textUnitId: evidence.textUnitId,
-          nodeId: id,
-          body: {},
-          selector: evidence.selector,
-        }, context, actorUuid);
-      }
-
-      for (const link of input.links) {
-        const toNodeId = await this.nodeIdForSlug(link.toSlug, client, scope);
-        if (!toNodeId) continue;
-        await client.query(
-          `insert into edge (id, from_node_id, to_node_id, predicate, valid_from, created_by, owner_id)
-           values ($1, $2, $3, $4, now(), $5, $6)
-           on conflict (from_node_id, to_node_id, predicate) where deleted_at is null and expired_at is null
-           do nothing`,
-          [randomUUID(), id, toNodeId, link.predicate, actorUuid, ownerId],
-        );
-      }
+      await this.attachEvidenceAndLinks(client, id, input.evidence, input.links, context, actorUuid, scope);
 
       await this.recordEvent(
         client,
@@ -1375,6 +1354,7 @@ export class PgGraphStore implements GraphStore {
           [input.nodeId, revisionId],
         );
       }
+      await this.attachEvidenceAndLinks(client, input.nodeId, input.evidence ?? [], input.links ?? [], context, actorUuid, uScope);
       await this.recordEvent(
         client,
         "update",
@@ -2398,6 +2378,59 @@ export class PgGraphStore implements GraphStore {
       throw finishError;
     } finally {
       client.release();
+    }
+  }
+
+  /**
+   * The evidence and link half of a node write, on the caller's transaction:
+   * capture and update both run it between their row writes and their event,
+   * so a citation or edge that cannot be written rolls the node back with it
+   * (docs/architecture.md: remember is one transaction). A link whose slug
+   * does not resolve is skipped -- capture's callers hold slugs they just
+   * minted, and remember reports unresolved targets before it gets here.
+   */
+  private async attachEvidenceAndLinks(
+    client: pg.PoolClient,
+    nodeId: string,
+    evidence: CaptureInput["evidence"],
+    links: CaptureInput["links"],
+    context: GraphOperationContext | undefined,
+    actorUuid: string | null,
+    scope: OwnerScope,
+  ): Promise<void> {
+    for (const ref of evidence) {
+      await this.insertAnnotation(client, {
+        motivation: "supports",
+        sourceId: ref.sourceId,
+        textUnitId: ref.textUnitId,
+        nodeId,
+        body: {},
+        selector: ref.selector,
+      }, context, actorUuid);
+    }
+
+    for (const link of links) {
+      const toNodeId = await this.nodeIdForSlug(link.toSlug, client, scope);
+      if (!toNodeId) continue;
+      const inserted = await client.query(
+        `insert into edge (id, from_node_id, to_node_id, predicate, valid_from, created_by, owner_id)
+         values ($1, $2, $3, $4, now(), $5, $6)
+         on conflict (from_node_id, to_node_id, predicate) where deleted_at is null and expired_at is null
+         do nothing
+         returning id`,
+        [randomUUID(), nodeId, toNodeId, link.predicate, actorUuid, scope.ownerId],
+      );
+      if (inserted.rowCount === 0) continue;
+      await this.recordEvent(
+        client,
+        "link",
+        "edge",
+        String(inserted.rows[0].id),
+        { predicate: link.predicate, fromNodeId: nodeId, toNodeId },
+        null,
+        context,
+        actorUuid,
+      );
     }
   }
 
