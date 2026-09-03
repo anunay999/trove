@@ -121,6 +121,179 @@ const EMBEDDABLE_TEXT_UNIT = `
   and trim(tu.text) !~ '^\\s*(-{3,}|\\*{3,}|_{3,})\\s*$'
   and trim(tu.text) !~ '^\\|?(\\s*:?-+:?\\s*\\|)+\\s*$'`;
 
+/**
+ * The SQL text of the lexical and grep arms lives at module level so
+ * tests/query-plans.test.ts can EXPLAIN the exact statements production runs
+ * rather than a hand-copied approximation that drifts.
+ */
+type GrepOperator = "~" | "~*" | "like" | "ilike";
+
+/**
+ * The longest run of characters every match of `pattern` must contain, or
+ * null when no such run of three or more exists. Deliberately conservative: a
+ * character followed by `?`, `*` or `{…}` is optional and is dropped from its
+ * run; alternation, groups, classes and escapes make the required text
+ * ambiguous, so the whole pattern is given up on. Three is the trigram floor —
+ * pg_trgm cannot serve a shorter ilike from the index.
+ */
+export function grepIndexLiteral(pattern: string): string | null {
+  if (/[|()[\]\\]/.test(pattern)) return null;
+  let best = "";
+  let run = "";
+  const close = (): void => {
+    if (run.length > best.length) best = run;
+    run = "";
+  };
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index] as string;
+    if (char === "?" || char === "*") {
+      run = run.slice(0, -1);
+      close();
+    } else if (char === "{") {
+      run = run.slice(0, -1);
+      close();
+      const end = pattern.indexOf("}", index);
+      index = end === -1 ? pattern.length : end;
+    } else if (char === "+" || char === "." || char === "^" || char === "$") {
+      close();
+    } else {
+      run += char;
+    }
+  }
+  close();
+  return best.length >= 3 ? best : null;
+}
+
+/** Escape a literal for use inside a `%…%` like/ilike pattern. */
+export function likePattern(literal: string): string {
+  return `%${literal.replace(/[%_\\]/g, "\\$&")}%`;
+}
+
+const likeOperatorFor = (operator: GrepOperator): "like" | "ilike" => (operator === "~" ? "like" : "ilike");
+
+/**
+ * $1 pattern, $2 limit, $3/$4 owner scope, $5 the `%literal%` prefilter (bound
+ * only when `prefilter` is true). The prefilter is a necessary condition for
+ * the regex, so ANDing it in changes nothing about which rows match; it gives
+ * the planner a trigram path even when pg_trgm cannot extract trigrams from
+ * the regex itself.
+ */
+export function grepNodeSql(operator: GrepOperator, prefilter: boolean): string {
+  const like = likeOperatorFor(operator);
+  const nodeGuard = prefilter ? ` and (n.title ${like} $5 or n.summary ${like} $5)` : "";
+  const revisionGuard = prefilter ? ` and nr.content ${like} $5` : "";
+  // `hits` is a superset prefilter: one branch per table so each is a BitmapOr
+  // over that table's trigram indexes. The revision branch matches ANY revision;
+  // the outer predicate re-checks the current one, so the result set is exactly
+  // what the plain OR-chain returned — only now it is evaluated on hits alone.
+  return `
+        with hits as (
+          select n.id
+          from node n
+          where n.deleted_at is null and (n.title ${operator} $1 or n.summary ${operator} $1)${nodeGuard}
+          union
+          select nr.node_id as id
+          from node_revision nr
+          where nr.content ${operator} $1${revisionGuard}
+        )
+        select n.id, n.slug, n.title, n.summary, nr.content
+        from hits
+        join node n on n.id = hits.id
+        left join node_revision nr on nr.id = n.current_revision_id
+        where n.deleted_at is null and ($3 or n.owner_id = $4)
+          and (n.title ${operator} $1 or coalesce(n.summary, '') ${operator} $1 or coalesce(nr.content, '') ${operator} $1)
+        order by n.updated_at desc
+        limit $2`;
+}
+
+export function grepUnitSql(operator: GrepOperator, prefilter: boolean): string {
+  const guard = prefilter ? ` and tu.text ${likeOperatorFor(operator)} $5` : "";
+  return `
+        select tu.id, tu.source_id, tu.ordinal, tu.text, s.title
+        from text_unit tu
+        join source s on s.id = tu.source_id
+        where ($3 or tu.owner_id = $4) and tu.text ${operator} $1${guard}
+        order by tu.created_at desc, tu.ordinal
+        limit $2`;
+}
+
+// The match predicate is an OR across node and node_revision, and no index can
+// serve a disjunction that spans a join: before `hits`, every hybrid search
+// hashed all current revisions and recomputed to_tsvector over each. `hits`
+// is a superset prefilter with one branch per table, so each branch is a
+// BitmapOr over that table's GIN indexes (full-text + trigram; slug and title
+// on node). The revision branch matches any revision, current or not — the
+// outer WHERE repeats the original predicate against the current revision, so
+// the rows returned are exactly the ones the OR-chain returned, evaluated on
+// the handful of hits instead of the whole corpus.
+export const LEXICAL_NODE_SEARCH_SQL = `with q as (select $7::tsquery as query),
+       hits as (
+         select n.id
+         from node n
+         cross join q
+         where n.deleted_at is null
+           and (
+             to_tsvector('english', coalesce(n.title, '') || ' ' || coalesce(n.summary, '')) @@ q.query
+             or n.slug = lower(replace($1, ' ', '-'))
+             or n.title ilike $4
+             or n.summary ilike $4
+           )
+         union
+         select nr.node_id as id
+         from node_revision nr
+         cross join q
+         where to_tsvector('english', coalesce(nr.content, '') || ' ' || coalesce(nr.projection_markdown, '')) @@ q.query
+            or nr.content ilike $4
+       )
+       select n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id, n.updated_at, n.access_count, n.last_accessed_at,
+              greatest(
+                ts_rank_cd(to_tsvector('english', coalesce(n.title, '') || ' ' || coalesce(n.summary, '')), q.query),
+                ts_rank_cd(to_tsvector('english', coalesce(nr.content, '') || ' ' || coalesce(nr.projection_markdown, '')), q.query),
+                case when n.slug = lower(replace($1, ' ', '-')) then 1.0 else 0 end,
+                case when n.title ilike $4 then 0.2 else 0 end,
+                case when coalesce(n.summary, '') ilike $4 then 0.1 else 0 end,
+                case when coalesce(nr.content, '') ilike $4 then 0.05 else 0 end
+              ) as rank
+       from hits
+       join node n on n.id = hits.id
+       left join node_revision nr on nr.id = n.current_revision_id
+       cross join q
+       where n.deleted_at is null
+         and ($5 or n.owner_id = $6)
+         and ($2::node_type[] is null or n.type = any($2::node_type[]))
+         and (
+           -- Giant catalog/log pages starve recall packs; only a title or slug
+           -- match lets them surface in search. Grep/read/neighborhood keep them.
+           coalesce(length(nr.content), 0) <= 12000
+           or n.title ilike $4
+           or n.slug = lower(replace($1, ' ', '-'))
+         )
+         and (
+           to_tsvector('english', coalesce(n.title, '') || ' ' || coalesce(n.summary, '')) @@ q.query
+           or to_tsvector('english', coalesce(nr.content, '') || ' ' || coalesce(nr.projection_markdown, '')) @@ q.query
+           or n.slug = lower(replace($1, ' ', '-'))
+           or n.title ilike $4
+           or coalesce(n.summary, '') ilike $4
+           or coalesce(nr.content, '') ilike $4
+         )
+       order by rank desc, n.updated_at desc
+       limit $3`;
+
+export const LEXICAL_UNIT_SEARCH_SQL = `with q as (select $5::tsquery as query)
+       select id, source_id, ordinal, section_path, char_start, char_end, text, content_sha256,
+              greatest(
+                ts_rank_cd(to_tsvector('english', text), q.query),
+                case when text ilike $2 then 0.05 else 0 end
+              ) as rank
+       from text_unit
+       cross join q
+       where ($3 or owner_id = $4) and (
+         to_tsvector('english', text) @@ q.query
+          or text ilike $2
+       )
+       order by rank desc, created_at desc, ordinal
+       limit $1`;
+
 type PgStoreOptions = {
   connectionString: string;
   /**
@@ -301,30 +474,21 @@ export class PgGraphStore implements GraphStore {
     const operator = caseSensitive ? "~" : "~*";
     const regex = compileGrepPattern(input.pattern, caseSensitive);
     const literalRegex = compileGrepPattern(input.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), caseSensitive);
-    const likeLiteral = `%${input.pattern.replace(/[%_\\]/g, "\\$&")}%`;
+    const likeLiteral = likePattern(input.pattern);
+    // A literal run every match must contain lets the trigram index prefilter
+    // the regex scan; patterns without one fall back to the plain regex.
+    const indexLiteral = grepIndexLiteral(input.pattern);
+    const regexParams = [input.pattern, limit + 1, ...ownerParams, ...(indexLiteral === null ? [] : [likePattern(indexLiteral)])];
     const matches: GrepMatch[] = [];
     const excerptFor = (text: string): string | null => grepExcerpt(text, regex) ?? grepExcerpt(text, literalRegex);
 
     if (scope === "nodes" || scope === "all") {
-      const nodeSql = (predicate: string) => `
-        select n.id, n.slug, n.title, n.summary, nr.content
-        from node n
-        left join node_revision nr on nr.id = n.current_revision_id
-        where n.deleted_at is null and ($3 or n.owner_id = $4) and (${predicate})
-        order by n.updated_at desc
-        limit $2`;
       let rows: Array<Record<string, unknown>>;
       try {
-        rows = (await this.pool.query(
-          nodeSql(`n.title ${operator} $1 or coalesce(n.summary, '') ${operator} $1 or coalesce(nr.content, '') ${operator} $1`),
-          [input.pattern, limit + 1, ...ownerParams],
-        )).rows;
+        rows = (await this.pool.query(grepNodeSql(operator, indexLiteral !== null), regexParams)).rows;
       } catch {
         // JS accepted the pattern but Postgres POSIX regex rejected it — fall back to a literal scan.
-        rows = (await this.pool.query(
-          nodeSql("n.title ilike $1 or coalesce(n.summary, '') ilike $1 or coalesce(nr.content, '') ilike $1"),
-          [likeLiteral, limit + 1, ...ownerParams],
-        )).rows;
+        rows = (await this.pool.query(grepNodeSql("ilike", false), [likeLiteral, limit + 1, ...ownerParams])).rows;
       }
       for (const row of rows) {
         const fields: Array<["title" | "summary" | "content", string | null]> = [
@@ -344,18 +508,11 @@ export class PgGraphStore implements GraphStore {
     }
 
     if (scope === "sources" || scope === "all") {
-      const unitSql = (predicate: string) => `
-        select tu.id, tu.source_id, tu.ordinal, tu.text, s.title
-        from text_unit tu
-        join source s on s.id = tu.source_id
-        where ($3 or tu.owner_id = $4) and (${predicate})
-        order by tu.created_at desc, tu.ordinal
-        limit $2`;
       let rows: Array<Record<string, unknown>>;
       try {
-        rows = (await this.pool.query(unitSql(`tu.text ${operator} $1`), [input.pattern, limit + 1, ...ownerParams])).rows;
+        rows = (await this.pool.query(grepUnitSql(operator, indexLiteral !== null), regexParams)).rows;
       } catch {
-        rows = (await this.pool.query(unitSql("tu.text ilike $1"), [likeLiteral, limit + 1, ...ownerParams])).rows;
+        rows = (await this.pool.query(grepUnitSql("ilike", false), [likeLiteral, limit + 1, ...ownerParams])).rows;
       }
       for (const row of rows) {
         const text = String(row.text ?? "");
@@ -439,41 +596,8 @@ export class PgGraphStore implements GraphStore {
     }
 
     const typeFilter = input.types && input.types.length > 0 ? input.types : null;
-    const nodeSql = `with q as (select $7::tsquery as query)
-       select n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id, n.updated_at, n.access_count, n.last_accessed_at,
-              greatest(
-                ts_rank_cd(to_tsvector('english', coalesce(n.title, '') || ' ' || coalesce(n.summary, '')), q.query),
-                ts_rank_cd(to_tsvector('english', coalesce(nr.content, '') || ' ' || coalesce(nr.projection_markdown, '')), q.query),
-                case when n.slug = lower(replace($1, ' ', '-')) then 1.0 else 0 end,
-                case when n.title ilike $4 then 0.2 else 0 end,
-                case when coalesce(n.summary, '') ilike $4 then 0.1 else 0 end,
-                case when coalesce(nr.content, '') ilike $4 then 0.05 else 0 end
-              ) as rank
-       from node n
-       left join node_revision nr on nr.id = n.current_revision_id
-       cross join q
-       where n.deleted_at is null
-         and ($5 or n.owner_id = $6)
-         and ($2::node_type[] is null or n.type = any($2::node_type[]))
-         and (
-           -- Giant catalog/log pages starve recall packs; only a title or slug
-           -- match lets them surface in search. Grep/read/neighborhood keep them.
-           coalesce(length(nr.content), 0) <= 12000
-           or n.title ilike $4
-           or n.slug = lower(replace($1, ' ', '-'))
-         )
-         and (
-           to_tsvector('english', coalesce(n.title, '') || ' ' || coalesce(n.summary, '')) @@ q.query
-           or to_tsvector('english', coalesce(nr.content, '') || ' ' || coalesce(nr.projection_markdown, '')) @@ q.query
-           or n.slug = lower(replace($1, ' ', '-'))
-           or n.title ilike $4
-           or coalesce(n.summary, '') ilike $4
-           or coalesce(nr.content, '') ilike $4
-         )
-       order by rank desc, n.updated_at desc
-       limit $3`;
     const runNodeSearch = (effectiveTsquery: string) =>
-      this.pool.query(nodeSql, [
+      this.pool.query(LEXICAL_NODE_SEARCH_SQL, [
         input.query, typeFilter, input.limit, `%${input.query}%`, !scope.scoped, scope.ownerId, effectiveTsquery,
       ]);
     // Strict AND first so precision is preserved whenever every term co-occurs;
@@ -484,22 +608,8 @@ export class PgGraphStore implements GraphStore {
     };
     const nodeResult = await withOrFallback(runNodeSearch);
 
-    const unitSql = `with q as (select $5::tsquery as query)
-       select id, source_id, ordinal, section_path, char_start, char_end, text, content_sha256,
-              greatest(
-                ts_rank_cd(to_tsvector('english', text), q.query),
-                case when text ilike $2 then 0.05 else 0 end
-              ) as rank
-       from text_unit
-       cross join q
-       where ($3 or owner_id = $4) and (
-         to_tsvector('english', text) @@ q.query
-          or text ilike $2
-       )
-       order by rank desc, created_at desc, ordinal
-       limit $1`;
     const runUnitSearch = (effectiveTsquery: string) =>
-      this.pool.query(unitSql, [
+      this.pool.query(LEXICAL_UNIT_SEARCH_SQL, [
         input.limit, `%${input.query}%`, !scope.scoped, scope.ownerId, effectiveTsquery,
       ]);
     const textUnitResult = input.includeTextUnits

@@ -268,6 +268,10 @@ create index text_unit_search_idx on text_unit using gin(
 );
 
 create index node_title_trgm_idx on node using gin (title gin_trgm_ops);
+create index node_summary_trgm_idx on node using gin (summary gin_trgm_ops);
+create index node_slug_idx on node (slug);
+create index node_revision_content_trgm_idx on node_revision using gin (content gin_trgm_ops);
+create index text_unit_text_trgm_idx on text_unit using gin (text gin_trgm_ops);
 
 create index embedding_hnsw_idx on embedding using hnsw (embedding vector_cosine_ops);
 
