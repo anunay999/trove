@@ -230,6 +230,7 @@ create index edge_from_idx on edge(from_node_id) where deleted_at is null;
 create index edge_to_idx on edge(to_node_id) where deleted_at is null;
 create index edge_predicate_idx on edge(predicate) where deleted_at is null;
 create index annotation_text_unit_idx on annotation(text_unit_id);
+create index annotation_node_idx on annotation(node_id);
 create index graph_event_entity_idx on graph_event(entity_table, entity_id, created_at desc);
 create index graph_job_status_idx on graph_job(status, priority desc, created_at);
 create index graph_job_kind_idx on graph_job(kind, created_at desc);
@@ -251,3 +252,8 @@ create index text_unit_search_idx on text_unit using gin(
 create index node_title_trgm_idx on node using gin (title gin_trgm_ops);
 
 create index embedding_hnsw_idx on embedding using hnsw (embedding vector_cosine_ops);
+
+-- node churns on every read (access activation) and graph_event grows on every
+-- write; the default 20% dead-tuple trigger is far too lazy for them.
+alter table node set (autovacuum_vacuum_scale_factor = 0.02);
+alter table graph_event set (autovacuum_vacuum_scale_factor = 0.02);

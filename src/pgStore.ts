@@ -1207,9 +1207,9 @@ export class PgGraphStore implements GraphStore {
       );
       await client.query(
         `insert into node_revision (
-           id, node_id, revision_number, title, summary, content, projection_markdown, frontmatter, content_sha256, created_by
+           id, node_id, revision_number, title, summary, content, frontmatter, content_sha256, created_by
          )
-         values ($1, $2, 1, $3, $4, $5, null, '{}'::jsonb, $6, $7)`,
+         values ($1, $2, 1, $3, $4, $5, '{}'::jsonb, $6, $7)`,
         [revisionId, id, input.title, input.summary, content, sha256(content ?? ""), actorUuid],
       );
       await client.query("update node set current_revision_id = $1 where id = $2", [revisionId, id]);
@@ -1306,9 +1306,9 @@ export class PgGraphStore implements GraphStore {
         revisionId = randomUUID();
         await client.query(
           `insert into node_revision (
-             id, node_id, revision_number, title, summary, content, projection_markdown, frontmatter, content_sha256, created_by
+             id, node_id, revision_number, title, summary, content, frontmatter, content_sha256, created_by
            )
-           values ($1, $2, $3, $4, $5, $6, null, '{}'::jsonb, $7, $8)`,
+           values ($1, $2, $3, $4, $5, $6, '{}'::jsonb, $7, $8)`,
           [
             revisionId,
             input.nodeId,
