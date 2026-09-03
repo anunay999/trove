@@ -71,8 +71,8 @@ const STORIES: Story[] = [
 /* Beats, in order, and when each lands (ms from the story's start). */
 const BEATS = ["ask", "remember", "cite", "connect", "history", "act"] as const;
 type Beat = (typeof BEATS)[number];
-const BEAT_AT: Record<Beat, number> = { ask: 0, remember: 1900, cite: 3100, connect: 4400, history: 5700, act: 6900 };
-const STORY_LENGTH = 10800;
+const BEAT_AT: Record<Beat, number> = { ask: 0, remember: 1400, cite: 2300, connect: 3200, history: 4100, act: 5000 };
+const STORY_LENGTH = 8400;
 const FINAL_BEAT = BEATS.length - 1;
 
 const EASE = [0.16, 1, 0.3, 1] as const;
@@ -92,7 +92,7 @@ function Typed({ text, active }: { text: string; active: boolean }) {
         }
         return n + 1;
       });
-    }, 28);
+    }, 22);
     return () => window.clearInterval(id);
   }, [text, active]);
 
@@ -131,7 +131,7 @@ function Rise({ show, children, className, delay = 0 }: { show: boolean; childre
     <motion.div
       initial={false}
       animate={show ? { opacity: 1, y: 0 } : { opacity: 0, y: 8 }}
-      transition={{ duration: 0.55, delay: show ? delay : 0, ease: EASE }}
+      transition={{ duration: 0.4, delay: show ? delay : 0, ease: EASE }}
       className={className}
       aria-hidden={!show}
     >
@@ -161,9 +161,15 @@ function StoryFrame({ story, beat, animate }: { story: Story; beat: number; anim
         setSpineHeight(0);
         return;
       }
-      const top = spine.getBoundingClientRect().top;
-      const rect = stop.getBoundingClientRect();
-      setSpineHeight(rect.top + rect.height / 2 - top);
+      // Layout offsets, not bounding rects: the stop's block is still rising
+      // into place when this runs, and a rect would measure it 8px too low.
+      let y = stop.offsetHeight / 2;
+      for (let node: HTMLElement | null = stop; node && node !== spine; node = node.offsetParent as HTMLElement | null) {
+        y += node.offsetTop;
+        const parent = node.offsetParent as HTMLElement | null;
+        if (parent && parent !== spine) y += parent.clientTop; // a bordered card's top edge
+      }
+      setSpineHeight(y);
     };
     measure();
     window.addEventListener("resize", measure);
@@ -186,15 +192,16 @@ function StoryFrame({ story, beat, animate }: { story: Story; beat: number; anim
         <motion.span
           initial={false}
           animate={{ height: spineHeight }}
-          transition={{ duration: 0.55, ease: EASE }}
+          transition={{ duration: 0.4, ease: EASE }}
           className="absolute left-0 top-0 w-px bg-[var(--signal)]/50"
           aria-hidden="true"
         />
 
         {/* What Trove remembered, with its receipt. */}
         <Rise show={at("remember")} className="relative rounded-xl border bg-[var(--background)]/80 p-4 md:p-5">
-          <span className="absolute -left-5 top-6 h-px w-5 bg-[var(--signal)]/50 md:-left-6 md:w-6" aria-hidden="true" />
-          <span ref={memoryStop} className="absolute -left-[22.5px] top-[21px] size-1.5 rounded-full bg-[var(--signal)] md:-left-[26.5px]" aria-hidden="true" />
+          {/* Offsets include the card's 1px border, so the dot lands on the spine. */}
+          <span className="absolute -left-[21px] top-6 h-px w-[21px] bg-[var(--signal)]/50 md:-left-[25px] md:w-[25px]" aria-hidden="true" />
+          <span ref={memoryStop} className="absolute -left-[24px] top-[21px] size-[7px] rounded-full bg-[var(--signal)] md:-left-[28px]" aria-hidden="true" />
           <Label>remembered</Label>
           <p className="mt-1.5 text-lg font-medium leading-tight tracking-tight md:text-xl">{story.remembered}</p>
 
@@ -218,7 +225,7 @@ function StoryFrame({ story, beat, animate }: { story: Story; beat: number; anim
         {/* The related thing the agent didn't ask for, hung off the same spine. */}
         <Rise show={at("connect")} className="relative mt-3">
           <span className="absolute -left-5 top-[7px] h-px w-5 bg-[var(--signal)]/50 md:-left-6 md:w-6" aria-hidden="true" />
-          <span ref={relatedStop} className="absolute -left-[22.5px] top-[4px] size-1.5 rounded-full bg-[var(--signal)] md:-left-[26.5px]" aria-hidden="true" />
+          <span ref={relatedStop} className="absolute -left-[23px] top-[4px] size-[7px] rounded-full bg-[var(--signal)] md:-left-[27px]" aria-hidden="true" />
           <Label>also worth knowing</Label>
           <div className="mt-2 rounded-xl border bg-[var(--background)]/60 px-4 py-3">
             <p className="text-[13px] leading-snug text-foreground md:text-sm">{story.related}</p>
@@ -291,8 +298,8 @@ export function RecallScene() {
             key={storyIndex}
             initial={reduceMotion ? false : { opacity: 0 }}
             animate={{ opacity: 1 }}
-            exit={{ opacity: 0, transition: { duration: 0.35 } }}
-            transition={{ duration: 0.4 }}
+            exit={{ opacity: 0, transition: { duration: 0.25 } }}
+            transition={{ duration: 0.3 }}
             className="h-full"
           >
             <StoryFrame story={story} beat={beat} animate={!reduceMotion} />
