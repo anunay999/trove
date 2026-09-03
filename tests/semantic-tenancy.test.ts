@@ -185,7 +185,7 @@ describe("semantic search under many tenants", { skip: !hasPostgres() }, () => {
     const begin = statements.indexOf("begin");
     const set = statements.findIndex((statement) => /set local hnsw\.iterative_scan = relaxed_order/.test(statement));
     const nodeProbe = statements.findIndex((statement) => statement.includes("with candidates as"));
-    const unitProbe = statements.findIndex((statement) => statement.includes("e.owner_table = 'text_unit'"));
+    const unitProbe = statements.findIndex((statement) => statement.includes("e.owner_table = 'text_chunk'"));
     const commit = statements.indexOf("commit");
     assert.ok(begin !== -1 && set > begin, "iterative scan is not enabled inside the transaction");
     assert.ok(nodeProbe > set && unitProbe > set, "a probe ran before iterative scan was enabled");

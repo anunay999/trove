@@ -64,6 +64,10 @@ import {
   evidenceSupportScore,
   sha256,
   splitTextUnits,
+  buildTextChunks,
+  chunkEmbeddingInput,
+  isEmbeddableUnitText,
+  type TextChunk,
   ServedUnitLog,
   FUZZY_QUOTE_CANDIDATE_FLOOR,
   WEAK_EVIDENCE_FLOOR,
@@ -126,6 +130,12 @@ export class InMemoryGraphStore implements GraphStore {
   /** Owner scope is internal metadata, mirroring source.owner_id in Postgres. */
   private sourceOwnerIds = new Map<string, string | null>();
   private textUnits = new Map<string, TextUnit>();
+  /**
+   * The chunk grain the pg driver keeps in `text_chunk` (migration 020) and
+   * builds its vector index on. Held here so semantic text-unit search scores
+   * the same texts on both drivers and expands a hit the same way.
+   */
+  private textChunks = new Map<string, TextChunk>();
   private nodes = new Map<string, GraphNode>();
   private slugIndex = new Map<string, string>();
   private revisions = new Map<string, Revision>();
@@ -195,6 +205,9 @@ export class InMemoryGraphStore implements GraphStore {
     this.sourceOwnerIds.set(source.id, ownerScope(context).ownerId);
     for (const unit of units) {
       this.textUnits.set(unit.id, unit);
+    }
+    for (const chunk of buildTextChunks(source.id, source.title, units)) {
+      this.textChunks.set(chunk.id, chunk);
     }
     this.recordEvent("ingest", source.id, context, now);
     this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
@@ -348,14 +361,22 @@ export class InMemoryGraphStore implements GraphStore {
     }
     scoredNodes.sort((left, right) => left.distance - right.distance || left.node.id.localeCompare(right.node.id));
 
+    // Chunks are scored, text units are returned — the pg driver's shape
+    // (SEMANTIC_UNIT_SEARCH_SQL): the chunk is the grain worth embedding, the
+    // unit is the grain that gets cited. A chunk's units all inherit its
+    // distance and come back in ordinal order, capped at the caller's limit.
     const scoredUnits: Array<{ unit: TextUnit; distance: number }> = [];
     if (input.includeTextUnits) {
-      for (const unit of this.textUnits.values()) {
-        const vector = await this.embeddingForText(provider, unit.text);
+      const scoredChunks: Array<{ chunk: TextChunk; distance: number }> = [];
+      for (const chunk of this.textChunks.values()) {
+        const vector = await this.embeddingForText(provider, chunkEmbeddingInput(chunk));
         const distance = queryDistance(vector);
-        if (distance < maxDistance) scoredUnits.push({ unit, distance });
+        if (distance < maxDistance) scoredChunks.push({ chunk, distance });
       }
-      scoredUnits.sort((left, right) => left.distance - right.distance || left.unit.id.localeCompare(right.unit.id));
+      scoredChunks.sort((left, right) => left.distance - right.distance || left.chunk.id.localeCompare(right.chunk.id));
+      for (const { chunk, distance } of scoredChunks.slice(0, input.limit)) {
+        for (const unit of this.unitsForChunk(chunk)) scoredUnits.push({ unit, distance });
+      }
     }
 
     return {
@@ -365,6 +386,21 @@ export class InMemoryGraphStore implements GraphStore {
       nodes: scoredNodes.slice(0, input.limit).map((entry) => ({ ...entry.node, distance: entry.distance })),
       textUnits: scoredUnits.slice(0, input.limit).map((entry) => entry.unit),
     };
+  }
+
+  /**
+   * The text units a chunk covers, in ordinal order. Mirrors the pg driver's
+   * range join on (source_id, ordinal), junk lines trimmed the same way — they
+   * ride inside a chunk but were never served as evidence.
+   */
+  private unitsForChunk(chunk: TextChunk): TextUnit[] {
+    return [...this.textUnits.values()]
+      .filter((unit) =>
+        unit.sourceId === chunk.sourceId
+        && unit.ordinal >= chunk.firstOrdinal
+        && unit.ordinal <= chunk.lastOrdinal
+        && isEmbeddableUnitText(unit.text))
+      .sort((left, right) => left.ordinal - right.ordinal);
   }
 
   private async embeddingForText(provider: EmbeddingProvider, text: string): Promise<number[]> {
@@ -1419,9 +1455,10 @@ export class InMemoryGraphStore implements GraphStore {
       model: "unconfigured",
       status: "skipped_no_embedding_provider",
       ownerId: null,
+      chunkedSources: 0,
       missing: {
         nodeRevisions: this.nodes.size,
-        textUnits: this.textUnits.size,
+        textChunks: this.textChunks.size,
       },
     };
     return result;

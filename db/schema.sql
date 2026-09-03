@@ -15,7 +15,10 @@
 --     replace: source (kind, content_sha256) -> source_owner_content_key,
 --     node.slug -> node_owner_slug_key, graph_view.slug -> graph_view_owner_slug_key;
 --   - it still lists 'claim' in embedding.owner_table's check, which 010 drops
---     alongside the claim table.
+--     alongside the claim table;
+--   - migration 020 (text_chunk, the grain the vector index is built on) is NOT
+--     merged in either: its owner_id references app_user, which migration 004
+--     creates, so the table cannot be declared before the migrations run.
 -- Do not "fix" the drift by editing applied migrations: their checksums are
 -- recorded, and a changed file fails the next boot.
 

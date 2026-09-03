@@ -370,8 +370,8 @@ describe("jobs", () => {
       payload: ownerId ? { ownerId } : {},
       result: {
         provider: "fake", model: "fake", status: "refreshed", ownerId,
-        missingBefore: { nodeRevisions: missing, textUnits: 0 },
-        embedded: { nodeRevisions: embedded, textUnits: 0 },
+        missingBefore: { nodeRevisions: missing, textChunks: 0 },
+        embedded: { nodeRevisions: embedded, textChunks: 0 },
       },
       dedupeKey: null, ownerId, error: null, attempts: 1, priority: 40,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),

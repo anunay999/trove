@@ -37,13 +37,13 @@ describe("job worker", () => {
 
   describe("embeddingDrainRemaining", () => {
     it("reports remaining work after a saturated batch (real store shape)", () => {
-      // pgStore reports embedded as { nodeRevisions, textUnits }; a drain
+      // pgStore reports embedded as { nodeRevisions, textChunks }; a drain
       // calculator that Number()s that object gets NaN and never re-enqueues.
       const saturated = fabricateJob({
         result: {
           status: "refreshed",
-          embedded: { nodeRevisions: 4, textUnits: 20 },
-          missingBefore: { nodeRevisions: 4, textUnits: 96 },
+          embedded: { nodeRevisions: 4, textChunks: 20 },
+          missingBefore: { nodeRevisions: 4, textChunks: 96 },
         },
       });
       assert.equal(embeddingDrainRemaining(saturated), 76);
@@ -53,8 +53,8 @@ describe("job worker", () => {
       const finished = fabricateJob({
         result: {
           status: "refreshed",
-          embedded: { nodeRevisions: 0, textUnits: 5 },
-          missingBefore: { nodeRevisions: 0, textUnits: 5 },
+          embedded: { nodeRevisions: 0, textChunks: 5 },
+          missingBefore: { nodeRevisions: 0, textChunks: 5 },
         },
       });
       assert.equal(embeddingDrainRemaining(finished), 0);
@@ -62,7 +62,7 @@ describe("job worker", () => {
 
     it("does not re-enqueue provider-less skips", () => {
       const skipped = fabricateJob({
-        result: { status: "skipped_no_embedding_provider", missing: { nodeRevisions: 9, textUnits: 9 } },
+        result: { status: "skipped_no_embedding_provider", missing: { nodeRevisions: 9, textChunks: 9 } },
       });
       assert.equal(embeddingDrainRemaining(skipped), 0);
     });

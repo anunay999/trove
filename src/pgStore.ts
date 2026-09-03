@@ -50,6 +50,8 @@ import {
   renderMarkdownProjection,
   sha256,
   splitTextUnits,
+  buildTextChunks,
+  chunkEmbeddingInput,
   ServedUnitLog,
   FUZZY_QUOTE_CANDIDATE_FLOOR,
   EdgeValidityConflictError,
@@ -61,6 +63,7 @@ import {
   type ReconcileFlagCode,
   type GraphEvent,
   type GraphEventFeed,
+  type EmbeddingCounts,
   type GraphEventStats,
   WRITE_ACTIONS,
   type GraphJob,
@@ -123,12 +126,30 @@ function leaseHeartbeatMs(): number {
 }
 
 // Junk text units (short fragments, horizontal rules, markdown table
-// separators) are not worth an embedding. The missing-count and the select in
-// the refresh job must agree on this filter or the drain loop never finishes.
+// separators) carry no meaning. Since 020 they are no longer embedded one by
+// one — they ride inside a chunk — so this predicate now does two jobs: it
+// trims them from a semantic hit's expansion (SEMANTIC_UNIT_SEARCH_SQL), and it
+// mirrors isEmbeddableUnitText in graphCore, which decides whether a chunk made
+// of nothing else is worth a vector. The two must stay in step.
 const EMBEDDABLE_TEXT_UNIT = `
   length(trim(tu.text)) >= 12
   and trim(tu.text) !~ '^\\s*(-{3,}|\\*{3,}|_{3,})\\s*$'
   and trim(tu.text) !~ '^\\|?(\\s*:?-+:?\\s*\\|)+\\s*$'`;
+
+/**
+ * How many unchunked sources one refresh_embeddings run converts to chunks.
+ * The chunking itself is TypeScript (buildTextChunks), so each source is a
+ * round trip; 50 keeps a run short while draining production's backlog in a
+ * handful of the worker's 30-second ticks.
+ */
+const CHUNK_BUILD_SOURCES_PER_RUN = 50;
+
+/**
+ * How many retired per-line vectors one refresh_embeddings run deletes. Bounded
+ * because each delete is HNSW index maintenance; the drain is resumable, so the
+ * only cost of a small batch is more of them.
+ */
+const TEXT_UNIT_VECTOR_RETIRE_PER_RUN = 500;
 
 /**
  * The SQL text of the lexical and grep arms lives at module level so
@@ -355,25 +376,45 @@ export function semanticNodeSearchSql(vectorCount: number): string {
 
 /**
  * The semantic text-unit arm, one probe per query vector. $1 vector, $2 model,
- * $3 unscoped, $4 owner, $5 limit, $6 max distance. The distance floor is
- * applied OUTSIDE the probe: as a filter inside it, an unrelated query (every
- * row over the floor) would make the iterative scan walk hnsw.max_scan_tuples
- * looking for one that passes. Outside, the probe stops at $5 rows and the
- * floor trims them — the same rows, since anything past the top $5 is farther.
+ * $3 unscoped, $4 owner, $5 limit, $6 max distance.
+ *
+ * The probe runs over CHUNKS (migration 020) and the result is expanded back to
+ * TEXT UNITS, which is the whole design: the chunk is what carries enough
+ * meaning to be worth a vector, the text unit is what evidence quotes,
+ * annotations and the served-unit log point at. The expansion is a range scan
+ * over text_unit_source_idx (source_id, ordinal) across the chunk's contiguous
+ * first_ordinal..last_ordinal, so a hit resolves to exactly the units that were
+ * embedded — no second implementation of the split in SQL.
+ *
+ * The distance floor is applied OUTSIDE the probe: as a filter inside it, an
+ * unrelated query (every row over the floor) would make the iterative scan walk
+ * hnsw.max_scan_tuples looking for one that passes. Outside, the probe stops at
+ * $5 rows and the floor trims them — the same rows, since anything past the top
+ * $5 is farther. The outer limit is $5 as well: $5 chunks expand to at least $5
+ * units, so the caller still gets as many units as it asked for.
+ *
+ * EMBEDDABLE_TEXT_UNIT repeats on the expansion because a chunk carries its
+ * junk lines along (dropping them would break the contiguous ordinal range),
+ * and a horizontal rule was never served as evidence before this change either.
  */
-export const SEMANTIC_UNIT_SEARCH_SQL = `select tu.id, tu.source_id, tu.ordinal, tu.section_path, tu.char_start, tu.char_end, tu.text, tu.content_sha256, tu.distance
+export const SEMANTIC_UNIT_SEARCH_SQL = `select tu.id, tu.source_id, tu.ordinal, tu.section_path, tu.char_start, tu.char_end, tu.text, tu.content_sha256, chunk.distance
        from (
-         select tu.id, tu.source_id, tu.ordinal, tu.section_path, tu.char_start, tu.char_end, tu.text, tu.content_sha256,
+         select tc.source_id, tc.first_ordinal, tc.last_ordinal,
                 (e.embedding <=> $1::vector) as distance
          from embedding e
-         join text_unit tu on tu.id = e.owner_id and e.owner_table = 'text_unit'
+         join text_chunk tc on tc.id = e.owner_id and e.owner_table = 'text_chunk'
          where e.model = $2
-           and ($3 or tu.owner_id = $4)
+           and ($3 or tc.owner_id = $4)
          order by e.embedding <=> $1::vector
          limit $5
-       ) tu
-       where tu.distance < $6
-       order by tu.distance`;
+       ) chunk
+       join text_unit tu
+         on tu.source_id = chunk.source_id
+        and tu.ordinal between chunk.first_ordinal and chunk.last_ordinal
+       where chunk.distance < $6
+         and ${EMBEDDABLE_TEXT_UNIT}
+       order by chunk.distance, tu.ordinal
+       limit $5`;
 
 type PgStoreOptions = {
   connectionString: string;
@@ -481,6 +522,34 @@ export class PgGraphStore implements GraphStore {
             estimateTokenCount(unit.text),
             unit.contentSha256,
             ownerId,
+          ],
+        );
+      }
+
+      // The chunks the vector index is built on, written in the same
+      // transaction as the units they cover so a source is never half-chunked.
+      // Same builder the refresh job uses to chunk older sources, so a
+      // backfilled chunk is byte-identical to a freshly ingested one.
+      for (const chunk of buildTextChunks(source.id, source.title, units)) {
+        await client.query(
+          `insert into text_chunk (
+             id, source_id, owner_id, ordinal, first_ordinal, last_ordinal,
+             section_path, context_prefix, text, token_count, content_sha256
+           )
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           on conflict (source_id, ordinal) do nothing`,
+          [
+            chunk.id,
+            chunk.sourceId,
+            ownerId,
+            chunk.ordinal,
+            chunk.firstOrdinal,
+            chunk.lastOrdinal,
+            chunk.sectionPath,
+            chunk.contextPrefix,
+            chunk.text,
+            estimateTokenCount(chunkEmbeddingInput(chunk)),
+            chunk.contentSha256,
           ],
         );
       }
@@ -2700,10 +2769,18 @@ export class PgGraphStore implements GraphStore {
     // the drain math lies.
     const payloadOwner = asRecord(job.payload).ownerId;
     const ownerId = typeof payloadOwner === "string" ? payloadOwner : null;
+
+    // Chunk whatever is still unchunked BEFORE counting, so the count sees the
+    // rows this run is about to be asked to embed. Sources ingested before
+    // migration 020 have text units and no chunks; this is what converts them,
+    // batched, and it is what makes the per-line backfill retirement below safe
+    // to run — a source is never left with neither grain indexed.
+    const chunkedSources = await this.buildMissingTextChunks(ownerId);
+
     // Only the owner types the backfill actually embeds (and search actually
     // reads) are counted; whole-source vectors are a future feature, and
     // counting them here made every job report look permanently unfinished.
-    const [nodeRevisions, textUnits] = await Promise.all([
+    const [nodeRevisions, textChunks] = await Promise.all([
       this.pool.query(
         `select count(*)::int as count
          from node n
@@ -2721,15 +2798,14 @@ export class PgGraphStore implements GraphStore {
       ),
       this.pool.query(
         `select count(*)::int as count
-         from text_unit tu
-         where ${EMBEDDABLE_TEXT_UNIT}
-           and ($2::uuid is null or tu.owner_id = $2)
+         from text_chunk tc
+         where ($2::uuid is null or tc.owner_id = $2)
            and not exists (
              select 1 from embedding e
-             where e.owner_table = 'text_unit'
-               and e.owner_id = tu.id
+             where e.owner_table = 'text_chunk'
+               and e.owner_id = tc.id
                and e.model = $1
-               and e.content_sha256 = tu.content_sha256
+               and e.content_sha256 = tc.content_sha256
            )`,
         [model, ownerId],
       ),
@@ -2737,7 +2813,7 @@ export class PgGraphStore implements GraphStore {
 
     const missing = {
       nodeRevisions: Number(nodeRevisions.rows[0]?.count ?? 0),
-      textUnits: Number(textUnits.rows[0]?.count ?? 0),
+      textChunks: Number(textChunks.rows[0]?.count ?? 0),
     };
 
     if (!provider) {
@@ -2746,6 +2822,7 @@ export class PgGraphStore implements GraphStore {
         model,
         status: "skipped_no_embedding_provider",
         ownerId,
+        chunkedSources,
         missing,
       };
       return result;
@@ -2753,22 +2830,133 @@ export class PgGraphStore implements GraphStore {
 
     const limit = Number(asRecord(job.payload).limit ?? process.env.TROVE_EMBEDDING_JOB_LIMIT ?? 256);
     const embedded = await this.refreshMissingEmbeddings(provider, Number.isFinite(limit) ? limit : 256, ownerId);
+    // Only once a source's chunks are all embedded do its per-line vectors go.
+    const retiredTextUnitVectors = await this.retireTextUnitVectors(model, ownerId);
     const result: GraphJobResultMap["refresh_embeddings"] = {
       provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "openai",
       model,
       status: "refreshed",
       ownerId,
+      chunkedSources,
+      retiredTextUnitVectors,
       missingBefore: missing,
       embedded,
     };
     return result;
   }
 
+  /**
+   * Chunk the sources that have text units but no chunks yet — everything
+   * ingested before migration 020 — a bounded batch at a time.
+   *
+   * The chunking runs in TypeScript (buildTextChunks) rather than SQL on
+   * purpose: it is the same function ingest calls, so a chunk backfilled here
+   * is byte-identical to one written at ingest, and there is no second
+   * implementation of the section/size rules to drift. The price is a round
+   * trip per source, which is why the batch is bounded.
+   */
+  private async buildMissingTextChunks(ownerId: string | null): Promise<number> {
+    const sources = await this.pool.query(
+      `select s.id, s.title, s.owner_id
+       from source s
+       where ($1::uuid is null or s.owner_id = $1)
+         and exists (select 1 from text_unit tu where tu.source_id = s.id)
+         and not exists (select 1 from text_chunk tc where tc.source_id = s.id)
+       order by s.created_at desc
+       limit $2`,
+      [ownerId, CHUNK_BUILD_SOURCES_PER_RUN],
+    );
+    if (sources.rows.length === 0) return 0;
+
+    let chunked = 0;
+    for (const row of sources.rows) {
+      const sourceId = String(row.id);
+      const units = await this.textUnitsForSource(sourceId);
+      const chunks = buildTextChunks(sourceId, String(row.title), units);
+      if (chunks.length === 0) continue;
+      const client = await this.pool.connect();
+      try {
+        await client.query("begin");
+        for (const chunk of chunks) {
+          await client.query(
+            `insert into text_chunk (
+               id, source_id, owner_id, ordinal, first_ordinal, last_ordinal,
+               section_path, context_prefix, text, token_count, content_sha256
+             )
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             on conflict (source_id, ordinal) do nothing`,
+            [
+              chunk.id,
+              chunk.sourceId,
+              row.owner_id ?? null,
+              chunk.ordinal,
+              chunk.firstOrdinal,
+              chunk.lastOrdinal,
+              chunk.sectionPath,
+              chunk.contextPrefix,
+              chunk.text,
+              estimateTokenCount(chunkEmbeddingInput(chunk)),
+              chunk.contentSha256,
+            ],
+          );
+        }
+        await client.query("commit");
+        chunked += 1;
+      } catch (error) {
+        await client.query("rollback");
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+    return chunked;
+  }
+
+  /**
+   * Delete the per-line vectors a source's chunk vectors have replaced.
+   *
+   * The guard is deliberately strict: a text unit's vector goes only once its
+   * source has chunks AND every one of them is embedded for this model, so
+   * semantic search over that source is never served by neither grain. Bounded
+   * and re-runnable — this is the whole production backfill path for the 70,479
+   * per-line vectors, drained by the background worker rather than a migration.
+   *
+   * Deleting does not shrink the table on its own; the space returns with the
+   * rewrite in scripts/convertEmbeddingStorage.ts (or any VACUUM FULL).
+   */
+  private async retireTextUnitVectors(model: string, ownerId: string | null): Promise<number> {
+    const result = await this.pool.query(
+      `with doomed as (
+         select e.id
+         from embedding e
+         join text_unit tu on tu.id = e.owner_id
+         where e.owner_table = 'text_unit'
+           and ($1::uuid is null or tu.owner_id = $1)
+           and exists (select 1 from text_chunk tc where tc.source_id = tu.source_id)
+           and not exists (
+             select 1 from text_chunk tc
+             where tc.source_id = tu.source_id
+               and not exists (
+                 select 1 from embedding ce
+                 where ce.owner_table = 'text_chunk'
+                   and ce.owner_id = tc.id
+                   and ce.model = $2
+                   and ce.content_sha256 = tc.content_sha256
+               )
+           )
+         limit $3
+       )
+       delete from embedding where id in (select id from doomed)`,
+      [ownerId, model, TEXT_UNIT_VECTOR_RETIRE_PER_RUN],
+    );
+    return result.rowCount ?? 0;
+  }
+
   private async refreshMissingEmbeddings(
     provider: EmbeddingProvider,
     limit: number,
     ownerId: string | null,
-  ): Promise<{ nodeRevisions: number; textUnits: number }> {
+  ): Promise<EmbeddingCounts> {
     // Provider-sized batches, not job-sized ones: the old 100-row clamp predates
     // batched embed calls and made a 20k-row import take ~800 queue round trips.
     const boundedLimit = Math.max(1, Math.min(1000, Math.trunc(limit)));
@@ -2791,35 +2979,37 @@ export class PgGraphStore implements GraphStore {
       [provider.model, boundedLimit, ownerId],
     );
     const remaining = Math.max(0, boundedLimit - nodeRevisionRows.rows.length);
-    const textUnitRows = remaining === 0 ? { rows: [] } : await this.pool.query(
-      `select tu.id, tu.content_sha256, tu.text
-       from text_unit tu
-       where ${EMBEDDABLE_TEXT_UNIT}
-         and ($3::uuid is null or tu.owner_id = $3)
+    // The context prefix is part of what gets embedded, and content_sha256 was
+    // computed over exactly this concatenation — so a retitled source or a
+    // moved section re-embeds through the same not-exists check.
+    const textChunkRows = remaining === 0 ? { rows: [] } : await this.pool.query(
+      `select tc.id, tc.content_sha256, concat_ws(E'\n\n', nullif(tc.context_prefix, ''), tc.text) as text
+       from text_chunk tc
+       where ($3::uuid is null or tc.owner_id = $3)
          and not exists (
            select 1 from embedding e
-           where e.owner_table = 'text_unit'
-             and e.owner_id = tu.id
+           where e.owner_table = 'text_chunk'
+             and e.owner_id = tc.id
              and e.model = $1
-             and e.content_sha256 = tu.content_sha256
+             and e.content_sha256 = tc.content_sha256
          )
-       order by tu.created_at desc
+       order by tc.created_at desc
        limit $2`,
       [provider.model, remaining, ownerId],
     );
 
     await this.embedRows(provider, "node_revision", nodeRevisionRows.rows);
-    await this.embedRows(provider, "text_unit", textUnitRows.rows);
+    await this.embedRows(provider, "text_chunk", textChunkRows.rows);
 
     return {
       nodeRevisions: nodeRevisionRows.rows.length,
-      textUnits: textUnitRows.rows.length,
+      textChunks: textChunkRows.rows.length,
     };
   }
 
   private async embedRows(
     provider: EmbeddingProvider,
-    ownerTable: "node_revision" | "text_unit",
+    ownerTable: "node_revision" | "text_chunk",
     rows: Array<Record<string, unknown>>,
   ): Promise<void> {
     if (rows.length === 0) return;

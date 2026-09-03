@@ -98,6 +98,14 @@ describe("query plans", { skip: shouldRun ? false : "requires a Postgres DATABAS
         id int primary key, source_id int, ordinal int, section_path text[], char_start int, char_end int,
         text text, content_sha256 text, owner_id uuid, created_at timestamptz not null default now()
       );
+      -- The grain the vector index is built on since migration 020. One chunk
+      -- per source here, covering that source's single unit, so the expansion
+      -- join is exercised without changing what the probe has to walk.
+      create table text_chunk (
+        id int primary key, source_id int, ordinal int, first_ordinal int, last_ordinal int,
+        section_path text[], context_prefix text, text text, content_sha256 text, owner_id uuid,
+        created_at timestamptz not null default now()
+      );
       create table embedding (
         id serial primary key, owner_id int, owner_table text, model text, embedding vector(${DIMS})
       );
@@ -110,8 +118,10 @@ describe("query plans", { skip: shouldRun ? false : "requires a Postgres DATABAS
                case when g > ${ROWS - SMALL_OWNER_ROWS} then '${SMALL_OWNER}'::uuid else '${LARGE_OWNER}'::uuid end
         from generate_series(1, ${ROWS}) g;
       insert into source select g, 'source ' || g from generate_series(1, ${ROWS}) g;
+      -- Long enough to clear EMBEDDABLE_TEXT_UNIT, which the chunk expansion
+      -- re-applies: a sub-12-character line is junk and is never served.
       insert into text_unit (id, source_id, ordinal, text, content_sha256, owner_id)
-        select g, g, 0, 'unit ' || g, 'sha' || g,
+        select g, g, 0, 'unit ' || g || ' carries a whole sentence of prose', 'sha' || g,
                case when g > ${ROWS - SMALL_OWNER_ROWS} then '${SMALL_OWNER}'::uuid else '${LARGE_OWNER}'::uuid end
         from generate_series(1, ${ROWS}) g;
       -- Two clusters, not random vectors: random 384-d vectors are all nearly
@@ -124,11 +134,15 @@ describe("query plans", { skip: shouldRun ? false : "requires a Postgres DATABAS
                (select array_agg(case when i = (case when g > ${ROWS - SMALL_OWNER_ROWS} then 2 else 1 end) then 10.0 else random() end)::vector(${DIMS})
                 from generate_series(1, ${DIMS}) i)
         from generate_series(1, ${ROWS}) g;
+      insert into text_chunk (id, source_id, ordinal, first_ordinal, last_ordinal, context_prefix, text, content_sha256, owner_id)
+        select g, g, 0, 0, 0, 'Source: source ' || g, 'unit ' || g || ' carries a whole sentence of prose', 'csha' || g,
+               case when g > ${ROWS - SMALL_OWNER_ROWS} then '${SMALL_OWNER}'::uuid else '${LARGE_OWNER}'::uuid end
+        from generate_series(1, ${ROWS}) g;
       -- Both owner types share one embedding table, as in the real schema. The
       -- HNSW index does NOT cover owner_table, so a probe restricted to one type
       -- is a genuine test of whether the planner can still use it.
       insert into embedding (owner_id, owner_table, model, embedding)
-        select g, 'text_unit', 'm1',
+        select g, 'text_chunk', 'm1',
                (select array_agg(case when i = (case when g > ${ROWS - SMALL_OWNER_ROWS} then 2 else 1 end) then 10.0 else random() end)::vector(${DIMS})
                 from generate_series(1, ${DIMS}) i)
         from generate_series(1, ${ROWS}) g;
@@ -148,7 +162,8 @@ describe("query plans", { skip: shouldRun ? false : "requires a Postgres DATABAS
     // The trigram indexes come from the migration file itself, so a lexical
     // plan can only pass here if the migration really creates what it needs.
     await probe.query(await readFile(new URL("../db/migrations/015_lexical_indexes.sql", import.meta.url), "utf8"));
-    await probe.query(`analyze node_revision; analyze node; analyze text_unit; analyze source; analyze embedding`);
+    await probe.query(`create index text_unit_source_idx on text_unit(source_id, ordinal)`);
+    await probe.query(`analyze node_revision; analyze node; analyze text_unit; analyze text_chunk; analyze source; analyze embedding`);
   };
 
   /**
