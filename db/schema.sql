@@ -18,7 +18,15 @@
 --     alongside the claim table;
 --   - migration 020 (text_chunk, the grain the vector index is built on) is NOT
 --     merged in either: its owner_id references app_user, which migration 004
---     creates, so the table cannot be declared before the migrations run.
+--     creates, so the table cannot be declared before the migrations run;
+--   - embedding.tenant_id is declared here, so migration 021's ADD COLUMN is a
+--     no-op on a fresh database. embedding.embedding is NOT: its end state is
+--     halfvec(1536), but declaring that here would make migration 009 fail (see
+--     the comment on the column), so 021 converts an empty table instead.
+--     Production still holds vector(1536) with an all-NULL tenant_id until
+--     scripts/convertEmbeddingStorage.ts has run in a maintenance window (see
+--     docs/deployment.md); the store reads the real shape from the catalog and
+--     serves both.
 -- Do not "fix" the drift by editing applied migrations: their checksums are
 -- recorded, and a changed file fails the next boot.
 
@@ -233,12 +241,27 @@ create table embedding (
   id uuid primary key default gen_random_uuid(),
   -- owner_table / owner_id name the owning ROW (no FK: the table is
   -- polymorphic); the triggers below delete a vector with its row.
-  owner_table text not null check (owner_table in ('node', 'node_revision', 'source', 'text_unit', 'annotation')),
+  owner_table text not null check (owner_table in ('node', 'node_revision', 'source', 'text_chunk', 'text_unit', 'annotation')),
   owner_id uuid not null,
+  -- The tenant that owns the owning row, distinct from owner_id above. Added
+  -- empty by migration 021 and backfilled by the maintenance script; declared
+  -- here because a fresh database has no history to backfill.
+  tenant_id uuid,
   model text not null,
   dimensions integer not null,
-  -- vector(1536), not halfvec: converting is a ~413 MB column rewrite plus an
-  -- HNSW rebuild in production — a maintenance-window job, not a boot migration.
+  -- THE END STATE OF THIS COLUMN IS halfvec(1536), NOT vector(1536): measured
+  -- on 1536-dimension vectors, half precision is the same recall in half the
+  -- bytes (16,669 -> 8,404 bytes per row including the index) with an HNSW
+  -- build roughly twice as fast. It cannot be declared here, because migration
+  -- 009 creates embedding_hnsw_idx with vector_cosine_ops and Postgres
+  -- validates an operator class against the column type BEFORE honouring
+  -- CREATE INDEX IF NOT EXISTS — a halfvec column here would fail every fresh
+  -- bootstrap on an applied, immutable migration. So migration 021 converts
+  -- the column instead, and only while the table is empty (a fresh database),
+  -- which makes it catalog-only. Production has 70k rows, so 021 skips the
+  -- conversion there and scripts/convertEmbeddingStorage.ts does it in a
+  -- maintenance window. The store reads the real column type from the catalog
+  -- at startup and serves either shape (EmbeddingLayout in src/pgStore.ts).
   embedding vector(1536) not null,
   content_sha256 text not null,
   created_at timestamptz not null default now(),
@@ -282,7 +305,10 @@ create index node_slug_idx on node (slug);
 create index node_revision_content_trgm_idx on node_revision using gin (content gin_trgm_ops);
 create index text_unit_text_trgm_idx on text_unit using gin (text gin_trgm_ops);
 
+-- Rebuilt on halfvec_cosine_ops by migration 021 on a fresh (empty) database;
+-- see the note on embedding.embedding above.
 create index embedding_hnsw_idx on embedding using hnsw (embedding vector_cosine_ops);
+create index embedding_tenant_idx on embedding(tenant_id);
 
 -- node churns on every read (access activation) and graph_event grows on every
 -- write; the default 20% dead-tuple trigger is far too lazy for them.

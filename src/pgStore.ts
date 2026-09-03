@@ -325,6 +325,43 @@ export const LEXICAL_UNIT_SEARCH_SQL = `with q as (select $5::tsquery as query)
        limit $1`;
 
 /**
+ * The physical shape of the embedding table, which differs before and after the
+ * maintenance conversion in scripts/convertEmbeddingStorage.ts. Resolved from
+ * the catalog at startup (PgGraphStore.embeddingLayout) rather than assumed, so
+ * a deploy never depends on the script having been run — the same build serves
+ * a converted database and an unconverted one.
+ *
+ * `tenantColumn` is whether embedding.tenant_id EXISTS (migration 021 adds it,
+ * instantly, at boot), so writes must stamp it. `tenantReady` is whether every
+ * row is stamped, so reads may FILTER on it — those are different questions
+ * while the backfill is running, and filtering early would silently hide the
+ * unstamped rows from their own tenant.
+ */
+export type EmbeddingLayout = {
+  /** What the embedding column holds; query vectors are cast to it. */
+  vectorType: "vector" | "halfvec";
+  /** embedding.tenant_id exists: every insert must stamp it. */
+  tenantColumn: boolean;
+  /** Every row is stamped: the probe may filter on tenant_id directly. */
+  tenantReady: boolean;
+};
+
+/** What production looks like before the conversion script has run. */
+export const LEGACY_EMBEDDING_LAYOUT: EmbeddingLayout = {
+  vectorType: "vector",
+  tenantColumn: false,
+  tenantReady: false,
+};
+
+/**
+ * Rows whose owning row is unowned (pre-isolation, or written by a superuser
+ * context) stamp this sentinel rather than NULL, so `tenant_id is null` means
+ * exactly one thing: not backfilled yet. Same sentinel migration 006 uses in
+ * source_owner_content_key, for the same reason.
+ */
+export const UNOWNED_TENANT = "00000000-0000-0000-0000-000000000000";
+
+/**
  * The semantic node arm. Vectors occupy $1..$N; everything else is numbered
  * after them: model, type filter, limit, unscoped, owner, max distance,
  * %query%, query, candidate limit.
@@ -335,24 +372,37 @@ export const LEXICAL_UNIT_SEARCH_SQL = `with q as (select $5::tsquery as query)
  * deduped by min() rather than `distinct on`, since a revision can hold
  * several embedding rows (the unique key includes content_sha256).
  *
- * The owner filter lives INSIDE the limited branch, reached through the owning
- * row (embedding carries no tenant; see migration 016 for why not). Ordered
- * index scan → nested-loop pkey lookups → filter → limit keeps the distance
- * order, and with hnsw.iterative_scan on (semanticSearch sets it) the scan
- * keeps walking until K rows of THIS tenant pass. Filtering after the limit —
- * the old shape — handed a small tenant whatever survived of a candidate
- * window the large tenant had already filled, which was usually nothing.
+ * The owner filter lives INSIDE the limited branch either way. Before the
+ * conversion it is reached through the owning row (embedding carried no tenant;
+ * migration 016 explains why it was not added then): ordered index scan →
+ * nested-loop pkey lookups → filter → limit keeps the distance order, and with
+ * hnsw.iterative_scan on (semanticSearch sets it) the scan keeps walking until
+ * K rows of THIS tenant pass. After the conversion the filter is a column on
+ * the embedding row itself and the joins leave the probe entirely. Filtering
+ * after the limit — the shape before both — handed a small tenant whatever
+ * survived of a candidate window the large tenant had already filled, which was
+ * usually nothing.
  */
-export function semanticNodeSearchSql(vectorCount: number): string {
+export function semanticNodeSearchSql(vectorCount: number, layout: EmbeddingLayout = LEGACY_EMBEDDING_LAYOUT): string {
   const p = (offset: number): string => `$${vectorCount + offset}`;
-  const branches = Array.from({ length: vectorCount }, (_, index) => `(
-           select e.owner_id, e.embedding <=> $${index + 1}::vector as distance
-           from embedding e
+  const vt = layout.vectorType;
+  const scoped = layout.tenantReady
+    ? {
+        joins: "",
+        filter: `and (${p(4)} or e.tenant_id = coalesce(${p(5)}, '${UNOWNED_TENANT}'::uuid))`,
+      }
+    : {
+        joins: `
            join node_revision nr on nr.id = e.owner_id
-           join node n on n.id = nr.node_id
+           join node n on n.id = nr.node_id`,
+        filter: `and (${p(4)} or n.owner_id = ${p(5)})`,
+      };
+  const branches = Array.from({ length: vectorCount }, (_, index) => `(
+           select e.owner_id, e.embedding <=> $${index + 1}::${vt} as distance
+           from embedding e${scoped.joins}
            where e.owner_table = 'node_revision' and e.model = ${p(1)}
-             and (${p(4)} or n.owner_id = ${p(5)})
-           order by e.embedding <=> $${index + 1}::vector
+             ${scoped.filter}
+           order by e.embedding <=> $${index + 1}::${vt}
            limit ${p(9)}
          )`).join(" union all ");
   return `with candidates as (${branches}),
@@ -397,15 +447,23 @@ export function semanticNodeSearchSql(vectorCount: number): string {
  * junk lines along (dropping them would break the contiguous ordinal range),
  * and a horizontal rule was never served as evidence before this change either.
  */
-export const SEMANTIC_UNIT_SEARCH_SQL = `select tu.id, tu.source_id, tu.ordinal, tu.section_path, tu.char_start, tu.char_end, tu.text, tu.content_sha256, chunk.distance
+export function semanticUnitSearchSql(layout: EmbeddingLayout = LEGACY_EMBEDDING_LAYOUT): string {
+  const vt = layout.vectorType;
+  // After the conversion the tenant is a column on the embedding row, so the
+  // chunk join becomes a pure pkey lookup on rows the limit has already chosen
+  // rather than a filter the probe has to walk past.
+  const filter = layout.tenantReady
+    ? `and ($3 or e.tenant_id = coalesce($4, '${UNOWNED_TENANT}'::uuid))`
+    : "and ($3 or tc.owner_id = $4)";
+  return `select tu.id, tu.source_id, tu.ordinal, tu.section_path, tu.char_start, tu.char_end, tu.text, tu.content_sha256, chunk.distance
        from (
          select tc.source_id, tc.first_ordinal, tc.last_ordinal,
-                (e.embedding <=> $1::vector) as distance
+                (e.embedding <=> $1::${vt}) as distance
          from embedding e
          join text_chunk tc on tc.id = e.owner_id and e.owner_table = 'text_chunk'
          where e.model = $2
-           and ($3 or tc.owner_id = $4)
-         order by e.embedding <=> $1::vector
+           ${filter}
+         order by e.embedding <=> $1::${vt}
          limit $5
        ) chunk
        join text_unit tu
@@ -415,6 +473,10 @@ export const SEMANTIC_UNIT_SEARCH_SQL = `select tu.id, tu.source_id, tu.ordinal,
          and ${EMBEDDABLE_TEXT_UNIT}
        order by chunk.distance, tu.ordinal
        limit $5`;
+}
+
+/** The pre-conversion form, kept as a named export for the query-plan tests. */
+export const SEMANTIC_UNIT_SEARCH_SQL = semanticUnitSearchSql();
 
 type PgStoreOptions = {
   connectionString: string;
@@ -444,6 +506,10 @@ export class PgGraphStore implements GraphStore {
    * per-call flush.
    */
   private activation = new ActivationBuffer((bumps) => this.writeActivation(bumps));
+  /** Resolved from the catalog: see EmbeddingLayout and embeddingLayout(). */
+  private layout: Promise<EmbeddingLayout> | null = null;
+  /** When the last unconverted layout was resolved, for the re-check below. */
+  private layoutResolvedAt = 0;
 
   constructor(options: PgStoreOptions) {
     this.pool = new Pool({ connectionString: options.connectionString, keepAlive: true });
@@ -473,6 +539,56 @@ export class PgGraphStore implements GraphStore {
         return false;
       });
     return this.iterativeScanSupport;
+  }
+
+  /**
+   * What the embedding table physically looks like right now.
+   *
+   * The halfvec conversion and the tenant backfill are a maintenance-window
+   * script, not a migration, so a running deploy sees either shape and must
+   * work with both. Read from the catalog, not assumed, and cached: a converted
+   * layout never changes back, so it is remembered for the life of the process;
+   * an unconverted one is re-checked at most every LAYOUT_RECHECK_MS so a
+   * server that was up while the script ran picks the conversion up on its own
+   * rather than needing a restart.
+   *
+   * A failed probe is never cached and falls back to the legacy shape, which is
+   * always correct (the tenant filter goes through the owning row, and vector →
+   * halfvec is an implicit cast in pgvector, so the cast is only about keeping
+   * the index path unambiguous).
+   */
+  private embeddingLayout(): Promise<EmbeddingLayout> {
+    const LAYOUT_RECHECK_MS = 60_000;
+    if (this.layout && Date.now() - this.layoutResolvedAt > LAYOUT_RECHECK_MS) this.layout = null;
+    if (this.layout) return this.layout;
+    this.layoutResolvedAt = Date.now();
+    this.layout = this.pool
+      .query(
+        `select
+           (select format_type(a.atttypid, null)
+              from pg_attribute a
+             where a.attrelid = 'embedding'::regclass and a.attname = 'embedding') as vector_type,
+           (select true
+              from pg_attribute a
+             where a.attrelid = 'embedding'::regclass and a.attname = 'tenant_id' and not a.attisdropped) as has_tenant`,
+      )
+      .then(async (result) => {
+        const row = result.rows[0] ?? {};
+        const vectorType = String(row.vector_type ?? "").startsWith("halfvec") ? "halfvec" : "vector";
+        const tenantColumn = row.has_tenant === true;
+        // Heap-only predicate: the vectors live in TOAST and are never read to
+        // answer it, so this is a few megabytes even on the production table.
+        const tenantReady = tenantColumn
+          && !(await this.pool.query("select 1 from embedding where tenant_id is null limit 1")).rowCount;
+        // A converted table never converts back, so stop re-checking it.
+        if (tenantReady && vectorType === "halfvec") this.layoutResolvedAt = Number.POSITIVE_INFINITY;
+        return { vectorType, tenantColumn, tenantReady } satisfies EmbeddingLayout;
+      })
+      .catch(() => {
+        this.layout = null;
+        return LEGACY_EMBEDDING_LAYOUT;
+      });
+    return this.layout;
   }
 
   async ingest(input: IngestInput, context?: GraphOperationContext): Promise<{ source: GraphSource; textUnits: TextUnit[] }> {
@@ -823,6 +939,9 @@ export class PgGraphStore implements GraphStore {
     // is no longer a guess about how many foreign rows a tenant must wade
     // through, only about how selective the type filter is.
     const candidateLimit = Math.max(100, input.limit * 4);
+    // Resolved from the catalog: which SQL type to cast the query vector to,
+    // and whether the tenant filter can sit on the embedding row itself.
+    const layout = await this.embeddingLayout();
     const nodeParams = [
       ...vectors,
       provider.model,
@@ -873,11 +992,11 @@ export class PgGraphStore implements GraphStore {
       if (await this.supportsIterativeScan()) {
         await client.query("set local hnsw.iterative_scan = relaxed_order");
       }
-      nodeResult = await client.query(semanticNodeSearchSql(vectors.length), nodeParams);
+      nodeResult = await client.query(semanticNodeSearchSql(vectors.length, layout), nodeParams);
       if (input.includeTextUnits) {
         for (const vector of vectors) {
           unitRowsByVector.push(
-            await client.query(SEMANTIC_UNIT_SEARCH_SQL, [vector, provider.model, !scope.scoped, scope.ownerId, input.limit, maxDistance]),
+            await client.query(semanticUnitSearchSql(layout), [vector, provider.model, !scope.scoped, scope.ownerId, input.limit, maxDistance]),
           );
         }
       }
@@ -2961,7 +3080,7 @@ export class PgGraphStore implements GraphStore {
     // batched embed calls and made a 20k-row import take ~800 queue round trips.
     const boundedLimit = Math.max(1, Math.min(1000, Math.trunc(limit)));
     const nodeRevisionRows = await this.pool.query(
-      `select nr.id, nr.content_sha256, concat_ws(E'\n', nr.title, nr.summary, nr.content) as text
+      `select nr.id, nr.content_sha256, n.owner_id as tenant_id, concat_ws(E'\n', nr.title, nr.summary, nr.content) as text
        from node n
        join node_revision nr on nr.id = n.current_revision_id
        where n.deleted_at is null
@@ -2983,7 +3102,7 @@ export class PgGraphStore implements GraphStore {
     // computed over exactly this concatenation — so a retitled source or a
     // moved section re-embeds through the same not-exists check.
     const textChunkRows = remaining === 0 ? { rows: [] } : await this.pool.query(
-      `select tc.id, tc.content_sha256, concat_ws(E'\n\n', nullif(tc.context_prefix, ''), tc.text) as text
+      `select tc.id, tc.content_sha256, tc.owner_id as tenant_id, concat_ws(E'\n\n', nullif(tc.context_prefix, ''), tc.text) as text
        from text_chunk tc
        where ($3::uuid is null or tc.owner_id = $3)
          and not exists (
@@ -3036,6 +3155,7 @@ export class PgGraphStore implements GraphStore {
     const ownerIds: string[] = [];
     const vectors: string[] = [];
     const shas: string[] = [];
+    const tenants: string[] = [];
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index];
       const embedding = embeddings[index];
@@ -3043,8 +3163,25 @@ export class PgGraphStore implements GraphStore {
       ownerIds.push(String(row.id));
       vectors.push(vectorLiteral(embedding));
       shas.push(String(row.content_sha256));
+      // An unowned row (pre-isolation, or superuser-written) stamps the
+      // sentinel, never NULL: NULL is reserved to mean "not backfilled yet".
+      tenants.push(row.tenant_id === null || row.tenant_id === undefined ? UNOWNED_TENANT : String(row.tenant_id));
     }
     if (ownerIds.length === 0) return;
+
+    // Stamp the tenant from the moment migration 021 adds the column, so the
+    // conversion script only ever has to backfill history — never a moving
+    // target. Gated on the column EXISTING, not on the backfill being done.
+    const layout = await this.embeddingLayout();
+    const columns = layout.tenantColumn
+      ? "(owner_table, owner_id, model, dimensions, embedding, content_sha256, tenant_id)"
+      : "(owner_table, owner_id, model, dimensions, embedding, content_sha256)";
+    const selected = layout.tenantColumn
+      ? `$1, t.owner_id, $2, $3, t.embedding::${layout.vectorType}, t.content_sha256, t.tenant_id`
+      : `$1, t.owner_id, $2, $3, t.embedding::${layout.vectorType}, t.content_sha256`;
+    const unnested = layout.tenantColumn
+      ? "unnest($4::uuid[], $5::text[], $6::text[], $7::uuid[]) as t(owner_id, embedding, content_sha256, tenant_id)"
+      : "unnest($4::uuid[], $5::text[], $6::text[]) as t(owner_id, embedding, content_sha256)";
 
     const INSERT_CHUNK = 256;
     const client = await this.pool.connect();
@@ -3052,9 +3189,9 @@ export class PgGraphStore implements GraphStore {
       await client.query("begin");
       for (let start = 0; start < ownerIds.length; start += INSERT_CHUNK) {
         await client.query(
-          `insert into embedding (owner_table, owner_id, model, dimensions, embedding, content_sha256)
-           select $1, t.owner_id, $2, $3, t.embedding::vector, t.content_sha256
-             from unnest($4::uuid[], $5::text[], $6::text[]) as t(owner_id, embedding, content_sha256)
+          `insert into embedding ${columns}
+           select ${selected}
+             from ${unnested}
            on conflict (owner_table, owner_id, model, content_sha256) do nothing`,
           [
             ownerTable,
@@ -3063,6 +3200,7 @@ export class PgGraphStore implements GraphStore {
             ownerIds.slice(start, start + INSERT_CHUNK),
             vectors.slice(start, start + INSERT_CHUNK),
             shas.slice(start, start + INSERT_CHUNK),
+            ...(layout.tenantColumn ? [tenants.slice(start, start + INSERT_CHUNK)] : []),
           ],
         );
       }
