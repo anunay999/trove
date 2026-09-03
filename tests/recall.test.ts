@@ -197,4 +197,125 @@ describe("recall", () => {
     // Without asOf the same input is fine: the rejection is targeted, not strict mode.
     assert.equal(recallInputSchema.safeParse({ query: "anything" }).success, true);
   });
+
+  // asOf is gone, but the question can still carry a time. recall now reads it
+  // out of the query text and uses it to REWEIGHT ranking — never to filter,
+  // and never to swap a body for an older revision, which is the incoherence
+  // that got asOf removed.
+  it("leaves a query with no temporal words exactly as it is today", async () => {
+    const withFeature = await store.recall({ query: "recall smoke", tokenBudget: 2000 });
+    assert.equal(withFeature.temporalScope, undefined, "a dateless query must report no scope");
+    assert.ok(!withFeature.context.includes("Temporal scope"), "a dateless pack must not grow a scope line");
+
+    // The kill switch is the honest baseline for "what recall did before".
+    const previous = process.env.TROVE_TEMPORAL_SCOPE;
+    process.env.TROVE_TEMPORAL_SCOPE = "0";
+    try {
+      const withoutFeature = await store.recall({ query: "recall smoke", tokenBudget: 2000 });
+      // Byte-identical bar the last float digits: the activation term reads the
+      // wall clock, so two recalls milliseconds apart already differ around the
+      // tenth decimal. Anything this feature could do would move a score by
+      // 0.25, or reorder atoms, or add a field — all of which survive rounding.
+      const shape = (pack: Awaited<ReturnType<typeof store.recall>>): string =>
+        JSON.stringify(pack, (_key, value) =>
+          (typeof value === "number" && !Number.isInteger(value) ? Number(value.toFixed(6)) : value));
+      assert.equal(
+        shape(withFeature),
+        shape(withoutFeature),
+        "a dateless recall must be identical with temporal scoping on and off",
+      );
+    } finally {
+      if (previous === undefined) delete process.env.TROVE_TEMPORAL_SCOPE;
+      else process.env.TROVE_TEMPORAL_SCOPE = previous;
+    }
+  });
+
+  it("prefers the fact that was true in the asked-about window, and says which window", async () => {
+    // Two neighbors of one hub, alike in everything the ranker measures, told
+    // apart only by the world time of the edge that attaches them: one link
+    // was true in January, the other only became true in March. Last year, so
+    // both windows are firmly in the past whenever this suite runs.
+    const year = new Date().getUTCFullYear() - 1;
+    const token = `kestrelscope${stamp}`;
+    const hub = await store.capture({
+      title: `${token} rollout hub`,
+      type: "decision",
+      summary: `The ${token} rollout hub links the runbook that was current in each window.`,
+      content: `Everything about the ${token} rollout hangs off this hub.`,
+      evidence: [],
+      links: [],
+    }, context);
+    // Padded to one length, so of the pre-existing tie-breaks (content length,
+    // then slug) only the slug can speak: Alfa sorts before Zulu, and the
+    // baseline order is therefore the opposite of the temporal answer.
+    const body = (text: string): string => text.padEnd(96, ".");
+    const january = await store.capture({
+      title: `Zulu runbook ${stamp}`,
+      type: "pattern",
+      summary: "Deploys went out through the blue pipeline with two approvals.",
+      content: body("The blue pipeline required two approvals and a manual smoke pass before release."),
+      evidence: [],
+      links: [],
+    }, context);
+    const march = await store.capture({
+      title: `Alfa runbook ${stamp}`,
+      type: "pattern",
+      summary: "Deploys went out through the gold pipeline with one approval.",
+      content: body("The gold pipeline required one approval and an automated smoke pass at release."),
+      evidence: [],
+      links: [],
+    }, context);
+    await store.link({
+      fromNodeId: hub.id, toNodeId: january.id, predicate: "documented_by", weight: 1,
+      validFrom: `${year}-01-05T00:00:00.000Z`,
+    }, context);
+    await store.link({
+      fromNodeId: hub.id, toNodeId: march.id, predicate: "documented_by", weight: 1,
+      validFrom: `${year}-03-05T00:00:00.000Z`,
+    }, context);
+
+    const query = `what did the ${token} rollout look like in January ${year}`;
+    const rank = (pack: Awaited<ReturnType<typeof store.recall>>, nodeId: string): number =>
+      pack.atoms.findIndex((atom) => atom.node.id === nodeId);
+
+    // Baseline: with scoping off, the tie-breaks put Alfa ahead of Zulu.
+    const previous = process.env.TROVE_TEMPORAL_SCOPE;
+    process.env.TROVE_TEMPORAL_SCOPE = "0";
+    let baseline: Awaited<ReturnType<typeof store.recall>>;
+    try {
+      baseline = await store.recall({ query, tokenBudget: 4000, includeEvidence: false }, context);
+    } finally {
+      if (previous === undefined) delete process.env.TROVE_TEMPORAL_SCOPE;
+      else process.env.TROVE_TEMPORAL_SCOPE = previous;
+    }
+    assert.ok(rank(baseline, january.id) >= 0 && rank(baseline, march.id) >= 0, "both neighbors must reach the baseline pack");
+    assert.ok(
+      rank(baseline, march.id) < rank(baseline, january.id),
+      "baseline order must put the March-linked note first, or this test proves nothing",
+    );
+    assert.equal(baseline.temporalScope, undefined, "the kill switch must also silence the reported scope");
+
+    const scoped = await store.recall({ query, tokenBudget: 4000, includeEvidence: false }, context);
+    assert.ok(rank(scoped, january.id) >= 0 && rank(scoped, march.id) >= 0, "both neighbors must reach the scoped pack");
+    assert.ok(
+      rank(scoped, january.id) < rank(scoped, march.id),
+      "'in January' must lift the note whose link was true in January above the one that only became true in March",
+    );
+
+    // Surfaced, so an agent can answer "as of January" instead of silently
+    // answering about another time.
+    assert.ok(scoped.temporalScope, "a parsed scope must be reported on the pack");
+    assert.equal(scoped.temporalScope.kind, "interval");
+    assert.equal(scoped.temporalScope.label, `January ${year}`);
+    assert.equal(scoped.temporalScope.applied, "reweight");
+    assert.equal(scoped.temporalScope.from, `${year}-01-01T00:00:00.000Z`);
+    assert.equal(scoped.temporalScope.until, `${year}-02-01T00:00:00.000Z`);
+    assert.equal(scoped.temporalScope.phrase, `in January ${year}`);
+    assert.ok(
+      !scoped.temporalScope.searchQuery.toLowerCase().includes("january"),
+      "the date phrase must be stripped before the lexical and semantic arms see the query",
+    );
+    assert.ok(scoped.temporalScope.searchQuery.includes(token), "stripping must leave the question itself intact");
+    assert.ok(scoped.context.includes(`Temporal scope: January ${year}`), "the pack text must name the window it answers about");
+  });
 });

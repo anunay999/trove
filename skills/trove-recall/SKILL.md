@@ -38,6 +38,7 @@ When **not** to use:
 - `read { id | slug }` for full body + evidence, or a raw source document by source id.
 - `neighborhood { nodeId, depth, asOf? }` when structure or belief history matters.
 - Time travel lives on `read { asOf }` and `neighborhood { asOf }` only; `recall` answers from present belief and rejects `asOf`.
+- But do put the time in the **question**: `recall` parses phrases like "in January", "since March", "last week" and "currently" out of the query and ranks toward facts that were true then. When it understands one it reports it as `temporalScope` on the pack — echo that label ("as of January 2026") in your answer. Event-relative phrasings ("before the migration") are not parsed; resolve those yourself, then `read`/`neighborhood` with `asOf`.
 
 ### Step 3 — synthesize
 

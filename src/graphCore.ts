@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { recallInputSchema } from "./contracts.js";
 import { contentTerms } from "./queryNormalize.js";
+import { parseTemporalScope, temporalAffinity, type TemporalScope } from "./temporalScope.js";
 import type {
   AnnotateInput,
   CaptureInput,
@@ -604,6 +605,20 @@ export type RecallCitation = {
   textUnitId: string | null;
 };
 
+/**
+ * What recall understood the question to be asking about in time, when it
+ * understood anything at all. Additive and optional: absent from every pack
+ * whose query carried no temporal words, which is every pack today. It exists
+ * so an agent can say "as of January" instead of silently answering about a
+ * different time.
+ */
+export type RecallTemporalScope = TemporalScope & {
+  /** Always "reweight": a parsed scope moves ranking, it never removes candidates. */
+  applied: "reweight";
+  /** The text the lexical and semantic arms actually searched for, minus the date phrase. */
+  searchQuery: string;
+};
+
 export type RecallResult = {
   context: string;
   atoms: RecallAtom[];
@@ -613,6 +628,7 @@ export type RecallResult = {
   tokenBudget: number;
   spentTokens: number;
   truncated: boolean;
+  temporalScope?: RecallTemporalScope;
 };
 
 export type ProjectResult =
@@ -836,6 +852,64 @@ export function activationScore(node: GraphNode, nowMs: number): number {
   return 0.6 * recency + 0.4 * frequency;
 }
 
+/**
+ * Weight of the parsed temporal scope in the candidate score. Sized to flip a
+ * rank or two among otherwise comparable candidates — a note that was true in
+ * the asked-about window beats its neighbour — without outweighing the lexical
+ * match itself (0.35 at rank 0), because the parse is a heuristic.
+ */
+const TEMPORAL_SCOPE_WEIGHT = 0.25;
+/** Candidates with no dated evidence either way sit between a hit and a miss. */
+const TEMPORAL_NEUTRAL_AFFINITY = 0.5;
+
+/** Query-side temporal scoping is on by default; set TROVE_TEMPORAL_SCOPE=0/off/false to fall back to present-day recall. */
+export function temporalScopeEnabled(): boolean {
+  const raw = process.env.TROVE_TEMPORAL_SCOPE?.trim().toLowerCase();
+  return raw === undefined || raw === "" || !["0", "false", "off", "no"].includes(raw);
+}
+
+/**
+ * Reweight — never filter — the ranked candidates by how well each fits the
+ * temporal scope parsed out of the query.
+ *
+ * Filtering was the tempting option and is the wrong one. The parse is
+ * heuristic, world time in Trove lives on edges only, and a node carries
+ * recorded time that says nothing about when its fact was true; a filter would
+ * therefore drop the right note whenever the parse misfired or a fact simply
+ * had no dated edge. That is the same class of silent wrongness that got asOf
+ * removed from recall: a pack that looks coherent and is not. A boost can only
+ * reorder what present-day recall already found, so the worst case is the
+ * ranking recall would have produced anyway.
+ *
+ * The sort is stable and keyed on score alone, so every tie-break the caller's
+ * comparator established survives.
+ */
+function rescoreForTemporalScope<T extends { node: GraphNode; score: number }>(
+  scored: T[],
+  scope: TemporalScope,
+  edges: Iterable<GraphEdge>,
+  now: Date,
+): T[] {
+  const incident = new Map<string, { validFrom: string | null; validUntil: string | null }[]>();
+  for (const edge of edges) {
+    const validity = { validFrom: edge.validFrom, validUntil: edge.validUntil };
+    for (const nodeId of [edge.fromNodeId, edge.toNodeId]) {
+      const list = incident.get(nodeId);
+      if (list) list.push(validity);
+      else incident.set(nodeId, [validity]);
+    }
+  }
+  return scored
+    .map((candidate) => {
+      const affinity = temporalAffinity(scope, {
+        updatedAt: candidate.node.updatedAt,
+        edges: incident.get(candidate.node.id) ?? [],
+      }, now);
+      return { ...candidate, score: candidate.score + TEMPORAL_SCOPE_WEIGHT * (affinity ?? TEMPORAL_NEUTRAL_AFFINITY) };
+    })
+    .sort((left, right) => right.score - left.score);
+}
+
 /** Cosine distance (0..2; lower = closer) → alignment in [0,1] (higher = closer). */
 export function semanticAlignment(distance: number): number {
   return Math.min(1, Math.max(0, 1 - distance));
@@ -928,8 +1002,23 @@ function renderRecallEvidence(unit: TextUnit, maxChars = 1200): string {
 
 export async function performRecall(store: GraphStore, rawInput: RecallInput, context?: GraphOperationContext): Promise<RecallResult> {
   const input = recallInputSchema.parse(rawInput);
+  // Temporal intent belongs in the question, not in a parameter: recall lost
+  // asOf because it reached only the expansion, but "what did we deploy in
+  // January" is still a question the graph can answer better than a present-
+  // day pack. parseTemporalScope reads the date out of the query text and
+  // returns nothing whenever the reading is ambiguous, so a query with no
+  // temporal words takes exactly the path it took before.
+  const temporal = temporalScopeEnabled()
+    ? parseTemporalScope(input.query)
+    : { scope: null, query: input.query };
+  // The lexical arm ANDs every term: a month name that appears in no note
+  // empties the result set, and it dilutes the query embedding besides. Search
+  // sees the question without its date phrase; ranking below sees the date.
+  const searchQuery = temporal.scope && contentTerms(temporal.query).length > 0
+    ? temporal.query
+    : input.query;
   const search = await store.search({
-    query: input.query,
+    query: searchQuery,
     ...(input.types ? { types: input.types } : {}),
     includeTextUnits: input.includeEvidence,
     mode: "hybrid",
@@ -993,7 +1082,7 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     : 0.5;
   // Prefer hop-0 (direct matches) over linked neighbors so budget goes to full pages.
   // Soft-penalize giant catalog/log pages so they don't outrank a specific runbook.
-  const scored = [...candidates.values()]
+  let scored = [...candidates.values()]
     .map((candidate) => {
       const contentLen = candidate.node.content?.length ?? 0;
       const giantPenalty = contentLen > GIANT_CONTENT_CHARS ? 0.12 : 0;
@@ -1018,8 +1107,13 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
       (left.node.content?.length ?? 0) - (right.node.content?.length ?? 0) ||
       left.node.slug.localeCompare(right.node.slug),
     );
+  if (temporal.scope) scored = rescoreForTemporalScope(scored, temporal.scope, edgePool.values(), new Date(nowMs));
 
-  const header = `Recall: ${input.query}\n`;
+  // The header names the scope so the pack itself says which time it answers
+  // about; an agent reading only the context text can then say "as of January".
+  const header = `Recall: ${input.query}\n${temporal.scope
+    ? `Temporal scope: ${temporal.scope.label} — ranked toward facts true then; use read/neighborhood asOf for exact history.\n`
+    : ""}`;
   let spentTokens = estimateTokens(header);
   let truncated = false;
   const contextParts = [header];
@@ -1276,6 +1370,9 @@ export async function performRecall(store: GraphStore, rawInput: RecallInput, co
     tokenBudget: input.tokenBudget,
     spentTokens,
     truncated,
+    ...(temporal.scope
+      ? { temporalScope: { ...temporal.scope, applied: "reweight" as const, searchQuery } }
+      : {}),
   };
   enforceRecallWireBudget(result);
   // Provenance guard (backlog #9b): only the evidence that survived EVERY cut
