@@ -26,6 +26,24 @@ import {
 
 type Tab = "overview" | "graph" | "agents" | "keys" | "admin";
 
+// The tab is the URL. /graph is an address you can link, bookmark and reload,
+// and the back button walks the tabs instead of leaving the app. Overview is
+// the root; /overview is accepted and normalised away. Five tabs and the
+// History API do not need a router, and the bundle is already the heaviest
+// thing we ship. Keep this list in step with DASHBOARD_PATHS in
+// src/webRoutes.ts — that is what makes a hard refresh on /graph reach us.
+const TABS: Tab[] = ["overview", "graph", "agents", "keys", "admin"];
+
+function tabFromPath(pathname: string): Tab {
+  const segment = pathname.replace(/^\/+/, "").replace(/\/+$/, "").toLowerCase();
+  if (!segment) return "overview";
+  return TABS.find((candidate) => candidate === segment) ?? "overview";
+}
+
+function pathForTab(tab: Tab): string {
+  return tab === "overview" ? "/" : `/${tab}`;
+}
+
 const clerkEnabled = !!import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 // app.<domain> is the product; the bare domain is the front door and shows
 // nothing but the landing. Same bundle, same API (the server answers on both
@@ -48,7 +66,7 @@ function initialDark(): boolean {
 }
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useState<Tab>(() => tabFromPath(window.location.pathname));
   const [dark, setDark] = useState(initialDark);
   const [stats, setStats] = useState<Stats | null>(null);
   const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
@@ -101,13 +119,17 @@ export default function App() {
   // mount, on every path. Kept apart from `me`: this is the server's mode, not
   // the caller's identity, and it must never race the session's own answer.
   const [authDisabled, setAuthDisabled] = useState(false);
+  const [authProbed, setAuthProbed] = useState(false);
   useEffect(() => {
     let live = true;
     void fetchMe()
       .then((result) => {
         if (live) setAuthDisabled(result.mode === "disabled");
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        if (live) setAuthProbed(true);
+      });
     return () => {
       live = false;
     };
@@ -159,6 +181,41 @@ export default function App() {
   const tabs: Tab[] = impersonating ? allTabs.filter((candidate) => candidate !== "keys") : allTabs;
   const activeTab: Tab = tabs.includes(tab) ? tab : "overview";
 
+  // Clicking a tab is a navigation, not a state change: push it, so back and
+  // forward walk the tabs instead of walking out of the app.
+  const selectTab = useCallback((next: Tab) => {
+    setTab(next);
+    if (window.location.pathname !== pathForTab(next)) {
+      window.history.pushState(null, "", pathForTab(next) + window.location.search);
+    }
+  }, []);
+
+  useEffect(() => {
+    const onPopState = () => setTab(tabFromPath(window.location.pathname));
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  // Nothing about the URL is trustworthy until the tab row is: Clerk settled,
+  // the API's auth mode heard, and — once signed in — the identity that decides
+  // whether keys and admin are on the list at all. Correcting before then would
+  // rewrite a perfectly good deep link into "/" and then back again.
+  const navigationSettled = !clerkSettling && authProbed && (!signedIn || me !== null);
+
+  // A path this visitor cannot open — /admin as a member, /keys while viewing as
+  // someone else, any tab at all before the dashboard opens — resolves the way
+  // `activeTab` already resolves it, and the address bar is rewritten to agree
+  // rather than left standing as a claim the page does not honour. replaceState,
+  // because nobody asked for this history entry. The hash rides along untouched:
+  // the front-door drawers and Clerk's #/sso-callback own it.
+  useEffect(() => {
+    if (!navigationSettled) return;
+    const canonical = dashboardReady ? pathForTab(activeTab) : "/";
+    if (window.location.pathname !== canonical) {
+      window.history.replaceState(null, "", canonical + window.location.search + window.location.hash);
+    }
+  }, [activeTab, dashboardReady, navigationSettled]);
+
   const openLogin = useCallback(() => {
     if (isFrontDoor) return goToApp("#login");
     setDrawer({ open: true, mode: "sign-in" });
@@ -206,7 +263,7 @@ export default function App() {
                 <button
                   key={candidate}
                   type="button"
-                  onClick={() => setTab(candidate)}
+                  onClick={() => selectTab(candidate)}
                   className={`shrink-0 rounded-md px-3 py-1.5 text-sm capitalize transition-colors ${
                     activeTab === candidate
                       ? "bg-secondary text-foreground"
@@ -368,7 +425,7 @@ export default function App() {
         </main>
       ) : activeTab === "agents" ? (
         <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">
-          <Agents stats={stats} onOpenKeys={tabs.includes("keys") ? () => setTab("keys") : undefined} />
+          <Agents stats={stats} onOpenKeys={tabs.includes("keys") ? () => selectTab("keys") : undefined} />
         </main>
       ) : activeTab === "keys" ? (
         <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">

@@ -67,6 +67,7 @@ import { createTroveMcpServer } from "./mcpTools.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
 import { troveTools, visibleTiers } from "./toolDefinitions.js";
 import { UserStore, type ApiKeySummary } from "./users.js";
+import { DASHBOARD_PATHS } from "./webRoutes.js";
 
 const app = new Hono();
 const { store, driver } = createGraphStore();
@@ -758,7 +759,14 @@ app.get("/skills/:name", (context) => {
 // Serve the built dashboard (web/dist) for any non-API path. Run `npm run build`
 // inside web/ first; without a build these routes simply 404.
 app.use("/*", serveStatic({ root: "./web/dist" }));
-app.get("/", serveStatic({ path: "./web/dist/index.html" }));
+// The dashboard's tabs live in the URL, and nothing named /graph exists on
+// disk, so the static middleware falls through and each tab path has to be
+// handed index.html for a reload or a shared link to reach the app. Named one
+// by one and registered last, after every API route, /mcp and the skills
+// feeds, so this can only ever answer for a path nothing else claimed.
+for (const path of DASHBOARD_PATHS) {
+  app.get(path, serveStatic({ path: "./web/dist/index.html" }));
+}
 
 const port = Number(process.env.PORT ?? "8787");
 
