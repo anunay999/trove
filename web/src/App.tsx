@@ -1,6 +1,7 @@
-import { Suspense, lazy, useCallback, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { AuthenticateWithRedirectCallback } from "@clerk/clerk-react";
 import { GITHUB_PATH } from "@/lib/brandIcons";
+import { clearLayout, layoutOwnerKey } from "@/lib/graphLayoutCache";
 import { Overview } from "@/pages/Overview";
 // The force-graph library is the biggest thing we ship. Split it out so the
 // landing, which most visitors never scroll past, doesn't download the explorer.
@@ -99,13 +100,27 @@ export default function App() {
     window.localStorage.setItem("trove_theme", dark ? "dark" : "light");
   }, [dark]);
 
+  /**
+   * Only the newest load may write state.
+   *
+   * The first load fires at mount, before Clerk has restored the session, so on
+   * a hosted app it 401s. The session then lands and loads again, with a token,
+   * and succeeds — but the first request's rejection can arrive AFTER that
+   * success and overwrite it, leaving `error` set on a signed-in page. Since a
+   * 401 sends the shell to the connect form, the result was being asked for an
+   * API key immediately after signing in with GitHub.
+   */
+  const loadSeq = useRef(0);
   const load = useCallback(async () => {
+    const seq = (loadSeq.current += 1);
     setError(null);
     try {
       const [statsResult, graphResult] = await Promise.all([fetchStats(), fetchGraph()]);
+      if (seq !== loadSeq.current) return;
       setStats(statsResult);
       setSnapshot(graphResult);
     } catch (cause) {
+      if (seq !== loadSeq.current) return;
       setError(cause instanceof Error ? cause.message : "Failed to load Trove data.");
     }
   }, []);
@@ -157,6 +172,9 @@ export default function App() {
 
   const identity = me?.identity ?? null;
   const impersonating = me?.impersonating ?? null;
+  // A layout belongs to the graph it describes, and viewing as someone else is
+  // a different graph again.
+  const layoutOwner = layoutOwnerKey(identity, impersonating);
   const isWaitlisted = signedIn && identity != null && identity.status !== "active";
   const isAdmin = identity?.role === "admin" && identity.status === "active";
   const hasApiToken = !!window.localStorage.getItem("trove_token");
@@ -168,6 +186,7 @@ export default function App() {
 
   const disconnectKey = useCallback(() => {
     window.localStorage.removeItem("trove_token");
+    clearLayout();
     setImpersonation(null);
     setTokenDashboard(false);
     setSignedOutView(isAppHost ? "connect" : "landing");
@@ -367,7 +386,7 @@ export default function App() {
         </div>
       ) : isWaitlisted ? (
         <WaitlistGate email={identity?.email ?? null} dark={dark} />
-      ) : showConnect || (error && error.includes("401")) ? (
+      ) : showConnect || (!signedIn && error?.includes("401")) ? (
         <div className="mx-auto mt-24 w-full max-w-sm rounded-lg border bg-card p-8">
           <h2 className="font-serif text-xl">Connect to Trove</h2>
           <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
@@ -423,7 +442,7 @@ export default function App() {
       ) : activeTab === "graph" ? (
         <main className="min-h-0 flex-1">
           <Suspense fallback={<div className="h-full w-full" />}>
-            <GraphView snapshot={snapshot} dark={dark} />
+            <GraphView snapshot={snapshot} dark={dark} layoutOwner={layoutOwner} />
           </Suspense>
         </main>
       ) : activeTab === "agents" ? (

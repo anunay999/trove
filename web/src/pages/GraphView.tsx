@@ -10,6 +10,7 @@ import {
   type ChatHighlights,
 } from "@/lib/graphChatState";
 import { plainText, renderDocument } from "@/lib/markdown";
+import { loadLayout, saveLayout } from "@/lib/graphLayoutCache";
 import { typeColor } from "@/lib/viz";
 import {
   fetchDocument,
@@ -78,6 +79,15 @@ function NodeIdChip({ id }: { id: string }) {
  * where space is scarce, and hard-capped at half the width — past that the
  * canvas stops being the canvas, which is the whole point of the page.
  */
+/** Middle value, so an outlying atom cannot drag the framing toward itself. */
+function median(values: number[]): number {
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2
+    : (sorted[middle] ?? 0);
+}
+
 const RAIL_BREAKPOINT_PX = 1280;
 const RAIL_FRACTION_NARROW = 0.3;
 const RAIL_FRACTION_WIDE = 0.4;
@@ -102,7 +112,16 @@ function railSizing(): { defaultSize: number; minSizePx: number; maxSizePx: numb
   };
 }
 
-export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; dark: boolean }) {
+export function GraphView({
+  snapshot,
+  dark,
+  layoutOwner,
+}: {
+  snapshot: GraphSnapshot | null;
+  dark: boolean;
+  /** Whose layout this is. Null means do not restore and do not save. */
+  layoutOwner: string | null;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const graphRef = useRef<any>(null);
@@ -125,6 +144,13 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
   // they come back up here on their way to the HUD.
   const [chatStages, setChatStages] = useState<Stage[]>([]);
   const reducedMotion = usePrefersReducedMotion();
+
+  /**
+   * Read the remembered layout ONCE per owner, not on every render: the value
+   * seeds the node objects, so a fresh Map each render would rebuild the graph
+   * data and restart the simulation it is meant to shorten.
+   */
+  const savedLayout = useMemo(() => loadLayout(layoutOwner), [layoutOwner]);
 
   /**
    * The chat rail. The graph is the canvas and this is the companion beside it,
@@ -169,21 +195,28 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
       degree.set(edge.toNodeId, (degree.get(edge.toNodeId) ?? 0) + 1);
     }
     return {
-      nodes: snapshot.nodes.map((node): VizNode => ({
-        id: node.id,
-        title: node.title,
-        type: node.type,
-        slug: node.slug,
-        accessCount: node.accessCount,
-        degree: degree.get(node.id) ?? 0,
-      })),
+      nodes: snapshot.nodes.map((node): VizNode => {
+        // Start each node where it settled last time. The simulation still
+        // runs, so new nodes find a place and the shape stays live, but a
+        // reload no longer rearranges a graph the reader had already learned.
+        const saved = savedLayout?.get(node.id);
+        return {
+          id: node.id,
+          title: node.title,
+          type: node.type,
+          slug: node.slug,
+          accessCount: node.accessCount,
+          degree: degree.get(node.id) ?? 0,
+          ...(saved ? { x: saved.x, y: saved.y } : {}),
+        };
+      }),
       links: snapshot.edges.map((edge) => ({
         source: edge.fromNodeId,
         target: edge.toNodeId,
         predicate: edge.predicate,
       })),
     };
-  }, [snapshot]);
+  }, [snapshot, savedLayout]);
 
   // Obsidian-style balance. The library's default forces give a stringy,
   // unevenly-clumped sprawl: hubs fling their leaves into long tendrils and
@@ -371,6 +404,8 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
    * cluster it is describing. Roughly `styles.hud` at eight stages.
    */
   const HUD_HEIGHT_PX = 300;
+  /** Matches the readout card's own width; see the HUD styles in GraphChat. */
+  const HUD_WIDTH_PX = 470;
   const hudOpen = chatOpen && !narrow && chatStages.length > 0;
   /**
    * Ceiling for the post-pack camera. Close enough to read the labels, far
@@ -413,6 +448,8 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
           d3VelocityDecay={0.45}
           cooldownTicks={140}
           onEngineStop={() => {
+            // Settled: this is the arrangement worth remembering.
+            saveLayout(layoutOwner, data.nodes);
             if (!didFitRef.current && graphRef.current) {
               didFitRef.current = true;
               // Fit the connected core; disconnected orphans drift far out and
@@ -649,19 +686,25 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
               const maxY = Math.max(...ys);
               const canvasWidth = Math.max(240, size.width - railPx);
               const canvasHeight = chatOpen && narrow ? Math.round(size.height * 0.38) : size.height;
-              // The HUD sits in the bottom-right corner of the canvas, so the
-              // pack is framed in the band above it and then lifted by half
-              // that band — the readout never lands on the cluster it reads.
+              // The HUD is a card in the bottom-right corner, not a full-width
+              // band, so correcting for its whole height pushed the cluster
+              // roughly two and a half times too far up. Weight the lift by how
+              // much of the width it actually covers.
               const hudInset = hudOpen ? HUD_HEIGHT_PX : 0;
-              const usableHeight = Math.max(160, canvasHeight - hudInset);
+              const hudShare = hudOpen ? Math.min(1, HUD_WIDTH_PX / canvasWidth) : 0;
+              const usableHeight = Math.max(160, canvasHeight - hudInset * hudShare);
               const pad = 80;
               const zoom = Math.min(
                 MAX_PACK_ZOOM,
                 Math.max(0.2, (canvasWidth - pad * 2) / Math.max(40, maxX - minX)),
                 Math.max(0.2, (usableHeight - pad * 2) / Math.max(40, maxY - minY)),
               );
+              // Frame the middle of the cluster, not the middle of its bounding
+              // box: one packed atom off in a corner drags a box centre halfway
+              // to itself and leaves the mass everyone is looking at off to a
+              // side. The median moves with the nodes, not with the extremes.
               const ms = reducedMotion ? 0 : 600;
-              graph.centerAt((minX + maxX) / 2, (minY + maxY) / 2 + hudInset / 2 / zoom, ms);
+              graph.centerAt(median(xs), median(ys) + (hudInset * hudShare) / 2 / zoom, ms);
               graph.zoom(zoom, ms);
             }}
             onClose={() => {
