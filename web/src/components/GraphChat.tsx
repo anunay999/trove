@@ -402,6 +402,14 @@ export function GraphChat({
   const [notice, setNotice] = useState<Notice | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [finish, setFinish] = useState<Finish | null>(null);
+  /**
+   * The retrieved notes start folded and stay folded until the reader opens
+   * them; a new question folds them again. Controlled rather than defaulted,
+   * because ChatToolCalls keeps its own state across turns and reads
+   * `defaultIsExpanded` once, at mount — so the next answer would otherwise
+   * arrive with the last answer's list already open.
+   */
+  const [toolsExpanded, setToolsExpanded] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const reduced = usePrefersReducedMotion();
 
@@ -432,6 +440,7 @@ export function GraphChat({
     setNotice(null);
     setFailure(null);
     setFinish(null);
+    setToolsExpanded(false);
     onHighlights(null);
   }, [cancel, onHighlights]);
 
@@ -464,6 +473,7 @@ export function GraphChat({
     setNotice(null);
     setFailure(null);
     setFinish(null);
+    setToolsExpanded(false);
 
     let sawDone = false;
     let expandedWalks = 0;
@@ -673,8 +683,11 @@ export function GraphChat({
   /**
    * The notes the answer cited, as the tool calls they are: what recall reached
    * for, what it cost, and — behind the row — the summary that went into the
-   * pack and a way onto the canvas. No "cited" pill on the rows any more: every
-   * row in this group is cited, so the pill said the same thing eight times.
+   * pack and a way onto the canvas. Folded until the reader opens it: the
+   * answer and its references are the reading surface, and eight rows reading
+   * "hit" between them and the composer is a wall rather than information. No
+   * "cited" pill on the rows: every row in this group is cited, so the pill
+   * said the same thing eight times.
    */
   const toolCall = useCallback(
     (atom: ChatPackAtom) => ({
@@ -885,7 +898,9 @@ export function GraphChat({
                     * still lit on the canvas. The caption is ours —
                     * ChatToolCalls accepts a `label` but v0.5.2 destructures it
                     * and never renders it, so the group's own header always
-                    * reads "N tool calls".
+                    * reads "N tool calls". Collapsed, that header is the last
+                    * row plus a wrench and the count, which is why the caption
+                    * above it carries the count too.
                     */}
                   {cited.length > 0 ? (
                     <ChatMessageBubble
@@ -897,7 +912,11 @@ export function GraphChat({
                         <Text type="code" size="xsm" color="secondary">
                           Cited · {cited.length}
                         </Text>
-                        <ChatToolCalls defaultIsExpanded calls={cited.map(toolCall)} />
+                        <ChatToolCalls
+                          calls={cited.map(toolCall)}
+                          isExpanded={toolsExpanded}
+                          onExpandedChange={setToolsExpanded}
+                        />
                       </VStack>
                     </ChatMessageBubble>
                   ) : null}
