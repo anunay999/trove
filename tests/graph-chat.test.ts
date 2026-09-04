@@ -6,6 +6,7 @@ import {
   citedSlugs,
   createGraphChatModelFromEnv,
   parseChatDelta,
+  providerErrorMessage,
   type GraphChatModel,
 } from "../src/chatModel.js";
 import { encodeChatEvent, graphChatResponse, runGraphChat, type GraphChatEvent } from "../src/graphChat.js";
@@ -65,6 +66,32 @@ function hangingModel(state: { released: boolean }): GraphChatModel {
     },
   };
 }
+
+describe("provider error messages", () => {
+  it("prefers the provider's own message over the raw body", () => {
+    const body = JSON.stringify({ error: { message: "No endpoints found matching your data policy." } });
+    assert.equal(providerErrorMessage(body), "No endpoints found matching your data policy.");
+  });
+
+  it("reaches the nested raw message OpenRouter sometimes wraps", () => {
+    const body = JSON.stringify({ error: { message: "Provider returned error", metadata: { raw: "model requires prompt logging" } } });
+    assert.equal(providerErrorMessage(body), "Provider returned error");
+  });
+
+  it("falls back to text, stripped of markup, for a gateway that answers HTML", () => {
+    assert.equal(providerErrorMessage("<html><body>403 Forbidden</body></html>"), "403 Forbidden");
+  });
+
+  it("is empty for an empty body, so the caller shows the status alone", () => {
+    assert.equal(providerErrorMessage("   "), "");
+  });
+
+  it("caps a long body so a notice stays readable", () => {
+    const long = providerErrorMessage(JSON.stringify({ error: { message: "x".repeat(500) } }));
+    assert.equal(long.length, 301);
+    assert.ok(long.endsWith("\u2026"));
+  });
+});
 
 describe("graph chat", () => {
   const { store, context, stamp } = suiteStore("graph-chat");
