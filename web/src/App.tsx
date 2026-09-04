@@ -1,6 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from "react";
 import { AuthenticateWithRedirectCallback } from "@clerk/clerk-react";
-import { siGithub } from "simple-icons";
+import { GITHUB_PATH } from "@/lib/brandIcons";
 import { Overview } from "@/pages/Overview";
 // The force-graph library is the biggest thing we ship. Split it out so the
 // landing, which most visitors never scroll past, doesn't download the explorer.
@@ -302,7 +302,7 @@ export default function App() {
               className="flex size-7 items-center justify-center rounded-md border text-muted-foreground transition-colors hover:text-foreground"
             >
               <svg viewBox="0 0 24 24" className="size-[15px] fill-current" aria-hidden>
-                <path d={siGithub.path} />
+                <path d={GITHUB_PATH} />
               </svg>
             </a>
             {/* The landing ignores the theme, so the toggle would do nothing there. */}

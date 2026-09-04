@@ -257,7 +257,8 @@ export async function* runGraphChat(
           type: "notice",
           code: "model_not_configured",
           message:
-            "No answering model is configured (set TROVE_GRAPH_CHAT=1 and OPENAI_API_KEY). " +
+            "No answering model is configured (set TROVE_GRAPH_CHAT=1 and OPENROUTER_API_KEY, " +
+            "or OPENAI_API_KEY). " +
             "The retrieval above is real: these are the notes recall found and packed.",
         });
       } else {
