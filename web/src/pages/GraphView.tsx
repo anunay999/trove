@@ -100,10 +100,16 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
    * subtracts when it centres a pack.
    */
   const rail = useResizable({
-    defaultSize: 380,
+    // 40% of the viewport, not a fixed 380px: the answer, its references and the
+    // retrieved list are the reading surface, and at 380 the prose wrapped every
+    // few words. Clamped so it stays a companion to the canvas on a wide monitor
+    // and still leaves the graph room on a small one.
+    defaultSize: Math.round(Math.min(880, Math.max(360, window.innerWidth * 0.4))),
     minSizePx: 320,
-    maxSizePx: 560,
-    autoSaveId: "trove:graph-chat-rail",
+    maxSizePx: 880,
+    // Bumped with the default: the old key holds a 380 that would otherwise
+    // survive as a saved preference nobody set on purpose.
+    autoSaveId: "trove:graph-chat-rail:v2",
   });
 
   useEffect(() => {
