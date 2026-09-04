@@ -57,6 +57,8 @@ import {
   grepExcerpt,
   isTextUnit,
   performRecall,
+  reportSearchArm,
+  type SearchObserver,
   renderAgentContext,
   renderMarkdownProjection,
   decodeEventCursor,
@@ -248,7 +250,11 @@ export class InMemoryGraphStore implements GraphStore {
       : null;
   }
 
-  async search(input: SearchInput, context?: GraphOperationContext): Promise<SearchResult> {
+  async search(
+    input: SearchInput,
+    context?: GraphOperationContext,
+    observer?: SearchObserver,
+  ): Promise<SearchResult> {
     const provider = input.mode === "lexical" ? null : createEmbeddingProviderFromEnv();
 
     let result: SearchResult;
@@ -257,11 +263,17 @@ export class InMemoryGraphStore implements GraphStore {
     // is synchronous, so there is nothing to overlap.
     if (input.mode === "semantic") {
       result = provider ? await this.semanticSearch(input, provider) : { nodes: [], textUnits: [] };
+      if (provider) reportSearchArm(observer, "semantic", result.nodes);
     } else if (input.mode === "lexical" || !provider) {
       result = this.lexicalSearch(input);
+      reportSearchArm(observer, "lexical", result.nodes);
     } else {
+      // Reported in the order this driver really produces them: the lexical arm
+      // is synchronous here, so it always lands before the embedding call.
       const lexical = this.lexicalSearch(input);
+      reportSearchArm(observer, "lexical", lexical.nodes);
       const semantic = await this.semanticSearch(input, provider);
+      reportSearchArm(observer, "semantic", semantic.nodes);
       result = {
         nodes: reciprocalRankFusion(lexical.nodes, semantic.nodes),
         textUnits: reciprocalRankFusion(lexical.textUnits, semantic.textUnits),

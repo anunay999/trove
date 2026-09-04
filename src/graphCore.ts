@@ -486,6 +486,43 @@ export type SearchResult = {
   textUnits: TextUnit[];
 };
 
+/**
+ * Which retrieval arm produced a hit.
+ *
+ * "grep" is declared and never emitted by hybrid search: recall's seed pool is
+ * the lexical + semantic fusion and nothing else. It has a name here so the
+ * day a literal-substring arm joins that pool the wire protocol in
+ * src/graphChat.ts does not need a version bump to carry it.
+ */
+export type SearchArm = "lexical" | "semantic" | "grep";
+
+/**
+ * Watch hybrid search's arms resolve individually.
+ *
+ * `search` returns one fused list, which is the right answer for every caller
+ * that wants results and the wrong one for a caller that wants to SHOW the
+ * retrieval happening: RRF hides which arm found what, and when. The observer
+ * is called once per arm that actually ran, at the moment that arm's own
+ * promise settles — never replayed, never reordered, and never synthesized for
+ * an arm that did not run. Fire-and-forget: an observer that throws must not
+ * fail the search that was carrying it.
+ */
+export type SearchObserver = { onArm?: (arm: SearchArm, nodes: SearchResultNode[]) => void };
+
+/** Report one arm to an observer without ever letting it break the search. */
+export function reportSearchArm(
+  observer: SearchObserver | undefined,
+  arm: SearchArm,
+  nodes: SearchResultNode[],
+): void {
+  if (!observer?.onArm) return;
+  try {
+    observer.onArm(arm, nodes);
+  } catch {
+    // Instrumentation is not allowed to fail a read.
+  }
+}
+
 /** A neighborhood node carries its true BFS depth from the seed (seed = 0). */
 export type NeighborhoodNode = GraphNode & { level: number };
 
@@ -662,6 +699,33 @@ export type RecallResult = {
   temporalScope?: RecallTemporalScope;
 };
 
+/**
+ * A recall told as it happens.
+ *
+ * `performRecall` normally speaks once, at the end, and a pack tells you what
+ * retrieval concluded but not what it did. The trace is the same run narrated:
+ * every event is emitted from the line that does the work, carrying the rows
+ * that line actually produced, at the moment it produced them. Nothing here is
+ * derived after the fact and nothing is replayed — the graph-chat view lights
+ * up exactly the nodes recall touched, in the order recall touched them, and
+ * that honesty is the whole reason the hook exists rather than a timeline
+ * reconstructed from the result.
+ *
+ * Costs nothing when unused: with no `onTrace` the emitter is never called and
+ * no arrays are built.
+ */
+export type RecallTraceEvent =
+  /** One arm of hybrid search settled. Emitted per arm that ran, as it ran. */
+  | { stage: "seeds"; arm: SearchArm; nodes: SearchResultNode[] }
+  /** The fused (RRF) seed pool the rest of recall works from. */
+  | { stage: "fused"; nodes: SearchResultNode[] }
+  /** One seed's neighborhood came back; `nodes` are the candidates it ADDED. */
+  | { stage: "expanded"; seedNodeId: string; nodes: Array<{ node: GraphNode; hops: number }> }
+  /** The final candidate order, after reranking/MMR/temporal reweight. */
+  | { stage: "ranked"; reranked: boolean; nodes: Array<{ node: GraphNode; score: number; hops: number }> };
+
+export type RecallTrace = (event: RecallTraceEvent) => void;
+
 export type ProjectResult =
   | { format: "markdown"; content: string }
   | { format: "mind_map"; nodes: GraphNode[]; edges: GraphEdge[] }
@@ -672,7 +736,8 @@ export type GraphStore = {
   sources(input?: { limit?: number }, context?: GraphOperationContext): MaybePromise<GraphSourceOverview[]>;
   readSource(input: { sourceId: string }, context?: GraphOperationContext): MaybePromise<GraphSourceDocument | null>;
   readDocument(input: { uri: string }, context?: GraphOperationContext): MaybePromise<GraphDocument | null>;
-  search(input: SearchInput, context?: GraphOperationContext): MaybePromise<SearchResult>;
+  /** `observer` is optional instrumentation only; it cannot change the result. */
+  search(input: SearchInput, context?: GraphOperationContext, observer?: SearchObserver): MaybePromise<SearchResult>;
   grep(input: GrepInput, context?: GraphOperationContext): MaybePromise<GrepResult>;
   /**
    * Read a node with its evidence and annotations. By default bumps access
@@ -746,6 +811,14 @@ export type GraphStore = {
   events(input?: EventFeedInput, context?: GraphOperationContext): MaybePromise<GraphEventFeed>;
   eventStats(context?: GraphOperationContext): MaybePromise<GraphEventStats>;
   lint(context?: GraphOperationContext): MaybePromise<GraphLintReport>;
+  /**
+   * Settle any buffered activation bumps. Reads strengthen a node's activation
+   * through a timed buffer (src/activation.ts), so a count read straight off
+   * the row can trail by a window. Production tolerates that -- activation is a
+   * weak tie-breaker -- but a caller that must observe a settled count (a
+   * ranking assertion, a shutdown) calls this first.
+   */
+  flushActivation(): MaybePromise<void>;
   /**
    * REPLACE one node's durable reconcile flags with the set a reconcile pass
    * just produced (an empty list clears them). Internal plumbing —
@@ -1052,9 +1125,20 @@ export async function performRecall(
   store: GraphStore,
   rawInput: RecallInput,
   context?: GraphOperationContext,
-  options: { reranker?: Reranker | null } = {},
+  options: { reranker?: Reranker | null; onTrace?: RecallTrace } = {},
 ): Promise<RecallResult> {
   const input = recallInputSchema.parse(rawInput);
+  // A watcher never breaks the thing it watches: recall must return the same
+  // pack whether or not anyone is listening, so a throwing observer is
+  // swallowed here rather than failing an interactive read.
+  const emit = (event: RecallTraceEvent): void => {
+    if (!options.onTrace) return;
+    try {
+      options.onTrace(event);
+    } catch {
+      // A trace consumer's problem is not recall's problem.
+    }
+  };
   // Temporal intent belongs in the question, not in a parameter: recall lost
   // asOf because it reached only the expansion, but "what did we deploy in
   // January" is still a question the graph can answer better than a present-
@@ -1080,7 +1164,8 @@ export async function performRecall(
     // generous budget could never reach the eleventh hit.
     limit: 50,
     ...(input.maxSemanticDistance !== undefined ? { maxSemanticDistance: input.maxSemanticDistance } : {}),
-  }, context);
+  }, context, { onArm: (arm, nodes) => emit({ stage: "seeds", arm, nodes }) });
+  emit({ stage: "fused", nodes: search.nodes });
 
   const nowMs = Date.now();
   type Candidate = {
@@ -1104,18 +1189,25 @@ export async function performRecall(
         includeExpired: false,
       }, context);
       for (const edge of expansion.edges) edgePool.set(edge.id, edge);
+      const reached: Array<{ node: GraphNode; hops: number }> = [];
       for (const node of expansion.nodes) {
         if (!candidates.has(node.id)) {
           // True BFS depth from the seed: depth-2 neighbors are hops 2.
+          const hops = Math.max(1, node.level);
           candidates.set(node.id, {
             node,
             matchRank: null,
-            hops: Math.max(1, node.level),
+            hops,
             degree: 0,
             distance: undefined,
           });
+          reached.push({ node, hops });
         }
       }
+      // Only what this walk ADDED. A neighbor that was already a seed was not
+      // reached by traversal, and a trace that claimed otherwise would light a
+      // node for work the expansion did not do.
+      if (options.onTrace) emit({ stage: "expanded", seedNodeId: seed.id, nodes: reached });
     }
   }
 
@@ -1228,6 +1320,17 @@ export async function performRecall(
   // order above: it is a preference about WHEN a fact was true, orthogonal to
   // how relevant the ranker thinks it is.
   if (temporal.scope) scored = rescoreForTemporalScope(scored, temporal.scope, edgePool.values(), new Date(nowMs));
+
+  // The order everything downstream consumes. Emitted before packing, which is
+  // itself several round trips (supersession, batched evidence) — a watcher
+  // sees ranking land and then waits for the pack, exactly as recall does.
+  if (options.onTrace) {
+    emit({
+      stage: "ranked",
+      reranked: Boolean(rerankScores),
+      nodes: scored.map((candidate) => ({ node: candidate.node, score: candidate.score, hops: candidate.hops })),
+    });
+  }
 
   // The header names the scope so the pack itself says which time it answers
   // about; an agent reading only the context text can then say "as of January".

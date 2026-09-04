@@ -87,7 +87,7 @@ export function Overview({ stats, dark }: { stats: Stats | null; dark: boolean }
       </div>
 
       <div className="grid xl:grid-cols-5">
-        <Section title="Memory timeline" meta="by document date" className="xl:col-span-3 xl:pr-8">
+        <Section title="Memory timeline" meta="documents per day" className="xl:col-span-3 xl:pr-8">
           <WritesChart stats={stats} />
         </Section>
         <Section title="Write cadence" meta="last 16 weeks" className="border-t xl:col-span-2 xl:border-l xl:border-t-0 xl:pl-8">

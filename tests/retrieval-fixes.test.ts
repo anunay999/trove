@@ -28,6 +28,13 @@ async function drainJobs(limit = 200): Promise<void> {
     if (!next) break;
     await store.runJob({ jobId: next.id });
   }
+  // Activation bumps are buffered and flushed on a timer, so recall's
+  // activation prior can read a count that is up to a window stale. That is
+  // fine in production -- it is a weak tie-breaker -- but it makes a ranking
+  // assertion non-deterministic under a loaded full-suite run, where the flush
+  // may or may not have landed before the pack is scored. Settle it here so
+  // these tests measure ranking, not timing.
+  await store.flushActivation();
 }
 /** Push a job's last-update past any retry backoff. */
 async function ageJob(jobId: string): Promise<void> {

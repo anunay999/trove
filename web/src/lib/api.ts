@@ -50,7 +50,10 @@ export type Stats = {
   predicates: CountRow[];
   actions: CountRow[];
   eventsPerDay: Array<{ date: string; total: number; writes: number }>;
+  /** Documents dated by domain time — the date each one claims for itself. */
   sourcesPerDay: Array<{ date: string; documents: number }>;
+  /** The same documents dated by ingest time — the day Trove received them. */
+  sourcesIngestedPerDay: Array<{ date: string; documents: number }>;
   topAccessed: Array<{
     id: string;
     slug: string;
@@ -182,6 +185,109 @@ export async function fetchSource(sourceId: string): Promise<SourceDocument> {
 
 export async function fetchNode(nodeId: string): Promise<NodeDetail> {
   return sendJson<NodeDetail>("/v1/read", { body: { nodeId } });
+}
+
+// ---- Graph chat (streamed retrieval) ----
+//
+// The wire protocol of POST /v1/graph-chat (src/graphChat.ts). Every event is
+// something retrieval really did, in the order it did it — the graph view
+// lights nodes straight from these, so nothing here may be invented, reordered
+// or replayed on a timer.
+
+export type ChatNodeRef = {
+  id: string;
+  slug: string;
+  title: string;
+  type: NodeType;
+};
+
+export type ChatPackAtom = ChatNodeRef & {
+  hops: number;
+  score: number;
+  tokens: number;
+  provenance: "citation" | "agent_inference";
+  summary: string | null;
+};
+
+export type GraphChatEvent =
+  | { type: "start"; query: string; elapsedMs: number }
+  | { type: "seeds"; arm: "lexical" | "semantic" | "grep"; nodes: ChatNodeRef[]; elapsedMs: number }
+  | { type: "fused"; nodes: ChatNodeRef[]; elapsedMs: number }
+  | { type: "expand"; seedNodeId: string; nodes: Array<ChatNodeRef & { hops: number }>; elapsedMs: number }
+  | { type: "rank"; reranked: boolean; total: number; nodes: Array<{ id: string; score: number }>; elapsedMs: number }
+  | {
+    type: "pack";
+    atoms: ChatPackAtom[];
+    tokenBudget: number;
+    spentTokens: number;
+    truncated: boolean;
+    elapsedMs: number;
+  }
+  | { type: "answer_start"; model: string | null; elapsedMs: number }
+  | { type: "token"; text: string; elapsedMs: number }
+  | { type: "notice"; code: "model_not_configured" | "no_results"; message: string; elapsedMs: number }
+  | { type: "error"; code: "recall_failed" | "model_failed"; message: string; elapsedMs: number }
+  | {
+    type: "done";
+    finish: "ok" | "no_model" | "no_results" | "error";
+    citations: Array<{ nodeId: string | null; sourceId: string | null; textUnitId: string | null }>;
+    citedNodeIds: string[];
+    answer: string;
+    elapsedMs: number;
+  };
+
+/**
+ * Ask the graph, and yield the retrieval as the server performs it.
+ *
+ * EventSource can neither POST nor carry an Authorization header, so this
+ * reads the SSE frames off a fetch body itself. Aborting `signal` cancels the
+ * reader, which is what tells the server to abort the model call.
+ */
+export async function* streamGraphChat(
+  query: string,
+  signal: AbortSignal,
+): AsyncGenerator<GraphChatEvent> {
+  const response = await fetch("/v1/graph-chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+    body: JSON.stringify({ query }),
+    signal,
+  });
+  if (!response.ok || !response.body) {
+    const detail = await response.text().catch(() => "");
+    let message = `Graph chat failed (${response.status}).`;
+    try {
+      const parsed = JSON.parse(detail) as { message?: string; error?: string };
+      message = parsed.message ?? parsed.error ?? message;
+    } catch {
+      // A non-JSON body (a proxy's error page) keeps the generic message.
+    }
+    throw new Error(message);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let split = buffer.indexOf("\n\n");
+      while (split >= 0) {
+        const frame = buffer.slice(0, split);
+        buffer = buffer.slice(split + 2);
+        // `: keepalive` comment frames only exist to stop a proxy closing an
+        // idle stream; they carry nothing.
+        if (frame.startsWith("data:")) {
+          yield JSON.parse(frame.slice(5).trim()) as GraphChatEvent;
+        }
+        split = buffer.indexOf("\n\n");
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
 }
 
 // ---- Identity, API keys, admin ----

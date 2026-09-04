@@ -21,6 +21,7 @@ import {
   enqueueJobInputSchema,
   eventFeedInputSchema,
   forgetInputSchema,
+  graphChatInputSchema,
   grepInputSchema,
   ingestInputSchema,
   invalidateEdgeInputSchema,
@@ -59,11 +60,14 @@ import {
 } from "./oauthMetadata.js";
 import { createGraphStore } from "./createStore.js";
 import { EdgeValidityConflictError, isSmokeEvent } from "./graphCore.js";
+import { sourceDaySeries } from "./sourceStats.js";
+import { graphChatResponse } from "./graphChat.js";
 import { startJobWorker } from "./jobWorker.js";
 import { createTroveMcpServer } from "./mcpTools.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
 import { troveTools, visibleTiers } from "./toolDefinitions.js";
 import { UserStore, type ApiKeySummary } from "./users.js";
+import { DASHBOARD_PATHS } from "./webRoutes.js";
 
 const app = new Hono();
 const { store, driver } = createGraphStore();
@@ -206,29 +210,11 @@ app.get("/v1/stats", async (context) => {
     store.sources({ limit: 5000 }, owner),
   ]);
 
-  // Domain time beats transaction time: date each document by what it says about
-  // itself (frontmatter date, or a date in its path/title), not when it was imported.
-  const isoDate = /\b(20\d{2}-\d{2}-\d{2})\b/;
-  const domainDate = (row: (typeof sourceRows)[number]): string => {
-    const entryDate = (row.metadata as { entryDate?: string }).entryDate;
-    if (entryDate && isoDate.test(entryDate)) return isoDate.exec(entryDate)![1]!;
-    const frontmatter = (row.metadata as { frontmatter?: Record<string, string> }).frontmatter ?? {};
-    for (const candidate of [frontmatter.created, frontmatter.date, frontmatter.updated]) {
-      if (candidate && isoDate.test(candidate)) return isoDate.exec(candidate)![1]!;
-    }
-    const relPath = (row.metadata as { relPath?: string }).relPath ?? "";
-    const fromName = isoDate.exec(`${relPath} ${row.title}`);
-    if (fromName) return fromName[1]!;
-    return row.createdAt.slice(0, 10);
-  };
-
-  const sourcesPerDay = new Map<string, { date: string; documents: number }>();
-  for (const row of sourceRows) {
-    const date = domainDate(row);
-    const entry = sourcesPerDay.get(date) ?? { date, documents: 0 };
-    entry.documents += 1;
-    sourcesPerDay.set(date, entry);
-  }
+  // Two honest readings of the same rows. Domain time answers "when is this
+  // document from" — the date it claims for itself; ingest time answers "when
+  // did I add it". They diverge by months on an imported vault, and a chart
+  // that only knows the first reads as broken to someone who just imported.
+  const sourceDays = sourceDaySeries(sourceRows);
 
   // Whole-log rollups come from an aggregate, not from paging the feed. The
   // paged version stopped after 10,000 events and reported zero for every day
@@ -294,7 +280,8 @@ app.get("/v1/stats", async (context) => {
     predicates: countBy(snapshot.edges, (edge) => edge.predicate),
     actions: eventStats.actions,
     eventsPerDay: eventStats.perDay,
-    sourcesPerDay: [...sourcesPerDay.values()].sort((left, right) => left.date.localeCompare(right.date)),
+    sourcesPerDay: sourceDays.byDocumentDate,
+    sourcesIngestedPerDay: sourceDays.byIngestDate,
     topAccessed,
     recentEvents,
     jobs: countBy(jobList, (job) => job.status),
@@ -351,6 +338,21 @@ app.post("/v1/recall", async (context) => {
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), recallInputSchema);
   return context.json(await store.recall(input, operationContextFromAuth(auth)));
+});
+
+// The dashboard's graph chat. The same read scope and the same owner scoping as
+// /v1/recall, because it IS a recall — narrated. The response is a Server-Sent
+// Event stream of the traversal as it happens, then the answer's tokens, then
+// the citations. A zod failure still lands on app.onError as a 400: the body is
+// parsed before any Response is constructed.
+app.post("/v1/graph-chat", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  if (auth instanceof Response) return auth;
+  const input = await parseJsonOrThrow(context.req.json(), graphChatInputSchema);
+  return graphChatResponse(store, input, operationContextFromAuth(auth), {
+    // A closed tab must abort the model call, not leave it streaming to nobody.
+    signal: context.req.raw.signal,
+  });
 });
 
 app.post("/v1/invalidate-edge", async (context) => {
@@ -757,7 +759,14 @@ app.get("/skills/:name", (context) => {
 // Serve the built dashboard (web/dist) for any non-API path. Run `npm run build`
 // inside web/ first; without a build these routes simply 404.
 app.use("/*", serveStatic({ root: "./web/dist" }));
-app.get("/", serveStatic({ path: "./web/dist/index.html" }));
+// The dashboard's tabs live in the URL, and nothing named /graph exists on
+// disk, so the static middleware falls through and each tab path has to be
+// handed index.html for a reload or a shared link to reach the app. Named one
+// by one and registered last, after every API route, /mcp and the skills
+// feeds, so this can only ever answer for a path nothing else claimed.
+for (const path of DASHBOARD_PATHS) {
+  app.get(path, serveStatic({ path: "./web/dist/index.html" }));
+}
 
 const port = Number(process.env.PORT ?? "8787");
 

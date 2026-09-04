@@ -1,8 +1,50 @@
+/*
+ * Two design systems share this page, so the cascade is told the order once,
+ * out loud, before anything is imported.
+ *
+ *   base          Tailwind's preflight — the dashboard's floor.
+ *   reset         Astryx's preflight, scoped to the chat panel by
+ *                 scripts/scope-astryx-reset.mjs. It lands on top of
+ *                 Tailwind's inside the panel and nowhere else.
+ *   astryx-base   Astryx component styles: above `reset` so components beat
+ *                 element defaults, above `base` so they beat preflight.
+ *   astryx-theme  the gothic theme, which astryx already @scope's itself.
+ *   theme         Tailwind's token layer, deliberately AFTER astryx-base.
+ *                 astryx.css declares --color-border and --color-accent on
+ *                 :root, and this dashboard paints every element with
+ *                 `border-border`; ranking Tailwind's :root above Astryx's
+ *                 keeps the dashboard's hairline borders its own. The panel is
+ *                 untouched by this — its tokens come from the Theme wrapper's
+ *                 own element, and inheritance does not care about layers.
+ *   components,
+ *   utilities     Tailwind last, so a utility still wins wherever one is used.
+ */
+@layer base, reset, astryx-base, astryx-theme, theme, components, utilities;
+
 @import "@fontsource-variable/geist";
 @import "@fontsource-variable/geist-mono";
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+
+/* Astryx, for the graph chat panel only: components, scoped reset, theme. */
+@import "@astryxdesign/core/astryx.css";
+@import "./themes/astryx-reset.scoped.css";
+@import "./themes/gothic.css";
+
+/*
+ * The dashboard owns its own colour scheme.
+ *
+ * Two things want to set `color-scheme` on <html> from underneath: lightningcss
+ * writes a `:root { color-scheme: light dark }` when it polyfills the theme's
+ * `light-dark()` calls, and Astryx's Theme copies `data-theme` onto <html>
+ * whenever it believes it is the root provider. Either one hands the browser's
+ * scrollbars and native controls to the OS setting, against a dashboard whose
+ * light/dark is a toggle. Unlayered, so it outranks both.
+ */
+:root { color-scheme: light; }
+:root.dark { color-scheme: dark; }
+
 
 @custom-variant dark (&:is(.dark *));
 
