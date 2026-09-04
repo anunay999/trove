@@ -31,6 +31,7 @@ import { gothicTheme } from "@/themes/gothic";
 import {
   CHAT_STATE_LABEL,
   highlightInk,
+  progressPhrase,
   useRetrievalReplay,
   usePrefersReducedMotion,
   type ChatHighlights,
@@ -815,9 +816,12 @@ export function GraphChat({
                         {prose.markdown}
                       </Markdown>
                     </ChatMessageBubble>
-                  ) : running && model ? (
+                  ) : busy ? (
                     <ChatMessageBubble variant="ghost" width="100%">
-                      <Text color="secondary">Answering with {model}…</Text>
+                      <HStack gap={1.5} vAlign="center">
+                        <StatusDot variant="accent" label="" isPulsing={!reduced} />
+                        <Text color="secondary">{progressPhrase(stages, model)}…</Text>
+                      </HStack>
                     </ChatMessageBubble>
                   ) : null}
 

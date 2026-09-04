@@ -338,16 +338,33 @@ export type AppUser = {
  * with no identity, hence no banner and no way back. Drop it and reload as
  * yourself rather than wedging the session behind a devtools-only fix.
  */
+export const IMPERSONATION_BOUNCE_KEY = "trove_impersonate_error";
+
 export async function fetchMe(): Promise<Me> {
   try {
     return await getJson<Me>("/v1/me");
   } catch (cause) {
-    if (getImpersonation()) {
+    const target = getImpersonation();
+    if (target) {
+      // Leave a note across the reload. Without one this recovery is silent
+      // and indistinguishable from "the switcher did nothing": the page
+      // reloads, you are still yourself, and nothing says why.
+      window.sessionStorage.setItem(
+        IMPERSONATION_BOUNCE_KEY,
+        `Could not view as ${target}: ${cause instanceof Error ? cause.message : "the request failed"}.`,
+      );
       setImpersonation(null);
       window.location.reload();
     }
     throw cause;
   }
+}
+
+/** Read and clear the note above, for the one render after the bounce. */
+export function takeImpersonationBounce(): string | null {
+  const message = window.sessionStorage.getItem(IMPERSONATION_BOUNCE_KEY);
+  if (message) window.sessionStorage.removeItem(IMPERSONATION_BOUNCE_KEY);
+  return message;
 }
 export type ServiceTokenSummary = { actorId: string; scopes: string[]; tokenPreview: string; token: string };
 export const fetchKeys = (): Promise<{ keys: ApiKeySummary[]; serviceTokens?: ServiceTokenSummary[] }> =>

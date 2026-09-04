@@ -16,6 +16,7 @@ import { UserSwitcher, switchToUser, userLabel } from "@/components/UserSwitcher
 import {
   fetchGraph,
   fetchMe,
+  takeImpersonationBounce,
   fetchStats,
   getImpersonation,
   setImpersonation,
@@ -70,7 +71,9 @@ export default function App() {
   const [dark, setDark] = useState(initialDark);
   const [stats, setStats] = useState<Stats | null>(null);
   const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // A "view as" that the API refused bounces back to yourself on reload; this
+  // carries the reason across so the switcher is not silently inert.
+  const [error, setError] = useState<string | null>(() => takeImpersonationBounce());
   const [me, setMe] = useState<Me | null>(null);
   const [signedIn, setSignedIn] = useState(false);
   const [drawer, setDrawer] = useState<{ open: boolean; mode: "sign-in" | "sign-up"; email?: string }>({ open: false, mode: "sign-in" });
