@@ -1,5 +1,8 @@
-node_modules
-dist
+# Bare patterns match the CONTEXT ROOT only, so `node_modules` never excluded
+# web/node_modules — 452 MB and 34,000 files uploaded on every build, then
+# copied over the one the web stage had just installed. `**/` fixes both.
+**/node_modules
+**/dist
 exports
 .git
 .env
