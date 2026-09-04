@@ -1,6 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from "react";
 import { AuthenticateWithRedirectCallback } from "@clerk/clerk-react";
 import { GITHUB_PATH } from "@/lib/brandIcons";
+import { clearLayout, layoutOwnerKey } from "@/lib/graphLayoutCache";
 import { Overview } from "@/pages/Overview";
 // The force-graph library is the biggest thing we ship. Split it out so the
 // landing, which most visitors never scroll past, doesn't download the explorer.
@@ -157,6 +158,9 @@ export default function App() {
 
   const identity = me?.identity ?? null;
   const impersonating = me?.impersonating ?? null;
+  // A layout belongs to the graph it describes, and viewing as someone else is
+  // a different graph again.
+  const layoutOwner = layoutOwnerKey(identity, impersonating);
   const isWaitlisted = signedIn && identity != null && identity.status !== "active";
   const isAdmin = identity?.role === "admin" && identity.status === "active";
   const hasApiToken = !!window.localStorage.getItem("trove_token");
@@ -168,6 +172,7 @@ export default function App() {
 
   const disconnectKey = useCallback(() => {
     window.localStorage.removeItem("trove_token");
+    clearLayout();
     setImpersonation(null);
     setTokenDashboard(false);
     setSignedOutView(isAppHost ? "connect" : "landing");
@@ -423,7 +428,7 @@ export default function App() {
       ) : activeTab === "graph" ? (
         <main className="min-h-0 flex-1">
           <Suspense fallback={<div className="h-full w-full" />}>
-            <GraphView snapshot={snapshot} dark={dark} />
+            <GraphView snapshot={snapshot} dark={dark} layoutOwner={layoutOwner} />
           </Suspense>
         </main>
       ) : activeTab === "agents" ? (

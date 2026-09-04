@@ -10,6 +10,7 @@ import {
   type ChatHighlights,
 } from "@/lib/graphChatState";
 import { plainText, renderDocument } from "@/lib/markdown";
+import { loadLayout, saveLayout } from "@/lib/graphLayoutCache";
 import { typeColor } from "@/lib/viz";
 import {
   fetchDocument,
@@ -111,7 +112,16 @@ function railSizing(): { defaultSize: number; minSizePx: number; maxSizePx: numb
   };
 }
 
-export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; dark: boolean }) {
+export function GraphView({
+  snapshot,
+  dark,
+  layoutOwner,
+}: {
+  snapshot: GraphSnapshot | null;
+  dark: boolean;
+  /** Whose layout this is. Null means do not restore and do not save. */
+  layoutOwner: string | null;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const graphRef = useRef<any>(null);
@@ -134,6 +144,13 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
   // they come back up here on their way to the HUD.
   const [chatStages, setChatStages] = useState<Stage[]>([]);
   const reducedMotion = usePrefersReducedMotion();
+
+  /**
+   * Read the remembered layout ONCE per owner, not on every render: the value
+   * seeds the node objects, so a fresh Map each render would rebuild the graph
+   * data and restart the simulation it is meant to shorten.
+   */
+  const savedLayout = useMemo(() => loadLayout(layoutOwner), [layoutOwner]);
 
   /**
    * The chat rail. The graph is the canvas and this is the companion beside it,
@@ -178,21 +195,28 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
       degree.set(edge.toNodeId, (degree.get(edge.toNodeId) ?? 0) + 1);
     }
     return {
-      nodes: snapshot.nodes.map((node): VizNode => ({
-        id: node.id,
-        title: node.title,
-        type: node.type,
-        slug: node.slug,
-        accessCount: node.accessCount,
-        degree: degree.get(node.id) ?? 0,
-      })),
+      nodes: snapshot.nodes.map((node): VizNode => {
+        // Start each node where it settled last time. The simulation still
+        // runs, so new nodes find a place and the shape stays live, but a
+        // reload no longer rearranges a graph the reader had already learned.
+        const saved = savedLayout?.get(node.id);
+        return {
+          id: node.id,
+          title: node.title,
+          type: node.type,
+          slug: node.slug,
+          accessCount: node.accessCount,
+          degree: degree.get(node.id) ?? 0,
+          ...(saved ? { x: saved.x, y: saved.y } : {}),
+        };
+      }),
       links: snapshot.edges.map((edge) => ({
         source: edge.fromNodeId,
         target: edge.toNodeId,
         predicate: edge.predicate,
       })),
     };
-  }, [snapshot]);
+  }, [snapshot, savedLayout]);
 
   // Obsidian-style balance. The library's default forces give a stringy,
   // unevenly-clumped sprawl: hubs fling their leaves into long tendrils and
@@ -424,6 +448,8 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
           d3VelocityDecay={0.45}
           cooldownTicks={140}
           onEngineStop={() => {
+            // Settled: this is the arrangement worth remembering.
+            saveLayout(layoutOwner, data.nodes);
             if (!didFitRef.current && graphRef.current) {
               didFitRef.current = true;
               // Fit the connected core; disconnected orphans drift far out and
