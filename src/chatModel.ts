@@ -16,13 +16,16 @@
  *   still streams the whole traversal, and still returns the pack, and says in
  *   so many words that no model is configured. The graph demonstration works
  *   without a model; only the prose is missing.
- * - CHEAP BY INTENT. The owner named DeepSeek and GLM. Any OpenAI-compatible
- *   endpoint works: point `OPENAI_BASE_URL` at the provider and name the model
- *   in `TROVE_CHAT_MODEL` (see .env.example). The default stays `gpt-4o-mini`
- *   in the classic body shape: it is cheap, it resolves against the DEFAULT
- *   base URL, and it is the shape DeepSeek and GLM speak. A provider-specific
- *   default would 404 for anyone who set only the key, and a reasoning-shaped
- *   default would 400 against the very providers this feature is aimed at.
+ * - CHEAP BY INTENT. Set `OPENROUTER_API_KEY` alone and that is the whole
+ *   configuration: one key for many cheap models, the same chat-completions
+ *   shape, and the base URL and model both default to OpenRouter's. Any other
+ *   OpenAI-compatible endpoint works the same way — point `OPENAI_BASE_URL` at
+ *   the provider and name the model in `TROVE_CHAT_MODEL` (see .env.example).
+ *   Without OpenRouter the default is `gpt-4o-mini` in the classic body shape:
+ *   cheap, resolves against the DEFAULT base URL, and the shape DeepSeek and
+ *   GLM speak. A provider-specific default would 404 for anyone who set only
+ *   `OPENAI_API_KEY`, and a reasoning-shaped default would 400 against the very
+ *   providers this feature is aimed at.
  * - BOUNDED PROMPT. The model sees the recall pack and nothing else: no graph
  *   dump, no second retrieval, no chat history. The pack is already
  *   token-budgeted by `performRecall`, and CHAT_PACK_CHARS is a backstop for a
@@ -172,10 +175,20 @@ export function parseChatDelta(frame: string): string | null {
  */
 export function createGraphChatModelFromEnv(): GraphChatModel | null {
   if (!isEnabled(process.env.TROVE_GRAPH_CHAT)) return null;
-  const apiKey = process.env.OPENAI_API_KEY;
+  // OpenRouter first when its key is present. It is one key for many cheap
+  // models, it speaks the same chat-completions shape, and it is the reason
+  // this endpoint exists at all: showing the graph off should not cost much.
+  // OPENAI_API_KEY still wins if both are set and OPENAI_BASE_URL is explicit,
+  // so a deployment already pointed somewhere does not get moved silently.
+  const openRouterKey = process.env.OPENROUTER_API_KEY;
+  const explicitBase = process.env.OPENAI_BASE_URL;
+  const useOpenRouter = Boolean(openRouterKey) && (!process.env.OPENAI_API_KEY || !explicitBase);
+  const apiKey = useOpenRouter ? openRouterKey : process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
-  const model = process.env.TROVE_CHAT_MODEL ?? "gpt-4o-mini";
-  const baseUrl = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+  const model = process.env.TROVE_CHAT_MODEL
+    ?? (useOpenRouter ? "meta/muse-spark-1.3-contributor" : "gpt-4o-mini");
+  const baseUrl = (useOpenRouter ? explicitBase ?? "https://openrouter.ai/api/v1" : explicitBase ?? "https://api.openai.com/v1")
+    .replace(/\/$/, "");
   const effort = chatReasoningEffort();
 
   return {
@@ -186,7 +199,14 @@ export function createGraphChatModelFromEnv(): GraphChatModel | null {
       const deadline = AbortSignal.timeout(chatTimeoutMs());
       const response = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${apiKey}`,
+          // OpenRouter attributes requests to an app when these are present and
+          // ignores them otherwise, so they cost nothing to send unconditionally.
+          "http-referer": "https://mytrove.in",
+          "x-title": "Trove",
+        },
         signal: AbortSignal.any([signal, deadline]),
         body: JSON.stringify({
           model,
