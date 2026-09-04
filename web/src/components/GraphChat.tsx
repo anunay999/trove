@@ -74,6 +74,13 @@ import {
  *    mid-sentence breaks the prose apart; Markdown's own citation support gives
  *    a numbered marker that resolves on hover and on click instead.
  *
+ * ALIGNMENT. Every block of an assistant turn hangs off one gutter, and that
+ * gutter is the bubble's text column: the kit's own way of putting custom
+ * content on it is a ghost bubble at `width="100%"` (its
+ * ChatMessageBubbleCustomContent block), so everything in the turn is wrapped
+ * in one — the answer, the model line, the references, the retrieval. The only
+ * indent inside that gutter is a list's own marker column.
+ *
  * SCOPE. This is the one surface in the dashboard built on Astryx rather than
  * the Tailwind/shadcn system the rest of it uses, under our copy of the gothic
  * theme, tuned to sit beside its neighbours (src/themes/gothicTheme.ts). The
@@ -118,6 +125,35 @@ const styles = stylex.create({
    */
   legend: { marginBlockStart: "var(--spacing-4)", textAlign: "start" },
   legendRow: { marginBlockStart: "var(--spacing-2)" },
+  /*
+   * The model line is metadata about the answer, not its last line. The bubble
+   * pulls its metadata slot up by --spacing-1-5 so a timestamp sits tight under
+   * the prose; here that left "gpt-5.6-luna" touching the final bullet and
+   * reading as part of it. Overriding the slot's own margin gives it air.
+   */
+  modelLine: { marginBlockStart: "var(--spacing-4)" },
+  /*
+   * The rhythm of the turn. ChatMessage stacks its children 2px apart at
+   * compact density, which is right for consecutive bubbles from one speaker
+   * and too tight for the four different things this turn stacks: the answer,
+   * the model that wrote it, the references, and the retrieval behind them.
+   * Every block after the answer gets the same step, so the model line reads as
+   * the answer's footer rather than the references' heading.
+   */
+  turnBlock: { marginBlockStart: "var(--spacing-4)" },
+  /*
+   * One gutter for the assistant turn, and Item's own padding inside it.
+   *
+   * Item carries `padding-inline: --spacing-2` and exposes no prop for it, so
+   * everything built on it — a reference row, a stage row — started 8px right
+   * of every other block in the turn. This is Astryx's own answer to that,
+   * lifted from ChatToolCalls' list: keep the padding, so a row's hover
+   * background still overhangs its text, and pull the row back over it with a
+   * matching negative margin so the content starts on the gutter. The bubble's
+   * inline padding absorbs the overhang. Symmetric, so the stage table
+   * translates rather than stretching and moving its three columns apart.
+   */
+  gutterPull: { marginInline: "calc(-1 * var(--spacing-2))" },
   arrival: {
     animationName: arrive,
     animationDuration: "var(--duration-medium)",
@@ -183,12 +219,15 @@ function RingGlyph(props: SVGProps<SVGSVGElement>) {
 function StageTable({
   stages,
   arrival,
+  xstyle,
 }: {
   stages: Stage[];
   arrival: stylex.StyleXStyles;
+  /** Set by the rail, where the table has to line up with the turn's gutter. */
+  xstyle?: stylex.StyleXStyles;
 }) {
   return (
-    <VStack as="ol" gap={0} xstyle={styles.stages}>
+    <VStack as="ol" gap={0} xstyle={[styles.stages, xstyle]}>
       {stages.map((stage) => (
         <Item
           key={stage.key}
@@ -693,7 +732,9 @@ export function GraphChat({
                 <ChatMessage sender="assistant">
                   {/* On a wide viewport these rows are the HUD over the canvas. */}
                   {narrow && stages.length > 0 ? (
-                    <StageTable stages={stages} arrival={arrival} />
+                    <ChatMessageBubble variant="ghost" width="100%">
+                      <StageTable stages={stages} arrival={arrival} xstyle={styles.gutterPull} />
+                    </ChatMessageBubble>
                   ) : null}
 
                   {answer ? (
@@ -704,6 +745,7 @@ export function GraphChat({
                       metadata={
                         model ? (
                           <ChatMessageMetadata
+                            xstyle={styles.modelLine}
                             footer={
                               <Text type="code" size="xsm" color="secondary">
                                 {model}
@@ -730,7 +772,7 @@ export function GraphChat({
                   ) : null}
 
                   {prose.ordered.length > 0 ? (
-                    <ChatMessageBubble variant="ghost" width="100%">
+                    <ChatMessageBubble variant="ghost" width="100%" xstyle={styles.turnBlock}>
                       <List
                         density="compact"
                         header={
@@ -744,19 +786,28 @@ export function GraphChat({
                             key={atom.id}
                             label={atom.title}
                             onClick={() => onFocusNode(atom.id)}
+                            xstyle={styles.gutterPull}
+                            /*
+                             * The node-type swatch rides in front of the title
+                             * it colours. It used to sit in `endContent`, which
+                             * pins it to the row's trailing edge — a quarter of
+                             * a screen from its own label at this rail width,
+                             * where it read as a column of its own rather than
+                             * as this note's colour on the canvas.
+                             */
                             startContent={
-                              <Citation
-                                variant="number"
-                                number={prose.numbers.get(atom.id)!}
-                                source={{ title: atom.title }}
-                              />
-                            }
-                            endContent={
-                              <Icon
-                                icon={DotGlyph}
-                                size="xsm"
-                                xstyle={styles.ink(typeColor(atom.type, dark))}
-                              />
+                              <HStack gap={1.5} vAlign="center">
+                                <Citation
+                                  variant="number"
+                                  number={prose.numbers.get(atom.id)!}
+                                  source={{ title: atom.title }}
+                                />
+                                <Icon
+                                  icon={DotGlyph}
+                                  size="xsm"
+                                  xstyle={styles.ink(typeColor(atom.type, dark))}
+                                />
+                              </HStack>
                             }
                           />
                         ))}
@@ -765,7 +816,7 @@ export function GraphChat({
                   ) : null}
 
                   {notice ? (
-                    <ChatMessageBubble variant="ghost" width="100%">
+                    <ChatMessageBubble variant="ghost" width="100%" xstyle={styles.turnBlock}>
                       <Banner
                         status="info"
                         title={
@@ -779,7 +830,7 @@ export function GraphChat({
                   ) : null}
 
                   {failure ? (
-                    <ChatMessageBubble variant="ghost" width="100%">
+                    <ChatMessageBubble variant="ghost" width="100%" xstyle={styles.turnBlock}>
                       <Banner
                         status="error"
                         title={finish === "dropped" ? "Connection closed" : "Graph chat failed"}
@@ -796,29 +847,41 @@ export function GraphChat({
                     * group header always reads "N tool calls".
                     */}
                   {cited.length > 0 ? (
-                    <VStack gap={0.5} xstyle={arrival}>
-                      <Text type="code" size="xsm" color="secondary">
-                        Cited · {cited.length}
-                      </Text>
-                      <ChatToolCalls defaultIsExpanded calls={cited.map(toolCall)} />
-                    </VStack>
+                    <ChatMessageBubble
+                      variant="ghost"
+                      width="100%"
+                      xstyle={[styles.turnBlock, arrival]}
+                    >
+                      <VStack gap={0.5}>
+                        <Text type="code" size="xsm" color="secondary">
+                          Cited · {cited.length}
+                        </Text>
+                        <ChatToolCalls defaultIsExpanded calls={cited.map(toolCall)} />
+                      </VStack>
+                    </ChatMessageBubble>
                   ) : null}
 
                   {uncited.length > 0 ? (
-                    <VStack gap={0.5} xstyle={arrival}>
-                      <Text type="code" size="xsm" color="secondary">
-                        {cited.length > 0 ? "Retrieved, not cited" : "Retrieved"} ·{" "}
-                        {uncited.length}
-                      </Text>
-                      <ChatToolCalls
-                        defaultIsExpanded={false}
-                        calls={uncited.map(toolCall)}
-                      />
-                    </VStack>
+                    <ChatMessageBubble
+                      variant="ghost"
+                      width="100%"
+                      xstyle={[styles.turnBlock, arrival]}
+                    >
+                      <VStack gap={0.5}>
+                        <Text type="code" size="xsm" color="secondary">
+                          {cited.length > 0 ? "Retrieved, not cited" : "Retrieved"} ·{" "}
+                          {uncited.length}
+                        </Text>
+                        <ChatToolCalls
+                          defaultIsExpanded={false}
+                          calls={uncited.map(toolCall)}
+                        />
+                      </VStack>
+                    </ChatMessageBubble>
                   ) : null}
 
                   {finish === "no_results" && pack?.length === 0 ? (
-                    <ChatMessageBubble variant="ghost" width="100%">
+                    <ChatMessageBubble variant="ghost" width="100%" xstyle={styles.turnBlock}>
                       <Text color="secondary">
                         The graph stayed dark because retrieval returned nothing — no node in it
                         matched, lexically or semantically.
