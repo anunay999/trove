@@ -6,6 +6,8 @@ import {
   citedSlugs,
   createGraphChatModelFromEnv,
   parseChatDelta,
+  emptyAnswerMessage,
+  parseChatFinishReason,
   providerErrorMessage,
   type GraphChatModel,
 } from "../src/chatModel.js";
@@ -66,6 +68,34 @@ function hangingModel(state: { released: boolean }): GraphChatModel {
     },
   };
 }
+
+describe("empty answers", () => {
+  it("names the reasoning budget when the cap was spent before any text", () => {
+    const message = emptyAnswerMessage("meta/muse-spark-1.3", "length", null);
+    assert.match(message, /spent its whole output budget reasoning/);
+    assert.match(message, /TROVE_CHAT_REASONING_EFFORT/);
+  });
+
+  it("points at headroom rather than the setting when the setting is already on", () => {
+    const message = emptyAnswerMessage("meta/muse-spark-1.3", "length", "low");
+    assert.match(message, /Raise TROVE_CHAT_REASONING_EFFORT/);
+  });
+
+  it("still says something for any other empty finish", () => {
+    assert.equal(
+      emptyAnswerMessage("gpt-4o-mini", "content_filter", null),
+      "gpt-4o-mini returned no answer text (finished: content_filter).",
+    );
+    assert.equal(emptyAnswerMessage("gpt-4o-mini", null, null), "gpt-4o-mini returned no answer text.");
+  });
+
+  it("reads finish_reason off a frame, and ignores frames without one", () => {
+    const frame = 'data: {"choices":[{"delta":{},"finish_reason":"length"}]}';
+    assert.equal(parseChatFinishReason(frame), "length");
+    assert.equal(parseChatFinishReason('data: {"choices":[{"delta":{"content":"hi"}}]}'), null);
+    assert.equal(parseChatFinishReason("data: [DONE]"), null);
+  });
+});
 
 describe("provider error messages", () => {
   it("prefers the provider's own message over the raw body", () => {

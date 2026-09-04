@@ -86,6 +86,30 @@ export function chatReasoningEffort(): "minimal" | "low" | "medium" | "high" | n
     : "low";
 }
 
+/**
+ * Why an answer came back empty, said usefully.
+ *
+ * `length` with nothing written means the output cap was consumed before the
+ * first visible token, which on a reasoning model is the cap being too small
+ * for the thinking rather than the answer being long. That is a setting, and
+ * the message names it rather than leaving a blank panel.
+ */
+export function emptyAnswerMessage(
+  model: string,
+  finishReason: string | null,
+  effort: string | null,
+): string {
+  if (finishReason === "length") {
+    return effort
+      ? `${model} spent its whole output budget reasoning and wrote nothing. `
+        + "Raise TROVE_CHAT_REASONING_EFFORT's headroom or lower the recall tokenBudget."
+      : `${model} spent its whole output budget reasoning and wrote nothing. `
+        + "It is a reasoning model: set TROVE_CHAT_REASONING_EFFORT (minimal|low|medium|high) "
+        + "so it is given the larger completion budget reasoning needs.";
+  }
+  return `${model} returned no answer text${finishReason ? ` (finished: ${finishReason})` : ""}.`;
+}
+
 const SYSTEM_PROMPT = [
   "You answer questions from a personal memory graph.",
   "",
@@ -182,6 +206,29 @@ function truncate(value: string): string {
  * what else they put on the wire (reasoning deltas, usage frames), and none of
  * it belongs in the answer.
  */
+/**
+ * The `finish_reason` on one SSE frame, if it carries one.
+ *
+ * Worth reading because "length" is the difference between a model that had
+ * nothing to say and one that was cut off mid-thought — and on a reasoning
+ * model those are the same silence from the outside.
+ */
+export function parseChatFinishReason(frame: string): string | null {
+  const data = frame
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trim())
+    .join("");
+  if (!data || data === "[DONE]") return null;
+  try {
+    const parsed = JSON.parse(data) as { choices?: Array<{ finish_reason?: unknown }> };
+    const reason = parsed.choices?.[0]?.finish_reason;
+    return typeof reason === "string" && reason.length > 0 ? reason : null;
+  } catch {
+    return null;
+  }
+}
+
 export function parseChatDelta(frame: string): string | null {
   const data = frame
     .split("\n")
@@ -265,6 +312,12 @@ export function createGraphChatModelFromEnv(): GraphChatModel | null {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      // A reasoning model can spend its whole output budget thinking and emit
+      // no answer at all: the stream closes cleanly, every frame carries a
+      // reasoning delta and none carries content, and the page renders nothing
+      // with nothing to explain it. Watch for that exact shape.
+      let emitted = 0;
+      let finishReason: string | null = null;
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -275,13 +328,22 @@ export function createGraphChatModelFromEnv(): GraphChatModel | null {
           while (split >= 0) {
             const frame = buffer.slice(0, split);
             buffer = buffer.slice(split + 2);
+            finishReason = parseChatFinishReason(frame) ?? finishReason;
             const delta = parseChatDelta(frame);
-            if (delta !== null) yield delta;
+            if (delta !== null) {
+              emitted += delta.length;
+              yield delta;
+            }
             split = buffer.indexOf("\n\n");
           }
         }
+        finishReason = parseChatFinishReason(buffer) ?? finishReason;
         const tail = parseChatDelta(buffer);
-        if (tail !== null) yield tail;
+        if (tail !== null) {
+          emitted += tail.length;
+          yield tail;
+        }
+        if (emitted === 0) throw new Error(emptyAnswerMessage(model, finishReason, effort));
       } finally {
         // Reached on a normal end AND on generator.return() — the consumer
         // going away must close the upstream connection, not orphan it.
