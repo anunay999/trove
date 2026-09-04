@@ -78,6 +78,15 @@ function NodeIdChip({ id }: { id: string }) {
  * where space is scarce, and hard-capped at half the width — past that the
  * canvas stops being the canvas, which is the whole point of the page.
  */
+/** Middle value, so an outlying atom cannot drag the framing toward itself. */
+function median(values: number[]): number {
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2
+    : (sorted[middle] ?? 0);
+}
+
 const RAIL_BREAKPOINT_PX = 1280;
 const RAIL_FRACTION_NARROW = 0.3;
 const RAIL_FRACTION_WIDE = 0.4;
@@ -371,6 +380,8 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
    * cluster it is describing. Roughly `styles.hud` at eight stages.
    */
   const HUD_HEIGHT_PX = 300;
+  /** Matches the readout card's own width; see the HUD styles in GraphChat. */
+  const HUD_WIDTH_PX = 470;
   const hudOpen = chatOpen && !narrow && chatStages.length > 0;
   /**
    * Ceiling for the post-pack camera. Close enough to read the labels, far
@@ -649,19 +660,25 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
               const maxY = Math.max(...ys);
               const canvasWidth = Math.max(240, size.width - railPx);
               const canvasHeight = chatOpen && narrow ? Math.round(size.height * 0.38) : size.height;
-              // The HUD sits in the bottom-right corner of the canvas, so the
-              // pack is framed in the band above it and then lifted by half
-              // that band — the readout never lands on the cluster it reads.
+              // The HUD is a card in the bottom-right corner, not a full-width
+              // band, so correcting for its whole height pushed the cluster
+              // roughly two and a half times too far up. Weight the lift by how
+              // much of the width it actually covers.
               const hudInset = hudOpen ? HUD_HEIGHT_PX : 0;
-              const usableHeight = Math.max(160, canvasHeight - hudInset);
+              const hudShare = hudOpen ? Math.min(1, HUD_WIDTH_PX / canvasWidth) : 0;
+              const usableHeight = Math.max(160, canvasHeight - hudInset * hudShare);
               const pad = 80;
               const zoom = Math.min(
                 MAX_PACK_ZOOM,
                 Math.max(0.2, (canvasWidth - pad * 2) / Math.max(40, maxX - minX)),
                 Math.max(0.2, (usableHeight - pad * 2) / Math.max(40, maxY - minY)),
               );
+              // Frame the middle of the cluster, not the middle of its bounding
+              // box: one packed atom off in a corner drags a box centre halfway
+              // to itself and leaves the mass everyone is looking at off to a
+              // side. The median moves with the nodes, not with the extremes.
               const ms = reducedMotion ? 0 : 600;
-              graph.centerAt((minX + maxX) / 2, (minY + maxY) / 2 + hudInset / 2 / zoom, ms);
+              graph.centerAt(median(xs), median(ys) + (hudInset * hudShare) / 2 / zoom, ms);
               graph.zoom(zoom, ms);
             }}
             onClose={() => {
