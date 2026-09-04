@@ -119,11 +119,34 @@ const styles = stylex.create({
   /* Node-type ink, straight off the function the canvas paints nodes with. */
   ink: (color: string) => ({ color }),
   /*
+   * EmptyState stacks its title and its description in one flex column with no
+   * gap between them, and that column is not reachable from here — `xstyle`
+   * lands on the outer container and StyleX has no descendant selectors. So the
+   * description is not handed to the component at all: the title stays on it
+   * for the semantic heading, and the description moves into `actions`, above
+   * the legend, where the spacing is ours. The container's own gap is what now
+   * separates the heading from the body, so it is tightened to a text-group gap.
+   */
+  idle: {
+    gap: "var(--spacing-1)",
+    // EmptyState reserves --spacing-8 above and below itself. On a wide
+    // viewport that is invisible — the state floats in a tall empty rail — and
+    // at 375, where the panel is the bottom 62% of the screen, it was 64px the
+    // title needed to stay on screen.
+    paddingBlock: "var(--spacing-4)",
+  },
+  /*
+   * The rail is 40% of the viewport, so a one-line description would otherwise
+   * run its whole width. 360px is EmptyState's own cap on its text group, kept
+   * here so the sentence measures what it measured inside the component.
+   */
+  idleDescription: { maxInlineSize: "22.5rem" },
+  /*
    * The legend is the whole point of this panel before a question is asked, so
    * it gets room to breathe rather than the compact rail treatment: the rail is
    * 40% of the viewport and the empty state was a small block adrift in it.
    */
-  legend: { marginBlockStart: "var(--spacing-4)", textAlign: "start" },
+  legend: { textAlign: "start" },
   legendRow: { marginBlockStart: "var(--spacing-2)" },
   /*
    * The model line is metadata about the answer, not its last line. The bubble
@@ -301,25 +324,42 @@ export function RetrievalHud({
   );
 }
 
-/** Before the first question: what is about to happen, and how to read it. */
-function IdleState({ dark }: { dark: boolean }) {
+/**
+ * Before the first question: what is about to happen, and how to read it.
+ *
+ * The description rides in `actions` rather than on the `description` prop —
+ * see `styles.idle`. Everything the component would have rendered is still
+ * rendered, in the same order, with a gap between the heading and the sentence
+ * under it.
+ */
+function IdleState({ dark, narrow }: { dark: boolean; narrow: boolean }) {
   return (
     <EmptyState
       title="Watch it retrieve"
-      description="Ask a question. The graph dims, then lights up in the order retrieval touches it."
+      xstyle={styles.idle}
       actions={
-        <List density="spacious" xstyle={styles.legend}>
-          {(["seed", "expanded", "packed", "cited"] as const).map((state) => (
-            <ListItem
-              key={state}
-              label={CHAT_STATE_LABEL[state]}
-              xstyle={styles.legendRow}
-              startContent={
-                <Icon icon={RingGlyph} size="sm" xstyle={styles.ink(highlightInk(state, dark))} />
-              }
-            />
-          ))}
-        </List>
+        <VStack gap={narrow ? 3 : 5} hAlign="center">
+          <Text color="secondary" xstyle={styles.idleDescription}>
+            Ask a question. The graph dims, then lights up in the order retrieval touches it.
+          </Text>
+          {/*
+            * The legend gets the room on a rail 40% of a monitor wide, and
+            * closes up where the panel is the bottom 62% of a phone: spacious
+            * rows there pushed the title off the top of the sheet.
+            */}
+          <List density={narrow ? "balanced" : "spacious"} xstyle={styles.legend}>
+            {(["seed", "expanded", "packed", "cited"] as const).map((state) => (
+              <ListItem
+                key={state}
+                label={CHAT_STATE_LABEL[state]}
+                xstyle={narrow ? null : styles.legendRow}
+                startContent={
+                  <Icon icon={RingGlyph} size="sm" xstyle={styles.ink(highlightInk(state, dark))} />
+                }
+              />
+            ))}
+          </List>
+        </VStack>
       }
     />
   );
@@ -709,7 +749,7 @@ export function GraphChat({
 
         <StackItem size="fill" xstyle={styles.fill}>
           <ChatLayout
-            emptyState={<IdleState dark={dark} />}
+            emptyState={<IdleState dark={dark} narrow={narrow} />}
             composer={
               <ChatComposer
                 density="compact"
