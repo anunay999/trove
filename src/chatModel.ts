@@ -86,6 +86,30 @@ export function chatReasoningEffort(): "minimal" | "low" | "medium" | "high" | n
     : "low";
 }
 
+/**
+ * Why an answer came back empty, said usefully.
+ *
+ * `length` with nothing written means the output cap was consumed before the
+ * first visible token, which on a reasoning model is the cap being too small
+ * for the thinking rather than the answer being long. That is a setting, and
+ * the message names it rather than leaving a blank panel.
+ */
+export function emptyAnswerMessage(
+  model: string,
+  finishReason: string | null,
+  effort: string | null,
+): string {
+  if (finishReason === "length") {
+    return effort
+      ? `${model} spent its whole output budget reasoning and wrote nothing. `
+        + "Raise TROVE_CHAT_REASONING_EFFORT's headroom or lower the recall tokenBudget."
+      : `${model} spent its whole output budget reasoning and wrote nothing. `
+        + "It is a reasoning model: set TROVE_CHAT_REASONING_EFFORT (minimal|low|medium|high) "
+        + "so it is given the larger completion budget reasoning needs.";
+  }
+  return `${model} returned no answer text${finishReason ? ` (finished: ${finishReason})` : ""}.`;
+}
+
 const SYSTEM_PROMPT = [
   "You answer questions from a personal memory graph.",
   "",
@@ -147,11 +171,64 @@ export function citedSlugs(answer: string, packSlugs: Iterable<string>): Set<str
 }
 
 /**
+ * The human-readable half of a provider's error body, bounded.
+ *
+ * OpenAI-compatible providers answer failures with `{"error":{"message":...}}`,
+ * OpenRouter sometimes nests a second one under `error.metadata.raw`, and a
+ * gateway in front of either may return plain text or HTML. Take the most
+ * specific string available and cap it: this ends up in a notice a reader sees.
+ */
+export function providerErrorMessage(body: string): string {
+  const text = body.trim();
+  if (!text) return "";
+  try {
+    const parsed = JSON.parse(text) as {
+      error?: { message?: unknown; metadata?: { raw?: unknown } };
+      message?: unknown;
+    };
+    const raw = parsed.error?.metadata?.raw;
+    const candidate = [parsed.error?.message, raw, parsed.message]
+      .find((value) => typeof value === "string" && value.trim().length > 0);
+    if (typeof candidate === "string") return truncate(candidate.trim());
+  } catch {
+    // Not JSON: a gateway's text or HTML. Fall through to the raw body.
+  }
+  return truncate(text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
+}
+
+function truncate(value: string): string {
+  return value.length > 300 ? `${value.slice(0, 300)}…` : value;
+}
+
+/**
  * Pull `delta.content` out of one OpenAI-compatible SSE frame. Returns null for
  * `[DONE]`, keepalives, and anything without a text delta — providers differ in
  * what else they put on the wire (reasoning deltas, usage frames), and none of
  * it belongs in the answer.
  */
+/**
+ * The `finish_reason` on one SSE frame, if it carries one.
+ *
+ * Worth reading because "length" is the difference between a model that had
+ * nothing to say and one that was cut off mid-thought — and on a reasoning
+ * model those are the same silence from the outside.
+ */
+export function parseChatFinishReason(frame: string): string | null {
+  const data = frame
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trim())
+    .join("");
+  if (!data || data === "[DONE]") return null;
+  try {
+    const parsed = JSON.parse(data) as { choices?: Array<{ finish_reason?: unknown }> };
+    const reason = parsed.choices?.[0]?.finish_reason;
+    return typeof reason === "string" && reason.length > 0 ? reason : null;
+  } catch {
+    return null;
+  }
+}
+
 export function parseChatDelta(frame: string): string | null {
   const data = frame
     .split("\n")
@@ -221,12 +298,26 @@ export function createGraphChatModelFromEnv(): GraphChatModel | null {
         }),
       });
       if (!response.ok || !response.body) {
-        throw new Error(`graph chat: model responded ${response.status}`);
+        // Carry the provider's own words. A bare status is undiagnosable: an
+        // OpenRouter 403 is usually a data policy that leaves no endpoint for
+        // the chosen model — its free and "contributor" tiers require prompt
+        // logging to be enabled in the account's privacy settings — but that
+        // reads exactly like a revoked key until you can see the body.
+        const detail = providerErrorMessage(await response.text().catch(() => ""));
+        throw new Error(
+          `graph chat: ${model} responded ${response.status}${detail ? ` — ${detail}` : ""}`,
+        );
       }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      // A reasoning model can spend its whole output budget thinking and emit
+      // no answer at all: the stream closes cleanly, every frame carries a
+      // reasoning delta and none carries content, and the page renders nothing
+      // with nothing to explain it. Watch for that exact shape.
+      let emitted = 0;
+      let finishReason: string | null = null;
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -237,13 +328,22 @@ export function createGraphChatModelFromEnv(): GraphChatModel | null {
           while (split >= 0) {
             const frame = buffer.slice(0, split);
             buffer = buffer.slice(split + 2);
+            finishReason = parseChatFinishReason(frame) ?? finishReason;
             const delta = parseChatDelta(frame);
-            if (delta !== null) yield delta;
+            if (delta !== null) {
+              emitted += delta.length;
+              yield delta;
+            }
             split = buffer.indexOf("\n\n");
           }
         }
+        finishReason = parseChatFinishReason(buffer) ?? finishReason;
         const tail = parseChatDelta(buffer);
-        if (tail !== null) yield tail;
+        if (tail !== null) {
+          emitted += tail.length;
+          yield tail;
+        }
+        if (emitted === 0) throw new Error(emptyAnswerMessage(model, finishReason, effort));
       } finally {
         // Reached on a normal end AND on generator.return() — the consumer
         // going away must close the upstream connection, not orphan it.

@@ -6,6 +6,9 @@ import {
   citedSlugs,
   createGraphChatModelFromEnv,
   parseChatDelta,
+  emptyAnswerMessage,
+  parseChatFinishReason,
+  providerErrorMessage,
   type GraphChatModel,
 } from "../src/chatModel.js";
 import { encodeChatEvent, graphChatResponse, runGraphChat, type GraphChatEvent } from "../src/graphChat.js";
@@ -65,6 +68,60 @@ function hangingModel(state: { released: boolean }): GraphChatModel {
     },
   };
 }
+
+describe("empty answers", () => {
+  it("names the reasoning budget when the cap was spent before any text", () => {
+    const message = emptyAnswerMessage("meta/muse-spark-1.3", "length", null);
+    assert.match(message, /spent its whole output budget reasoning/);
+    assert.match(message, /TROVE_CHAT_REASONING_EFFORT/);
+  });
+
+  it("points at headroom rather than the setting when the setting is already on", () => {
+    const message = emptyAnswerMessage("meta/muse-spark-1.3", "length", "low");
+    assert.match(message, /Raise TROVE_CHAT_REASONING_EFFORT/);
+  });
+
+  it("still says something for any other empty finish", () => {
+    assert.equal(
+      emptyAnswerMessage("gpt-4o-mini", "content_filter", null),
+      "gpt-4o-mini returned no answer text (finished: content_filter).",
+    );
+    assert.equal(emptyAnswerMessage("gpt-4o-mini", null, null), "gpt-4o-mini returned no answer text.");
+  });
+
+  it("reads finish_reason off a frame, and ignores frames without one", () => {
+    const frame = 'data: {"choices":[{"delta":{},"finish_reason":"length"}]}';
+    assert.equal(parseChatFinishReason(frame), "length");
+    assert.equal(parseChatFinishReason('data: {"choices":[{"delta":{"content":"hi"}}]}'), null);
+    assert.equal(parseChatFinishReason("data: [DONE]"), null);
+  });
+});
+
+describe("provider error messages", () => {
+  it("prefers the provider's own message over the raw body", () => {
+    const body = JSON.stringify({ error: { message: "No endpoints found matching your data policy." } });
+    assert.equal(providerErrorMessage(body), "No endpoints found matching your data policy.");
+  });
+
+  it("reaches the nested raw message OpenRouter sometimes wraps", () => {
+    const body = JSON.stringify({ error: { message: "Provider returned error", metadata: { raw: "model requires prompt logging" } } });
+    assert.equal(providerErrorMessage(body), "Provider returned error");
+  });
+
+  it("falls back to text, stripped of markup, for a gateway that answers HTML", () => {
+    assert.equal(providerErrorMessage("<html><body>403 Forbidden</body></html>"), "403 Forbidden");
+  });
+
+  it("is empty for an empty body, so the caller shows the status alone", () => {
+    assert.equal(providerErrorMessage("   "), "");
+  });
+
+  it("caps a long body so a notice stays readable", () => {
+    const long = providerErrorMessage(JSON.stringify({ error: { message: "x".repeat(500) } }));
+    assert.equal(long.length, 301);
+    assert.ok(long.endsWith("\u2026"));
+  });
+});
 
 describe("graph chat", () => {
   const { store, context, stamp } = suiteStore("graph-chat");

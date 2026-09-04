@@ -224,3 +224,33 @@ export function useRetrievalReplay<TStage>(options: {
 
   return { begin, push, cancel, isReplaying };
 }
+
+/** The shape progressPhrase needs; GraphChat's Stage satisfies it. */
+export type ProgressStage = { key: string; label: string };
+
+/**
+ * What to say while the answer is still on its way.
+ *
+ * A question takes long enough that silence reads as a hang, so the panel
+ * names the phase it is in — the way a chat UI says "Thinking" — and keeps
+ * saying it until the first words of the answer render.
+ *
+ * The phrase is derived from the last stage the SERVER sent (or the last one
+ * the paced replay has released, which is the same list), so it can never
+ * claim a step that has not happened. An unrecognised label falls back to the
+ * label itself rather than to something invented.
+ */
+export function progressPhrase(stages: ProgressStage[], model: string | null): string {
+  const last = stages.at(-1);
+  if (!last) return "Retrieving";
+  if (last.key.startsWith("seeds:")) return "Searching";
+  switch (last.key) {
+    case "fused": return "Fusing what search found";
+    case "expand": return "Traversing the graph";
+    case "rank": return "Ranking what it reached";
+    case "pack": return "Packing the answer's context";
+    case "answer": return model ? `Answering with ${model}` : "Answering";
+    default: return last.label;
+  }
+
+}
