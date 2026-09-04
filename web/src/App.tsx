@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { AuthenticateWithRedirectCallback } from "@clerk/clerk-react";
 import { GITHUB_PATH } from "@/lib/brandIcons";
 import { clearLayout, layoutOwnerKey } from "@/lib/graphLayoutCache";
@@ -100,13 +100,27 @@ export default function App() {
     window.localStorage.setItem("trove_theme", dark ? "dark" : "light");
   }, [dark]);
 
+  /**
+   * Only the newest load may write state.
+   *
+   * The first load fires at mount, before Clerk has restored the session, so on
+   * a hosted app it 401s. The session then lands and loads again, with a token,
+   * and succeeds — but the first request's rejection can arrive AFTER that
+   * success and overwrite it, leaving `error` set on a signed-in page. Since a
+   * 401 sends the shell to the connect form, the result was being asked for an
+   * API key immediately after signing in with GitHub.
+   */
+  const loadSeq = useRef(0);
   const load = useCallback(async () => {
+    const seq = (loadSeq.current += 1);
     setError(null);
     try {
       const [statsResult, graphResult] = await Promise.all([fetchStats(), fetchGraph()]);
+      if (seq !== loadSeq.current) return;
       setStats(statsResult);
       setSnapshot(graphResult);
     } catch (cause) {
+      if (seq !== loadSeq.current) return;
       setError(cause instanceof Error ? cause.message : "Failed to load Trove data.");
     }
   }, []);
@@ -372,7 +386,7 @@ export default function App() {
         </div>
       ) : isWaitlisted ? (
         <WaitlistGate email={identity?.email ?? null} dark={dark} />
-      ) : showConnect || (error && error.includes("401")) ? (
+      ) : showConnect || (!signedIn && error?.includes("401")) ? (
         <div className="mx-auto mt-24 w-full max-w-sm rounded-lg border bg-card p-8">
           <h2 className="font-serif text-xl">Connect to Trove</h2>
           <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
