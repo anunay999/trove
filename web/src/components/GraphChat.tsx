@@ -111,7 +111,13 @@ const styles = stylex.create({
   fill: { display: "flex", flexDirection: "column", minHeight: 0 },
   /* Node-type ink, straight off the function the canvas paints nodes with. */
   ink: (color: string) => ({ color }),
-  legendRow: { marginBlockStart: "var(--spacing-1)" },
+  /*
+   * The legend is the whole point of this panel before a question is asked, so
+   * it gets room to breathe rather than the compact rail treatment: the rail is
+   * 40% of the viewport and the empty state was a small block adrift in it.
+   */
+  legend: { marginBlockStart: "var(--spacing-4)", textAlign: "start" },
+  legendRow: { marginBlockStart: "var(--spacing-2)" },
   arrival: {
     animationName: arrive,
     animationDuration: "var(--duration-medium)",
@@ -260,18 +266,17 @@ export function RetrievalHud({
 function IdleState({ dark }: { dark: boolean }) {
   return (
     <EmptyState
-      isCompact
       title="Watch it retrieve"
-      description="Every node dims, then lights up as retrieval touches it: search hits first, then whatever graph traversal reaches from them, then the notes that fit the answer's token budget."
+      description="Ask a question. The graph dims, then lights up in the order retrieval touches it."
       actions={
-        <List density="compact">
+        <List density="spacious" xstyle={styles.legend}>
           {(["seed", "expanded", "packed", "cited"] as const).map((state) => (
             <ListItem
               key={state}
               label={CHAT_STATE_LABEL[state]}
               xstyle={styles.legendRow}
               startContent={
-                <Icon icon={RingGlyph} size="xsm" xstyle={styles.ink(highlightInk(state, dark))} />
+                <Icon icon={RingGlyph} size="sm" xstyle={styles.ink(highlightInk(state, dark))} />
               }
             />
           ))}
