@@ -69,6 +69,39 @@ function NodeIdChip({ id }: { id: string }) {
   );
 }
 
+/**
+ * How wide the chat rail starts, and how wide it is ever allowed to be.
+ *
+ * A fixed pixel width cannot serve both ends: 380px wrapped the prose every
+ * few words on a laptop, and 40% of a large monitor is a rail wider than the
+ * graph it is meant to accompany. So it is a fraction of the viewport, smaller
+ * where space is scarce, and hard-capped at half the width — past that the
+ * canvas stops being the canvas, which is the whole point of the page.
+ */
+const RAIL_BREAKPOINT_PX = 1280;
+const RAIL_FRACTION_NARROW = 0.3;
+const RAIL_FRACTION_WIDE = 0.4;
+const RAIL_MAX_FRACTION = 0.5;
+const RAIL_MIN_PX = 320;
+
+function railSizing(): { defaultSize: number; minSizePx: number; maxSizePx: number; autoSaveId: string } {
+  const viewport = window.innerWidth;
+  const fraction = viewport >= RAIL_BREAKPOINT_PX ? RAIL_FRACTION_WIDE : RAIL_FRACTION_NARROW;
+  const ceiling = Math.round(viewport * RAIL_MAX_FRACTION);
+  // The floor is a readability minimum, but it must never beat the ceiling on a
+  // small screen, or the rail would open past half the width to satisfy it.
+  const floor = Math.min(RAIL_MIN_PX, ceiling);
+  return {
+    defaultSize: Math.round(Math.min(ceiling, Math.max(floor, viewport * fraction))),
+    minSizePx: floor,
+    maxSizePx: ceiling,
+    // Moves with the sizing: a width dragged under the old rules is a
+    // preference for a rule that no longer exists, and a stored 60% would
+    // otherwise outlive the cap that exists to prevent it.
+    autoSaveId: "trove:graph-chat-rail:v3",
+  };
+}
+
 export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; dark: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -99,18 +132,7 @@ export function GraphView({ snapshot, dark }: { snapshot: GraphSnapshot | null; 
    * it settles on is what the canvas is sized against and what the camera
    * subtracts when it centres a pack.
    */
-  const rail = useResizable({
-    // 40% of the viewport, not a fixed 380px: the answer, its references and the
-    // retrieved list are the reading surface, and at 380 the prose wrapped every
-    // few words. Clamped so it stays a companion to the canvas on a wide monitor
-    // and still leaves the graph room on a small one.
-    defaultSize: Math.round(Math.min(880, Math.max(360, window.innerWidth * 0.4))),
-    minSizePx: 320,
-    maxSizePx: 880,
-    // Bumped with the default: the old key holds a 380 that would otherwise
-    // survive as a saved preference nobody set on purpose.
-    autoSaveId: "trove:graph-chat-rail:v2",
-  });
+  const rail = useResizable(railSizing());
 
   useEffect(() => {
     const element = containerRef.current;

@@ -22,6 +22,7 @@ import { List, ListItem } from "@astryxdesign/core/List";
 import { Markdown } from "@astryxdesign/core/Markdown";
 import { ResizeHandle, type ResizableProps } from "@astryxdesign/core/Resizable";
 import { HStack, StackItem, VStack } from "@astryxdesign/core/Stack";
+import { Spinner } from "@astryxdesign/core/Spinner";
 import { StatusDot } from "@astryxdesign/core/StatusDot";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { Theme } from "@astryxdesign/core/theme";
@@ -310,11 +311,20 @@ export function RetrievalHud({
     <Theme theme={gothicTheme} mode={dark ? "dark" : "light"}>
       <VStack gap={1} padding={3} xstyle={styles.hud}>
         <HStack gap={1.5} vAlign="center">
-          <StatusDot
-            variant={running ? "accent" : "neutral"}
-            label={running ? "Retrieving" : "Retrieval finished"}
-            isPulsing={running && !reduced}
-          />
+          {/*
+            A spinner while it runs, a dot once it has stopped. A pulsing dot
+            reads as decoration next to a table of numbers that is still
+            growing; a spinner is the one shape everyone already reads as
+            "not finished". Reduced motion keeps the dot, which does not spin.
+          */}
+          {running && !reduced ? (
+            <Spinner size="sm" shade="inherit" aria-label="Retrieving" />
+          ) : (
+            <StatusDot
+              variant={running ? "accent" : "neutral"}
+              label={running ? "Retrieving" : "Retrieval finished"}
+            />
+          )}
           <Text type="code" size="xsm" color="secondary">
             RETRIEVAL
           </Text>
@@ -730,6 +740,11 @@ export function GraphChat({
             direction="horizontal"
             position="overlay"
             isReversed
+            // Discoverable at rest, not on hover: the canvas and the rail share
+            // one dark ground, so without a grip and a divider the boundary
+            // reads as a painted line rather than something you can pull.
+            isAlwaysVisible
+            hasDivider
             label="Resize the chat rail"
             resizable={resizable}
           />
