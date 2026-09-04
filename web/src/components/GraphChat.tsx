@@ -671,11 +671,10 @@ export function GraphChat({
   );
 
   /**
-   * The retrieved notes, as the tool calls they are: what recall reached for,
-   * what it cost, and — behind the row — the summary that went into the pack
-   * and a way onto the canvas. Cited first and open, because those are the ones
-   * the answer leaned on; the rest folded, because twenty rows reading "hit" is
-   * a wall rather than information.
+   * The notes the answer cited, as the tool calls they are: what recall reached
+   * for, what it cost, and — behind the row — the summary that went into the
+   * pack and a way onto the canvas. No "cited" pill on the rows any more: every
+   * row in this group is cited, so the pill said the same thing eight times.
    */
   const toolCall = useCallback(
     (atom: ChatPackAtom) => ({
@@ -683,7 +682,6 @@ export function GraphChat({
       name: atom.title,
       target: atom.hops === 0 ? "hit" : `${atom.hops} hop`,
       status: "complete" as const,
-      ...(citedIds.has(atom.id) ? { node: "cited" } : {}),
       resultDetail: (
         <VStack gap={2}>
           <Text type="supporting">{atom.summary ?? atom.title}</Text>
@@ -701,11 +699,10 @@ export function GraphChat({
         </VStack>
       ),
     }),
-    [citedIds, onFocusNode],
+    [onFocusNode],
   );
 
   const cited = (pack ?? []).filter((atom) => citedIds.has(atom.id));
-  const uncited = (pack ?? []).filter((atom) => !citedIds.has(atom.id));
 
   /** Honour the OS setting: states still change, the transitions just stop. */
   const arrival = reduced ? null : styles.arrival;
@@ -880,11 +877,15 @@ export function GraphChat({
                   ) : null}
 
                   {/*
-                    * Two groups, because they answer different questions: what
-                    * the answer leaned on, and what recall reached for anyway.
-                    * The captions are ours — ChatToolCalls accepts a `label`
-                    * but v0.5.2 destructures it and never renders it, so the
-                    * group header always reads "N tool calls".
+                    * One group: the notes the answer leaned on. What recall
+                    * reached for and did not cite used to sit under it in a
+                    * second group, and it is gone — the count of everything
+                    * retrieval packed is already in the stage list, as
+                    * `packed · N atoms`, and every node retrieval touched is
+                    * still lit on the canvas. The caption is ours —
+                    * ChatToolCalls accepts a `label` but v0.5.2 destructures it
+                    * and never renders it, so the group's own header always
+                    * reads "N tool calls".
                     */}
                   {cited.length > 0 ? (
                     <ChatMessageBubble
@@ -897,25 +898,6 @@ export function GraphChat({
                           Cited · {cited.length}
                         </Text>
                         <ChatToolCalls defaultIsExpanded calls={cited.map(toolCall)} />
-                      </VStack>
-                    </ChatMessageBubble>
-                  ) : null}
-
-                  {uncited.length > 0 ? (
-                    <ChatMessageBubble
-                      variant="ghost"
-                      width="100%"
-                      xstyle={[styles.turnBlock, arrival]}
-                    >
-                      <VStack gap={0.5}>
-                        <Text type="code" size="xsm" color="secondary">
-                          {cited.length > 0 ? "Retrieved, not cited" : "Retrieved"} ·{" "}
-                          {uncited.length}
-                        </Text>
-                        <ChatToolCalls
-                          defaultIsExpanded={false}
-                          calls={uncited.map(toolCall)}
-                        />
                       </VStack>
                     </ChatMessageBubble>
                   ) : null}
