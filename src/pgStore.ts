@@ -3352,7 +3352,27 @@ export class PgGraphStore implements GraphStore {
       ? "unnest($4::uuid[], $5::text[], $6::text[], $7::uuid[]) as t(owner_id, embedding, content_sha256, tenant_id)"
       : "unnest($4::uuid[], $5::text[], $6::text[]) as t(owner_id, embedding, content_sha256)";
 
-    const INSERT_CHUNK = 256;
+    /**
+     * Rows per INSERT — a TIMEOUT BUDGET, not a batching preference.
+     *
+     * Batching replaced 256 single-row inserts with one statement per chunk,
+     * and at 256 a whole job's inserts became a single statement. Every row
+     * costs an HNSW index insertion, measured in production at ~0.43s/vector,
+     * which put that statement at ~114s against a 2-minute statement_timeout —
+     * 95% of the budget. It duly began failing ("canceling statement due to
+     * statement timeout"), and the drain stalled in a retry loop with the
+     * missing count flat.
+     *
+     * Row-at-a-time was slower in aggregate and never approached the limit,
+     * because each row carried its own budget. Batching bought throughput and,
+     * unnoticed, a cliff: the failure mode moved from SLOW to CANNOT FINISH,
+     * which is strictly worse.
+     *
+     * 64 is ~28s per statement — roughly 4x headroom — and keeps most of the
+     * batching win. Lower it as the table grows and HNSW maintenance slows;
+     * the number that matters is seconds per statement, not rows.
+     */
+    const INSERT_CHUNK = 64;
     const client = await this.pool.connect();
     try {
       await client.query("begin");
