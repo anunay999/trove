@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { observe, type Recorder } from "./tracing.js";
 
 export type EmbeddingProvider = {
   model: string;
@@ -27,6 +28,8 @@ export function createEmbeddingProviderFromEnv(): EmbeddingProvider | null {
 
 /** Per-request ceiling for an embeddings call. See the fetch in OpenAiEmbeddingProvider. */
 const EMBEDDING_TIMEOUT_MS = 60_000;
+/** How much of each embedded text a trace carries. Enough to recognise it. */
+const EMBEDDING_TRACE_CHARS = 300;
 
 function embeddingTimeoutMs(): number {
   return EMBEDDING_TIMEOUT_MS;
@@ -142,6 +145,21 @@ class OpenAiEmbeddingProvider implements EmbeddingProvider {
     // job of that kind. That is exactly how embedding refresh froze in
     // production for six days. Failing is recoverable (the job retries with
     // backoff); hanging is not.
+    return observe("embed", {
+      asType: "embedding",
+      // The texts themselves, not a count: an embedding you cannot see the
+      // input of is untraceable when a vector comes back wrong. Truncated,
+      // because a chunk can be thousands of characters and the trace is for
+      // recognising the input, not for storing a second copy of the corpus.
+      input: normalized.map((text) => text.slice(0, EMBEDDING_TRACE_CHARS)),
+      metadata: { model: this.model, dimensions: this.dimensions, texts: normalized.length },
+    }, async (recorder) => {
+      recorder.update({ model: this.model });
+      return this.embedOnce(input, normalized, recorder);
+    });
+  }
+
+  private async embedOnce(input: string[], normalized: string[], recorder: Recorder): Promise<number[][]> {
     const response = await fetch(`${this.baseUrl}/embeddings`, {
       method: "POST",
       headers: {
@@ -162,7 +180,14 @@ class OpenAiEmbeddingProvider implements EmbeddingProvider {
 
     const json = await response.json() as {
       data?: Array<{ index: number; embedding: number[] }>;
+      usage?: { prompt_tokens?: number };
     };
+    const promptTokens = Number(json.usage?.prompt_tokens);
+    if (Number.isFinite(promptTokens)) {
+      // Embeddings bill on input alone; reporting a zero output keeps the cost
+      // arithmetic honest rather than leaving the field absent.
+      recorder.update({ usageDetails: { input: promptTokens, output: 0 } });
+    }
     const embeddings = [...(json.data ?? [])].sort((left, right) => left.index - right.index).map((item) => item.embedding);
     if (embeddings.length !== input.length) {
       throw new Error(`Embedding response length mismatch: expected ${input.length}, got ${embeddings.length}.`);

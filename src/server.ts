@@ -62,6 +62,7 @@ import { createGraphStore } from "./createStore.js";
 import { EdgeValidityConflictError, isSmokeEvent } from "./graphCore.js";
 import { sourceDaySeries } from "./sourceStats.js";
 import { jobResultAs } from "./jobResults.js";
+import { flushTracing, startTracing, tracingEnabled } from "./tracing.js";
 import { graphChatResponse } from "./graphChat.js";
 import { startJobWorker } from "./jobWorker.js";
 import { createTroveMcpServer } from "./mcpTools.js";
@@ -790,6 +791,13 @@ for (const path of DASHBOARD_PATHS) {
 
 const port = Number(process.env.PORT ?? "8787");
 
+// Before anything serves. The exporter has to be registered ahead of the first
+// traced call or that call opens against a no-op tracer and is lost — and the
+// first request can arrive the instant the socket is listening.
+void startTracing().then(() => {
+  if (tracingEnabled()) console.log("Langfuse tracing enabled.");
+});
+
 serve({ fetch: app.fetch, port }, (info) => {
   console.log(`Trove listening on http://localhost:${info.port} (${driver})`);
 });
@@ -822,6 +830,10 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
     void (async () => {
       await worker?.stop();
       if ("close" in store && typeof store.close === "function") await store.close();
+      // Spans are batched, so whatever is still buffered dies with the process
+      // unless the exporter is drained here — and the last minute before a
+      // deploy is exactly the window you most want to see.
+      await flushTracing();
     })().catch(() => undefined).finally(() => process.exit(0));
   });
 }

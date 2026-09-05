@@ -113,6 +113,7 @@ import {
 } from "./graphCore.js";
 import { performReconcileNode, type ReconcileJudge } from "./reconcile.js";
 import { runRecallSelfTest } from "./recallSelfTest.js";
+import { observe, withTraceAttributes } from "./tracing.js";
 import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
 
@@ -1426,7 +1427,7 @@ export class InMemoryGraphStore implements GraphStore {
     this.graphJobs.set(running.id, running);
 
     try {
-      const result = await this.performJob(running);
+      const result = await this.performJobTraced(running);
       const finishedAt = new Date().toISOString();
       const succeeded: GraphJob = {
         ...running,
@@ -1456,6 +1457,28 @@ export class InMemoryGraphStore implements GraphStore {
 
   health(): { ok: true } {
     return { ok: true };
+  }
+
+  /**
+   * One trace per job. Background LLM work — the reconcile judge, an embedding
+   * batch — would otherwise arrive in Langfuse as orphan generations with no
+   * idea which job asked for them or how long the job itself took. The owner
+   * rides along so a cost view can be read per account, and the kind becomes
+   * the trace name so one job type can be compared with itself over time.
+   */
+  private async performJobTraced(job: GraphJob): Promise<GraphJobResult> {
+    const ownerId = typeof job.payload.ownerId === "string" ? job.payload.ownerId : undefined;
+    return withTraceAttributes(
+      { ...(ownerId ? { userId: ownerId } : {}), tags: ["job", job.kind] },
+      () => observe(`job:${job.kind}`, {
+        asType: "span",
+        input: { kind: job.kind, jobId: job.id, payload: job.payload },
+      }, async (span) => {
+        const result = await this.performJob(job);
+        span.update({ output: result });
+        return result;
+      }),
+    );
   }
 
   private async performJob(job: GraphJob): Promise<GraphJobResult> {
