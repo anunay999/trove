@@ -96,7 +96,7 @@ export type ReconcileResult = {
   judge: string;
   candidates: ReconcileCandidateResult[];
   supersedesEdgesCreated: Array<{ fromNodeId: string; toNodeId: string }>;
-  flags: Array<{ code: ReconcileFlagCode | "judge_budget_exceeded"; nodeId: string; otherNodeId: string; detail: string }>;
+  flags: Array<{ code: ReconcileFlagCode | "judge_budget_exceeded" | "judge_unavailable"; nodeId: string; otherNodeId: string; detail: string }>;
   /** LLM judge calls this job made: 0 or 1 under the batched policy. The
    *  number backlog #27 exists to drive down — reported, not assumed. */
   judgeCalls: number;
@@ -446,12 +446,38 @@ export async function performReconcileNode(
     if (judge) {
       const ownerKey = input.ownerId ?? "global";
       if (consumeJudgeBudget(ownerKey)) {
-        const judgments = await judge({ newNode: node, candidates: toJudge.map((entry) => entry.node) });
-        result.judgeCalls = 1;
-        for (const [i, entry] of toJudge.entries()) {
-          const judgment = judgments[i] ?? { ...SAFE_DEFAULT };
-          record(entry, judgment, "judge");
-          await applyActions(entry, judgment);
+        // FAIL OPEN, the same contract the reranker keeps. A judge call is a
+        // network call to a model id somebody configured, so it can 404 on a
+        // provider that does not serve it, rate-limit, or time out — and this
+        // runs on EVERY write. An exception here used to escape and fail the
+        // reconcile job, which then retries, which is how a queue wedges. The
+        // fallback is not a special degraded mode: it is exactly what runs when
+        // no judge is configured at all, plus a flag saying why.
+        let judgments: ReconcileJudgment[] | null = null;
+        try {
+          judgments = await judge({ newNode: node, candidates: toJudge.map((entry) => entry.node) });
+        } catch (cause) {
+          result.judge = "heuristic";
+          result.flags.push({
+            code: "judge_unavailable",
+            nodeId: node.id,
+            otherNodeId: node.id,
+            detail: cause instanceof Error ? cause.message : "judge call failed",
+          });
+        }
+        if (judgments) {
+          result.judgeCalls = 1;
+          for (const [i, entry] of toJudge.entries()) {
+            const judgment = judgments[i] ?? { ...SAFE_DEFAULT };
+            record(entry, judgment, "judge");
+            await applyActions(entry, judgment);
+          }
+        } else {
+          for (const entry of toJudge) {
+            const judgment = heuristicJudgment(node, entry.node);
+            record(entry, judgment, "heuristic");
+            await applyActions(entry, judgment);
+          }
         }
       } else {
         // Budget spent: nothing is judged, and the result says so plainly.
@@ -493,8 +519,9 @@ export async function performReconcileNode(
  * set is written empty, which also clears anything an earlier judged pass left
  * on this node.
  *
- * A budget-exhausted pass judged nothing, so it is not evidence that the
- * node's earlier flags are stale: it writes nothing rather than clearing them.
+ * A pass that judged nothing — budget exhausted, or the judge unreachable —
+ * is not evidence that the node's earlier flags are stale: it writes nothing
+ * rather than clearing them.
  */
 async function persistFlags(
   store: GraphStore,
@@ -503,10 +530,11 @@ async function persistFlags(
   judged: boolean,
   context: GraphOperationContext | undefined,
 ): Promise<void> {
-  if (judged && result.flags.some((flag) => flag.code === "judge_budget_exceeded")) return;
+  const unjudged = new Set(["judge_budget_exceeded", "judge_unavailable"]);
+  if (judged && result.flags.some((flag) => unjudged.has(flag.code))) return;
   const flags = judged
     ? result.flags
-      .filter((flag): flag is typeof flag & { code: ReconcileFlagCode } => flag.code !== "judge_budget_exceeded")
+      .filter((flag): flag is typeof flag & { code: ReconcileFlagCode } => !unjudged.has(flag.code))
       .map((flag) => ({ code: flag.code, otherNodeId: flag.otherNodeId, detail: flag.detail }))
     : [];
   await store.recordReconcileFlags({ nodeId, flags }, context);

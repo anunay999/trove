@@ -389,6 +389,40 @@ describe("reconcile: distance gate (backlog #27)", () => {
     assert.equal(gated?.distance, 0.5);
   });
 
+  it("a judge that throws degrades to the heuristic instead of failing the write", async () => {
+    // This runs on EVERY write, against a model id somebody configured, so it
+    // can 404 on a provider that does not serve it. An exception escaping here
+    // fails the reconcile job, which retries — and that is how a queue wedges.
+    // Now that the judge is on by default, this is the difference between a
+    // misconfigured model being a flag and being an outage.
+    const near = { ...fakeNode("near", "Near neighbour"), distance: 0.1 };
+    let persisted: unknown = "never called";
+    const store = {
+      read: async () => fakeNode("new-node", "New fact title"),
+      search: async (input: { mode?: string }) =>
+        input.mode === "semantic" ? { nodes: [near], textUnits: [] } : { nodes: [], textUnits: [] },
+      link: async () => null,
+      recordReconcileFlags: async (input: unknown) => { persisted = input; },
+    } as unknown as GraphStore;
+
+    const result = await performReconcileNode(store, { nodeId: "new-node" }, async () => {
+      throw new Error("reconcile judge: OpenAI 404");
+    });
+
+    assert.equal(result.status, "reconciled", "the write must not fail with the judge");
+    assert.equal(result.judgeCalls, 0, "a throw is not a judge call");
+    assert.equal(result.judge, "heuristic", "the result must say what actually ran");
+    assert.equal(
+      result.candidates.find((candidate) => candidate.nodeId === "near")?.via,
+      "heuristic",
+      "candidates fall back to exactly what runs with no judge configured",
+    );
+    const flag = result.flags.find((entry) => entry.code === "judge_unavailable");
+    assert.ok(flag, "the failure is recorded, not swallowed");
+    assert.match(flag.detail, /404/, "the flag carries the provider's own reason");
+    assert.equal(persisted, "never called", "a pass that judged nothing must not clear earlier flags");
+  });
+
   it("a write with no near neighbour makes ZERO judge calls", async () => {
     let calls = 0;
     const result = await performReconcileNode(
