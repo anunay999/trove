@@ -272,15 +272,23 @@ export default function App() {
       }`}
     >
       <header className="sticky top-0 z-20 shrink-0 border-b bg-background/90 backdrop-blur">
-        {/* Five tabs and the account controls do not fit one 375px line. Below
-            sm the tab row wraps to a line of its own (order-last, full width,
-            bled to the edges so it scrolls past the padding); from sm it sits
-            back inline and absorbs any remaining squeeze by scrolling, so the
-            document itself never gets a horizontal scrollbar. */}
+        {/* Three regions, and the outer two carry the centring. The tabs used to
+            take `flex-1` and start at their own left edge, which pinned them
+            against the wordmark and left the whole right half empty. Giving the
+            brand and the controls `flex-1` instead makes them equal, so the
+            nav — sized to its content — sits on the header's true centre
+            whatever the tab count, and still lands right when there is no nav
+            at all (signed out), where two equal siblings simply split the bar.
+
+            Below sm none of that applies: five tabs and the account controls do
+            not fit one 375px line, so the tab row wraps to its own (order-last,
+            full width, bled to the edges so it scrolls past the padding). From
+            sm it sits back inline and absorbs any remaining squeeze by
+            scrolling, so the document never gets a horizontal scrollbar. */}
         <div className="mx-auto flex min-h-14 w-full max-w-7xl flex-wrap items-center gap-x-6 gap-y-2 px-6 py-2 sm:flex-nowrap sm:py-0 2xl:max-w-[88rem]">
-          <span className="shrink-0 font-serif text-xl tracking-tight">Trove</span>
+          <span className="shrink-0 font-serif text-xl tracking-tight sm:flex-1">Trove</span>
           {dashboardReady && (
-            <nav className="order-last -mx-6 flex w-[calc(100%+3rem)] items-center gap-1 overflow-x-auto px-6 py-1 [scrollbar-width:none] sm:order-none sm:mx-0 sm:w-auto sm:min-w-0 sm:flex-1 sm:px-0 [&::-webkit-scrollbar]:hidden">
+            <nav className="order-last -mx-6 flex w-[calc(100%+3rem)] items-center gap-1 overflow-x-auto px-6 py-1 [scrollbar-width:none] sm:order-none sm:mx-0 sm:w-auto sm:min-w-0 sm:shrink sm:justify-center sm:px-0 [&::-webkit-scrollbar]:hidden">
               {tabs.map((candidate) => (
                 <button
                   key={candidate}
@@ -297,7 +305,7 @@ export default function App() {
               ))}
             </nav>
           )}
-          <div className="ml-auto flex shrink-0 items-center gap-2 sm:gap-3">
+          <div className="ml-auto flex shrink-0 items-center gap-2 sm:gap-3 sm:flex-1 sm:justify-end">
             {dashboardReady && (
               <button
                 type="button"
