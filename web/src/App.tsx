@@ -78,7 +78,23 @@ export default function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [signedIn, setSignedIn] = useState(false);
   const [drawer, setDrawer] = useState<{ open: boolean; mode: "sign-in" | "sign-up"; email?: string }>({ open: false, mode: "sign-in" });
-  const [signedOutView, setSignedOutView] = useState<"landing" | "connect">(isAppHost ? "connect" : "landing");
+  /**
+   * What a signed-out visitor sees on the app host.
+   *
+   * It used to be "connect" — the API-key form, as the front page of the
+   * product. That was right when a key was the only way in and is wrong now
+   * that accounts are: someone arriving at app.<domain> is asked for a
+   * credential they have probably never minted, with the actual way in (log in)
+   * relegated to a line of small print underneath.
+   *
+   * So the key form stops being the default and becomes what it always was — a
+   * fallback. It is still reachable by the #connect hash the landing links to,
+   * and it is still the DEFAULT on a deployment with no Clerk, where a key is
+   * genuinely the only credential that exists.
+   */
+  const [signedOutView, setSignedOutView] = useState<"landing" | "connect">(
+    isAppHost && !clerkEnabled ? "connect" : "landing",
+  );
   // OAuth providers bounce back to #/sso-callback after the drawer has
   // unmounted; a mounted Clerk callback component must finish the handshake.
   const [ssoCallback] = useState(() => window.location.hash.includes("sso-callback"));
@@ -183,13 +199,19 @@ export default function App() {
   const clerkSettling = clerkEnabled && !clerkLoaded;
   const showLanding = isFrontDoor;
   const showConnect = !signedIn && !dashboardReady && signedOutView === "connect";
+  // Everything else a signed-out visitor to the app host can be: not the
+  // landing (that is the front door's job), not the key form, and never the
+  // dashboard branches below — those read `stats` and would render an empty
+  // shell. A 401 from an unauthenticated load lands here too, which is why the
+  // connect form no longer special-cases it.
+  const showSignIn = !signedIn && !dashboardReady && !showLanding && !showConnect && clerkEnabled;
 
   const disconnectKey = useCallback(() => {
     window.localStorage.removeItem("trove_token");
     clearLayout();
     setImpersonation(null);
     setTokenDashboard(false);
-    setSignedOutView(isAppHost ? "connect" : "landing");
+    setSignedOutView(isAppHost && !clerkEnabled ? "connect" : "landing");
     setStats(null);
     setSnapshot(null);
     setError(null);
@@ -386,7 +408,31 @@ export default function App() {
         </div>
       ) : isWaitlisted ? (
         <WaitlistGate email={identity?.email ?? null} dark={dark} />
-      ) : showConnect || (!signedIn && error?.includes("401")) ? (
+      ) : showSignIn ? (
+        <div className="mx-auto mt-24 w-full max-w-sm rounded-lg border bg-card p-8 text-center">
+          <h2 className="font-serif text-xl">Your graph is behind a login</h2>
+          <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
+            Log in to open it.
+          </p>
+          <button
+            type="button"
+            onClick={openLogin}
+            className="mt-5 h-9 w-full rounded-md bg-primary text-sm font-medium text-primary-foreground transition-transform active:scale-[0.98]"
+          >
+            Log in
+          </button>
+          <p className="mt-4 text-[13px] text-muted-foreground">
+            or{" "}
+            <button
+              type="button"
+              onClick={() => setSignedOutView("connect")}
+              className="font-medium text-foreground underline-offset-4 hover:underline"
+            >
+              use an API key
+            </button>
+          </p>
+        </div>
+      ) : showConnect ? (
         <div className="mx-auto mt-24 w-full max-w-sm rounded-lg border bg-card p-8">
           <h2 className="font-serif text-xl">Connect to Trove</h2>
           <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
