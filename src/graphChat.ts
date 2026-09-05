@@ -48,6 +48,7 @@ import {
   createGraphChatModelFromEnv,
   type GraphChatModel,
 } from "./chatModel.js";
+import { observe, withTraceAttributes } from "./tracing.js";
 
 /** The minimum a client needs to find a node in the rendered graph. */
 export type ChatNodeRef = {
@@ -187,117 +188,148 @@ export async function* runGraphChat(
     channel.push({ ...event, elapsedMs: Date.now() - startedAt } as GraphChatEvent);
   };
 
-  const work = (async () => {
-    let answer = "";
-    let finish: GraphChatFinish = "ok";
-    let citations: RecallCitation[] = [];
-    let citedNodeIds: string[] = [];
-    try {
-      emit({ type: "start", query: input.query });
+  // One trace per turn, which is what a turn is: a self-contained unit of work.
+  // Everything recall does — the embedding call, the reranker, the packing —
+  // opens inside this span through OpenTelemetry context, so the tree shows the
+  // real shape of the turn rather than a flat list of calls that happened nearby.
+  const work = withTraceAttributes(
+    {
+      ...(context?.ownerId ? { userId: context.ownerId } : {}),
+      tags: ["graph-chat"],
+      metadata: { tokenBudget: input.tokenBudget, depth: input.depth },
+    },
+    () => observe("graph-chat", {
+      asType: "span",
+      input: { query: input.query },
+    }, async (turn) => {
+      let answer = "";
+      let packedCount = 0;
+      let modelName: string | null = null;
+      let finish: GraphChatFinish = "ok";
+      let citations: RecallCitation[] = [];
+      let citedNodeIds: string[] = [];
+      try {
+        emit({ type: "start", query: input.query });
 
-      const recall = await performRecall(store, {
-        query: input.query,
-        tokenBudget: input.tokenBudget,
-        depth: input.depth,
-        includeEvidence: true,
-      }, context, {
-        onTrace: (event) => {
-          if (event.stage === "seeds") emit({ type: "seeds", arm: event.arm, nodes: event.nodes.map(nodeRef) });
-          else if (event.stage === "fused") emit({ type: "fused", nodes: event.nodes.map(nodeRef) });
-          else if (event.stage === "expanded") {
-            emit({
-              type: "expand",
-              seedNodeId: event.seedNodeId,
-              nodes: event.nodes.map((reached) => ({ ...nodeRef(reached.node), hops: reached.hops })),
-            });
-          } else {
-            emit({
-              type: "rank",
-              reranked: event.reranked,
-              total: event.nodes.length,
-              nodes: event.nodes.slice(0, RANK_WIRE_LIMIT).map((ranked) => ({
-                id: ranked.node.id,
-                score: Number(ranked.score.toFixed(4)),
-              })),
-            });
-          }
-        },
-      });
-
-      citations = recall.citations;
-      emit({
-        type: "pack",
-        atoms: recall.atoms.map((atom) => ({
-          ...nodeRef(atom.node),
-          hops: atom.hops,
-          score: Number(atom.score.toFixed(4)),
-          tokens: atom.tokens,
-          provenance: atom.provenance,
-          summary: atom.node.summary,
-        })),
-        tokenBudget: recall.tokenBudget,
-        spentTokens: recall.spentTokens,
-        truncated: recall.truncated,
-      });
-
-      if (recall.atoms.length === 0) {
-        // Nothing was retrieved, so there is nothing to ground an answer in.
-        // Asking a model anyway would produce exactly the invention this whole
-        // pipeline exists to avoid.
-        finish = "no_results";
-        emit({
-          type: "notice",
-          code: "no_results",
-          message: "Nothing in this graph matched the question — no nodes were retrieved.",
+        const recall = await performRecall(store, {
+          query: input.query,
+          tokenBudget: input.tokenBudget,
+          depth: input.depth,
+          includeEvidence: true,
+        }, context, {
+          onTrace: (event) => {
+            if (event.stage === "seeds") emit({ type: "seeds", arm: event.arm, nodes: event.nodes.map(nodeRef) });
+            else if (event.stage === "fused") emit({ type: "fused", nodes: event.nodes.map(nodeRef) });
+            else if (event.stage === "expanded") {
+              emit({
+                type: "expand",
+                seedNodeId: event.seedNodeId,
+                nodes: event.nodes.map((reached) => ({ ...nodeRef(reached.node), hops: reached.hops })),
+              });
+            } else {
+              emit({
+                type: "rank",
+                reranked: event.reranked,
+                total: event.nodes.length,
+                nodes: event.nodes.slice(0, RANK_WIRE_LIMIT).map((ranked) => ({
+                  id: ranked.node.id,
+                  score: Number(ranked.score.toFixed(4)),
+                })),
+              });
+            }
+          },
         });
-      } else if (!model) {
-        finish = "no_model";
-        emit({ type: "answer_start", model: null });
+
+        citations = recall.citations;
+        packedCount = recall.atoms.length;
         emit({
-          type: "notice",
-          code: "model_not_configured",
-          message:
-            "No answering model is configured (set TROVE_GRAPH_CHAT=1 and OPENROUTER_API_KEY, " +
-            "or OPENAI_API_KEY). " +
-            "The retrieval above is real: these are the notes recall found and packed.",
+          type: "pack",
+          atoms: recall.atoms.map((atom) => ({
+            ...nodeRef(atom.node),
+            hops: atom.hops,
+            score: Number(atom.score.toFixed(4)),
+            tokens: atom.tokens,
+            provenance: atom.provenance,
+            summary: atom.node.summary,
+          })),
+          tokenBudget: recall.tokenBudget,
+          spentTokens: recall.spentTokens,
+          truncated: recall.truncated,
         });
-      } else {
-        emit({ type: "answer_start", model: model.name });
-        try {
-          for await (const token of model.stream({
-            messages: buildChatMessages(input.query, recall),
-            signal: abort.signal,
-          })) {
-            answer += token;
-            emit({ type: "token", text: token });
-          }
-        } catch (error) {
-          // A half-written answer is kept and labelled, not discarded: the
-          // viewer should see what arrived and be told it stopped early.
-          finish = "error";
+
+        if (recall.atoms.length === 0) {
+          // Nothing was retrieved, so there is nothing to ground an answer in.
+          // Asking a model anyway would produce exactly the invention this whole
+          // pipeline exists to avoid.
+          finish = "no_results";
           emit({
-            type: "error",
-            code: "model_failed",
-            message: error instanceof Error ? error.message : "The answering model stopped responding.",
+            type: "notice",
+            code: "no_results",
+            message: "Nothing in this graph matched the question — no nodes were retrieved.",
           });
+        } else if (!model) {
+          finish = "no_model";
+          emit({ type: "answer_start", model: null });
+          emit({
+            type: "notice",
+            code: "model_not_configured",
+            message:
+              "No answering model is configured (set TROVE_GRAPH_CHAT=1 and OPENROUTER_API_KEY, " +
+              "or OPENAI_API_KEY). " +
+              "The retrieval above is real: these are the notes recall found and packed.",
+          });
+        } else {
+          emit({ type: "answer_start", model: model.name });
+          modelName = model.name;
+          const messages = buildChatMessages(input.query, recall);
+          try {
+            // A generation of its own, sibling to the retrieval that fed it, so
+            // the trace separates "retrieval was slow" from "the model was slow"
+            // — the first question anyone asks of a slow turn.
+            await observe("answer", {
+              asType: "generation",
+              input: messages,
+              metadata: { model: model.name },
+            }, async (generation) => {
+              generation.update({ model: model.name });
+              for await (const token of model.stream({ messages, signal: abort.signal })) {
+                answer += token;
+                emit({ type: "token", text: token });
+              }
+              generation.update({ output: answer });
+            });
+          } catch (error) {
+            // A half-written answer is kept and labelled, not discarded: the
+            // viewer should see what arrived and be told it stopped early.
+            finish = "error";
+            emit({
+              type: "error",
+              code: "model_failed",
+              message: error instanceof Error ? error.message : "The answering model stopped responding.",
+            });
+          }
+          const cited = citedSlugs(answer, recall.atoms.map((atom) => atom.node.slug));
+          citedNodeIds = recall.atoms
+            .filter((atom) => cited.has(atom.node.slug))
+            .map((atom) => atom.node.id);
         }
-        const cited = citedSlugs(answer, recall.atoms.map((atom) => atom.node.slug));
-        citedNodeIds = recall.atoms
-          .filter((atom) => cited.has(atom.node.slug))
-          .map((atom) => atom.node.id);
+      } catch (error) {
+        finish = "error";
+        emit({
+          type: "error",
+          code: "recall_failed",
+          message: error instanceof Error ? error.message : "Recall failed.",
+        });
+      } finally {
+        turn.update({
+          output: { answer, finish, citedNodes: citedNodeIds.length },
+          metadata: { finish, packedAtoms: packedCount, model: modelName ?? "none" },
+        });
+        emit({ type: "done", finish, citations, citedNodeIds, answer });
+        channel.close();
       }
-    } catch (error) {
-      finish = "error";
-      emit({
-        type: "error",
-        code: "recall_failed",
-        message: error instanceof Error ? error.message : "Recall failed.",
-      });
-    } finally {
-      emit({ type: "done", finish, citations, citedNodeIds, answer });
-      channel.close();
-    }
-  })();
+    }),
+  );
 
   try {
     yield* channel.drain();

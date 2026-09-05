@@ -95,6 +95,7 @@ import {
   type ReconcileJudge,
 } from "./reconcile.js";
 import { runRecallSelfTest } from "./recallSelfTest.js";
+import { observe, withTraceAttributes } from "./tracing.js";
 import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
 
@@ -2474,7 +2475,7 @@ export class PgGraphStore implements GraphStore {
     const heartbeat = this.startLeaseHeartbeat(claimed.job.id, claimed.claimant);
     let outcome: { status: "succeeded"; result: GraphJobResult } | { status: "failed"; error: string };
     try {
-      outcome = { status: "succeeded", result: await this.performJob(claimed.job) };
+      outcome = { status: "succeeded", result: await this.performJobTraced(claimed.job) };
     } catch (error) {
       outcome = { status: "failed", error: error instanceof Error ? error.message : "Unknown job error" };
     } finally {
@@ -2967,6 +2968,28 @@ export class PgGraphStore implements GraphStore {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * One trace per job. Background LLM work — the reconcile judge, an embedding
+   * batch — would otherwise arrive in Langfuse as orphan generations with no
+   * idea which job asked for them or how long the job itself took. The owner
+   * rides along so a cost view can be read per account, and the kind becomes
+   * the trace name so one job type can be compared with itself over time.
+   */
+  private async performJobTraced(job: GraphJob): Promise<GraphJobResult> {
+    const ownerId = typeof job.payload.ownerId === "string" ? job.payload.ownerId : undefined;
+    return withTraceAttributes(
+      { ...(ownerId ? { userId: ownerId } : {}), tags: ["job", job.kind] },
+      () => observe(`job:${job.kind}`, {
+        asType: "span",
+        input: { kind: job.kind, jobId: job.id, payload: job.payload },
+      }, async (span) => {
+        const result = await this.performJob(job);
+        span.update({ output: result });
+        return result;
+      }),
+    );
   }
 
   private async performJob(job: GraphJob): Promise<GraphJobResult> {

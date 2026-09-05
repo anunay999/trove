@@ -3,6 +3,7 @@ import { recallInputSchema } from "./contracts.js";
 import { contentTerms } from "./queryNormalize.js";
 import { parseTemporalScope, temporalAffinity, type TemporalScope } from "./temporalScope.js";
 import { featureEnabled } from "./flags.js";
+import { observe, withTraceAttributes } from "./tracing.js";
 import {
   createRecallRerankerFromEnv,
   mmrOrder,
@@ -1157,7 +1158,45 @@ export async function performRecall(
   context?: GraphOperationContext,
   options: { reranker?: Reranker | null; onTrace?: RecallTrace } = {},
 ): Promise<RecallResult> {
-  const input = recallInputSchema.parse(rawInput);
+  const parsed = recallInputSchema.parse(rawInput);
+  // A retriever, and the root of its own trace when an agent calls recall over
+  // MCP; a child of `graph-chat` when the panel asked. Same subtree either way,
+  // because nesting comes from context rather than from a flag passed in — one
+  // instrumentation, both surfaces, and the query is comparable across them.
+  return withTraceAttributes(
+    {
+      ...(context?.ownerId ? { userId: context.ownerId } : {}),
+      tags: ["recall"],
+    },
+    () => observe("recall", {
+      asType: "retriever",
+      input: { query: parsed.query, tokenBudget: parsed.tokenBudget, depth: parsed.depth },
+    }, async (retrieval) => {
+      const pack = await performRecallInner(store, parsed, context, options);
+      retrieval.update({
+        output: {
+          atoms: pack.atoms.map((atom) => ({ slug: atom.node.slug, score: atom.score, hops: atom.hops })),
+        },
+        metadata: {
+          atoms: pack.atoms.length,
+          spentTokens: pack.spentTokens,
+          truncated: pack.truncated,
+          ...(pack.temporalScope ? { temporalScope: pack.temporalScope.label } : {}),
+        },
+      });
+      return pack;
+    }),
+  );
+}
+
+async function performRecallInner(
+  store: GraphStore,
+  // The PARSED input: defaults already applied, so the body keeps reading
+  // `input.includeEvidence` as the boolean the schema guarantees.
+  input: ReturnType<(typeof recallInputSchema)["parse"]>,
+  context?: GraphOperationContext,
+  options: { reranker?: Reranker | null; onTrace?: RecallTrace } = {},
+): Promise<RecallResult> {
   // A watcher never breaks the thing it watches: recall must return the same
   // pack whether or not anyone is listening, so a throwing observer is
   // swallowed here rather than failing an interactive read.

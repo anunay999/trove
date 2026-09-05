@@ -15,3 +15,9 @@ exports/
 # MemoryBench checkout + benchmark datasets (see bench/README.md)
 bench/.memorybench/
 bench/data/
+
+# Agent skills installed via `npx skills add` — vendored docs and machine-local
+# symlinks. skills-lock.json records what to install; the copies are not ours.
+.agents/
+skills/
+.claude/skills/

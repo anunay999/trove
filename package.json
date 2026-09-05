@@ -43,7 +43,10 @@
   "dependencies": {
     "@clerk/backend": "^3.10.0",
     "@hono/node-server": "^2.0.8",
+    "@langfuse/otel": "^5.11.0",
+    "@langfuse/tracing": "^5.11.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@opentelemetry/sdk-node": "^0.222.0",
     "hono": "^4.12.27",
     "pg": "^8.22.0",
     "zod": "^4.4.3"

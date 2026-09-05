@@ -1,4 +1,5 @@
 import { createGraphStore } from "../src/createStore.js";
+import { flushTracing, startTracing } from "../src/tracing.js";
 
 const maxJobs = Number(process.env.TROVE_WORKER_MAX_JOBS ?? process.argv[2] ?? 10);
 if (!Number.isInteger(maxJobs) || maxJobs < 1) {
@@ -13,6 +14,8 @@ const context = {
 };
 
 let processed = 0;
+
+await startTracing();
 
 try {
   while (processed < maxJobs) {
@@ -34,4 +37,7 @@ try {
   if ("close" in store && typeof store.close === "function") {
     await store.close();
   }
+  // A short-lived process loses everything still in the span buffer, which for
+  // a one-shot drain is the whole run.
+  await flushTracing();
 }
