@@ -34,6 +34,7 @@
 
 import type { RecallResult } from "./graphCore.js";
 import { resolveLlmProvider } from "./llmProvider.js";
+import { optedIn } from "./flags.js";
 
 export type ChatMessage = { role: "system" | "user"; content: string };
 
@@ -56,11 +57,6 @@ const CHAT_TIMEOUT_MS = 45_000;
 
 export function chatTimeoutMs(): number {
   return CHAT_TIMEOUT_MS;
-}
-
-/** Same tolerant reading of opt-in flags as reconcile.ts and rerank.ts. */
-function isEnabled(value: string | undefined): boolean {
-  return value !== undefined && ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
 }
 
 /**
@@ -251,7 +247,7 @@ export function parseChatDelta(frame: string): string | null {
  * reranker; the opt-in flag is its own.
  */
 export function createGraphChatModelFromEnv(): GraphChatModel | null {
-  if (!isEnabled(process.env.TROVE_GRAPH_CHAT)) return null;
+  if (!optedIn(process.env.TROVE_GRAPH_CHAT)) return null;
   // Which endpoint, and the OpenRouter-first rule, live in src/llmProvider.ts —
   // shared with the reranker and the judge so the three cannot drift apart.
   // The default MODEL stays here: chat wants a conversational model, and the

@@ -100,7 +100,7 @@ Graph writes enqueue durable `graph_job` rows for:
 - `refresh_obsidian_projection`
 - `lint_graph`
 - `refresh_embeddings`
-- `reconcile_node` (write-time reconciliation; conservative heuristic by default — the LLM judge is opt-in via `TROVE_RECONCILE_JUDGE=1`. Cost is bounded by construction: candidates beyond the calibrated `SKIP_DISTANCE` (0.45, a constant in `src/reconcile.ts`) are gated out, survivors are judged in one batched call per write, and `TROVE_RECONCILE_JUDGE_BUDGET` is a per-owner-per-hour backstop (default 100, 0 disables). The budget is **in-process**: each worker tracks its own window and it resets on restart, so across N workers the effective ceiling is N×100 and a crash-loop re-arms it. The distance gate, not the budget, is the real cost bound — the budget only catches pathological bursts)
+- `reconcile_node` (write-time reconciliation; conservative heuristic by default — the LLM judge runs once an LLM key exists, and `TROVE_RECONCILE_JUDGE=0` turns it off. Cost is bounded by construction: candidates beyond the calibrated `SKIP_DISTANCE` (0.45, a constant in `src/reconcile.ts`) are gated out, survivors are judged in one batched call per write, and `TROVE_RECONCILE_JUDGE_BUDGET` is a per-owner-per-hour backstop (default 100, 0 disables). The budget is **in-process**: each worker tracks its own window and it resets on restart, so across N workers the effective ceiling is N×100 and a crash-loop re-arms it. The distance gate, not the budget, is the real cost bound — the budget only catches pathological bursts)
 
 Run a bounded worker pass:
 

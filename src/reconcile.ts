@@ -55,6 +55,7 @@
 import type { GraphNode } from "./contracts.js";
 import type { GraphOperationContext, GraphStore, ReconcileFlagCode, SearchResultNode } from "./graphCore.js";
 import { defaultUtilityModel, resolveLlmProvider } from "./llmProvider.js";
+import { featureEnabled } from "./flags.js";
 
 export type ReconcileVerdict = "supersedes" | "duplicate" | "contradicts" | "related" | "distinct";
 
@@ -300,26 +301,28 @@ function judgePrompt(newNode: GraphNode, candidates: GraphNode[]): string {
  * unresolvable citation (#9). Anything unrecognised stays OFF, because the
  * expensive direction should never be reached by accident.
  */
-function isEnabled(value: string | undefined): boolean {
-  return value !== undefined && ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
-}
-
 /**
  * Build the LLM judge from the environment, or return null when unconfigured.
  * The endpoint comes from the shared resolver (src/llmProvider.ts); the model
  * defaults to a small utility model and is overridable via
  * TROVE_RECONCILE_JUDGE_MODEL.
  *
- * OPT-IN — `TROVE_RECONCILE_JUDGE=1` is required. It was originally opt-OUT,
- * which meant any deployment with an OPENAI_API_KEY (i.e. any deployment with
- * semantic search) silently took up to 5 LLM calls per write, proportional to
- * write volume and with no ceiling. The cost is now bounded by construction
- * (see the module doc): a distance gate excuses far candidates, survivors are
- * judged in ONE batched call, and a per-owner hourly budget is the backstop.
- * The flag stays opt-in until that bound has production mileage on it.
+ * ON once a provider exists; `TROVE_RECONCILE_JUDGE=0` turns it off.
+ *
+ * It was opt-OUT once, and that was genuinely wrong: any deployment with an
+ * OPENAI_API_KEY took up to 5 unbounded LLM calls per write. Making it opt-in
+ * bought time to bound the cost, which the module doc now describes — a
+ * distance gate excuses far candidates without a call, survivors are judged in
+ * ONE batched call per write, and a per-owner hourly budget backstops it.
+ *
+ * That debt is paid, and leaving the flag opt-in had its own price, invisible
+ * because nothing failed: 1,081 reconcile jobs ran in production without one
+ * judge call, so the graph never wrote a `supersedes` edge of its own and the
+ * whole automatic half of supersession was dormant. Default-on with a bounded
+ * cost is the honest resting state.
  */
 export function createReconcileJudgeFromEnv(): ReconcileJudge | null {
-  if (!isEnabled(process.env.TROVE_RECONCILE_JUDGE)) return null;
+  if (!featureEnabled(process.env.TROVE_RECONCILE_JUDGE)) return null;
   const provider = resolveLlmProvider();
   if (!provider) return null;
   const { apiKey, baseUrl } = provider;

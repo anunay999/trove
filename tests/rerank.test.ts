@@ -72,23 +72,29 @@ describe("recall reranker", () => {
     assert.ok(rerankPrompt("q", [bounded]).length < 2_000);
   });
 
-  it("is unconfigured unless the opt-in flag and a key are both present", () => {
+  it("needs a provider, and nothing else", () => {
     const noKeys = { OPENAI_API_KEY: undefined, OPENROUTER_API_KEY: undefined, OPENAI_BASE_URL: undefined };
-    withEnv({ ...noKeys, TROVE_RECALL_RERANK: undefined, OPENAI_API_KEY: "sk-test" }, () => {
-      assert.equal(createRecallRerankerFromEnv(), null);
-    });
+    // No key, no reranking, whatever the flag says.
     withEnv({ ...noKeys, TROVE_RECALL_RERANK: "1" }, () => {
       assert.equal(createRecallRerankerFromEnv(), null);
     });
-    withEnv({ ...noKeys, TROVE_RECALL_RERANK: "yes", OPENAI_API_KEY: "sk-test" }, () => {
+    // A key is enough: this shipped opt-in and then sat dark for months in the
+    // one deployment that had a key, handing every answer an unranked order.
+    withEnv({ ...noKeys, TROVE_RECALL_RERANK: undefined, OPENAI_API_KEY: "sk-test" }, () => {
       assert.equal(typeof createRecallRerankerFromEnv(), "function");
     });
     // Whichever LLM key the deployment has is the reranker's key too. It needs
     // none of its own — two bespoke variables once existed for this and were
     // the wrong answer to a duplicated resolver.
-    withEnv({ ...noKeys, TROVE_RECALL_RERANK: "1", OPENROUTER_API_KEY: "or-test" }, () => {
+    withEnv({ ...noKeys, OPENROUTER_API_KEY: "or-test" }, () => {
       assert.equal(typeof createRecallRerankerFromEnv(), "function");
     });
+    // And a deployment can still say no.
+    for (const value of ["0", "false", "off", "no"]) {
+      withEnv({ ...noKeys, TROVE_RECALL_RERANK: value, OPENAI_API_KEY: "sk-test" }, () => {
+        assert.equal(createRecallRerankerFromEnv(), null, `value ${JSON.stringify(value)} must disable reranking`);
+      });
+    }
   });
 
   /**
