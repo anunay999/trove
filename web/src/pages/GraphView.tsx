@@ -271,6 +271,15 @@ export function GraphView({
   }, [chatOpen]);
 
   const nodeById = useMemo(() => new Map(data.nodes.map((node) => [node.id, node])), [data]);
+  /*
+   * When each memory was last written, for the chat's freshness strip. The
+   * snapshot is already in hand, so the strip costs no request; `updatedAt` is
+   * the axis that answers "is what this answer rests on still current".
+   */
+  const lastWritten = useMemo(
+    () => new Map((snapshot?.nodes ?? []).map((node) => [node.id, node.updatedAt])),
+    [snapshot],
+  );
   const selected = selectedId ? nodeById.get(selectedId) ?? null : null;
 
   useEffect(() => {
@@ -653,6 +662,7 @@ export function GraphView({
           <GraphChat
             dark={dark}
             narrow={narrow}
+            lastWritten={lastWritten}
             resizable={rail.props}
             onStages={setChatStages}
             onHighlights={setHighlights}

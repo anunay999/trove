@@ -26,7 +26,7 @@ import { Spinner } from "@astryxdesign/core/Spinner";
 import { StatusDot } from "@astryxdesign/core/StatusDot";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { Theme } from "@astryxdesign/core/theme";
-import { typeColor } from "@/lib/viz";
+import { formatDay, typeColor } from "@/lib/viz";
 import { streamGraphChat, type ChatPackAtom } from "@/lib/api";
 import { gothicTheme } from "@/themes/gothic";
 import {
@@ -214,6 +214,32 @@ const styles = stylex.create({
   stageDetail: { minWidth: 0, flexGrow: 1 },
   stageElapsed: { flexShrink: 0 },
   citation: { cursor: "pointer" },
+  /*
+   * The freshness strip: a bare time axis, one tick per memory the answer was
+   * built from. No card, no grid, no y-axis — there is nothing to measure
+   * against, only where the marks fall and how tightly they cluster.
+   */
+  strip: { position: "relative", height: "1.5rem", width: "100%" },
+  stripRule: {
+    position: "absolute",
+    insetInline: 0,
+    insetBlockStart: "50%",
+    height: "var(--border-width)",
+    backgroundColor: "var(--color-border)",
+  },
+  tickBase: {
+    position: "absolute",
+    width: "2px",
+    borderRadius: "1px",
+    transform: "translateX(-50%)",
+  },
+  /* Cited marks stand full height; the rest of the pack sits inside them. */
+  tickCited: { insetBlockStart: "0.125rem", height: "1.25rem", opacity: 1 },
+  tickPacked: { insetBlockStart: "0.4375rem", height: "0.625rem", opacity: 0.45 },
+  tick: (offset: number, color: string) => ({
+    insetInlineStart: `${offset * 100}%`,
+    backgroundColor: color,
+  }),
 });
 
 /** A filled dot at 1em — the node-type swatch, coloured by `styles.ink`. */
@@ -231,6 +257,114 @@ function RingGlyph(props: SVGProps<SVGSVGElement>) {
     <svg viewBox="0 0 8 8" {...props}>
       <circle cx="4" cy="4" r="3" fill="none" stroke="currentColor" strokeWidth="2" />
     </svg>
+  );
+}
+
+/**
+ * How current the answer's footing is.
+ *
+ * The canvas already says WHERE in the graph an answer came from — nodes light
+ * up in place. It says nothing about WHEN, and "when" is the failure a reader
+ * cannot otherwise see: an answer assembled entirely out of notes nobody has
+ * touched since spring reads exactly like one assembled this morning.
+ *
+ * So: a bare time axis, oldest to newest, one tick per memory in the pack.
+ * Cited marks stand full height in the canvas's own cited amber; the rest of
+ * the pack sits inside them, faint, in the packed ink. A tight cluster on the
+ * right is a fresh answer; a long tail to the left is one worth checking.
+ *
+ * The axis is `updatedAt` — when a memory was last written, not when it was
+ * first written. A March note revised last week IS current, and this strip
+ * exists to answer "is this still true", not "how long have I known it".
+ *
+ * It is a readout and nothing more. Nothing in recall ranks on this: the only
+ * always-on time signal in the blend is activation, which decays on
+ * lastAccessedAt — how recently a note was READ, not how recently it was
+ * true — and the query-side temporal scope only wakes up when the question
+ * itself names a time. So a stale pack is not something retrieval will correct
+ * on its own, which is exactly why it is worth showing.
+ */
+function ProvenanceStrip({
+  atoms,
+  citedIds,
+  lastWritten,
+  dark,
+}: {
+  atoms: ChatPackAtom[];
+  citedIds: Set<string>;
+  lastWritten: Map<string, string>;
+  dark: boolean;
+}) {
+  const axis = useMemo(() => {
+    const dated = atoms
+      .map((atom) => ({ atom, at: lastWritten.get(atom.id) ?? null }))
+      .flatMap((row) => {
+        const ms = row.at ? Date.parse(row.at) : Number.NaN;
+        return row.at && Number.isFinite(ms) ? [{ atom: row.atom, at: row.at, ms }] : [];
+      })
+      .sort((left, right) => left.ms - right.ms);
+    const oldest = dated[0];
+    const newest = dated.at(-1);
+    if (!oldest || !newest) return null;
+    const span = newest.ms - oldest.ms;
+    return {
+      oldest: oldest.at.slice(0, 10),
+      newest: newest.at.slice(0, 10),
+      /* One day for every memory collapses the axis; centre the marks on it. */
+      sameDay: span === 0,
+      ticks: dated.map((row) => ({
+        id: row.atom.id,
+        title: row.atom.title,
+        at: row.at,
+        cited: citedIds.has(row.atom.id),
+        offset: span === 0 ? 0.5 : (row.ms - oldest.ms) / span,
+      })),
+    };
+  }, [atoms, citedIds, lastWritten]);
+
+  if (!axis) return null;
+  const citedInk = highlightInk("cited", dark);
+  const packedInk = highlightInk("packed", dark);
+
+  return (
+    <VStack gap={0.5}>
+      <HStack gap={2} hAlign="between" vAlign="center">
+        <Text type="code" size="xsm" color="secondary">
+          Last written
+        </Text>
+        <Text type="code" size="xsm" color="secondary" hasTabularNumbers>
+          {axis.ticks.length} {axis.ticks.length === 1 ? "memory" : "memories"}
+        </Text>
+      </HStack>
+      <div {...stylex.props(styles.strip)}>
+        <span {...stylex.props(styles.stripRule)} />
+        {axis.ticks.map((tick) => (
+          <span
+            key={tick.id}
+            title={`${tick.title} — ${formatDay(tick.at.slice(0, 10))}${tick.cited ? " · cited" : ""}`}
+            {...stylex.props(
+              styles.tickBase,
+              tick.cited ? styles.tickCited : styles.tickPacked,
+              styles.tick(tick.offset, tick.cited ? citedInk : packedInk),
+            )}
+          />
+        ))}
+      </div>
+      {axis.sameDay ? (
+        <Text type="code" size="xsm" color="secondary" hasTabularNumbers>
+          All on {formatDay(axis.oldest)}
+        </Text>
+      ) : (
+        <HStack gap={2} hAlign="between" vAlign="center">
+          <Text type="code" size="xsm" color="secondary" hasTabularNumbers>
+            {formatDay(axis.oldest)}
+          </Text>
+          <Text type="code" size="xsm" color="secondary" hasTabularNumbers>
+            {formatDay(axis.newest)}
+          </Text>
+        </HStack>
+      )}
+    </VStack>
   );
 }
 
@@ -385,6 +519,7 @@ export function GraphChat({
   dark,
   narrow,
   resizable,
+  lastWritten,
 }: {
   onHighlights: (highlights: ChatHighlights) => void;
   onFocusNode: (nodeId: string) => void;
@@ -394,6 +529,13 @@ export function GraphChat({
   onStages: (stages: Stage[]) => void;
   onClose: () => void;
   dark: boolean;
+  /**
+   * When each memory in the graph was last written, keyed by node id. It comes
+   * from the snapshot the canvas is already drawing, so the freshness strip
+   * costs no request of its own — and a node the pack names is by definition
+   * a node the canvas holds.
+   */
+  lastWritten: Map<string, string>;
   /**
    * True where the canvas has no corner to spare. The stage table then renders
    * in the rail instead of over the graph.
@@ -904,6 +1046,21 @@ export function GraphChat({
                         status="error"
                         title={finish === "dropped" ? "Connection closed" : "Graph chat failed"}
                         description={failure}
+                      />
+                    </ChatMessageBubble>
+                  ) : null}
+
+                  {pack && pack.length > 0 ? (
+                    <ChatMessageBubble
+                      variant="ghost"
+                      width="100%"
+                      xstyle={[styles.turnBlock, arrival]}
+                    >
+                      <ProvenanceStrip
+                        atoms={pack}
+                        citedIds={citedIds}
+                        lastWritten={lastWritten}
+                        dark={dark}
                       />
                     </ChatMessageBubble>
                   ) : null}
