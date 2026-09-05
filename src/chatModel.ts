@@ -33,6 +33,7 @@
  */
 
 import type { RecallResult } from "./graphCore.js";
+import { resolveLlmProvider } from "./llmProvider.js";
 
 export type ChatMessage = { role: "system" | "user"; content: string };
 
@@ -51,11 +52,10 @@ export const CHAT_PACK_CHARS = 24_000;
 /** The answer is a paragraph or two over a small pack; nothing needs more. */
 const CHAT_MAX_OUTPUT_TOKENS = 700;
 /** Whole-answer deadline. Generous next to the reranker's 2s: this one streams. */
-const CHAT_TIMEOUT_MS_DEFAULT = 45_000;
+const CHAT_TIMEOUT_MS = 45_000;
 
 export function chatTimeoutMs(): number {
-  const parsed = Number(process.env.TROVE_CHAT_TIMEOUT_MS);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : CHAT_TIMEOUT_MS_DEFAULT;
+  return CHAT_TIMEOUT_MS;
 }
 
 /** Same tolerant reading of opt-in flags as reconcile.ts and rerank.ts. */
@@ -252,20 +252,15 @@ export function parseChatDelta(frame: string): string | null {
  */
 export function createGraphChatModelFromEnv(): GraphChatModel | null {
   if (!isEnabled(process.env.TROVE_GRAPH_CHAT)) return null;
-  // OpenRouter first when its key is present. It is one key for many cheap
-  // models, it speaks the same chat-completions shape, and it is the reason
-  // this endpoint exists at all: showing the graph off should not cost much.
-  // OPENAI_API_KEY still wins if both are set and OPENAI_BASE_URL is explicit,
-  // so a deployment already pointed somewhere does not get moved silently.
-  const openRouterKey = process.env.OPENROUTER_API_KEY;
-  const explicitBase = process.env.OPENAI_BASE_URL;
-  const useOpenRouter = Boolean(openRouterKey) && (!process.env.OPENAI_API_KEY || !explicitBase);
-  const apiKey = useOpenRouter ? openRouterKey : process.env.OPENAI_API_KEY;
-  if (!apiKey) return null;
+  // Which endpoint, and the OpenRouter-first rule, live in src/llmProvider.ts —
+  // shared with the reranker and the judge so the three cannot drift apart.
+  // The default MODEL stays here: chat wants a conversational model, and the
+  // other two want a small JSON-shaped one.
+  const provider = resolveLlmProvider();
+  if (!provider) return null;
+  const { apiKey, baseUrl } = provider;
   const model = process.env.TROVE_CHAT_MODEL
-    ?? (useOpenRouter ? "meta/muse-spark-1.3-contributor" : "gpt-4o-mini");
-  const baseUrl = (useOpenRouter ? explicitBase ?? "https://openrouter.ai/api/v1" : explicitBase ?? "https://api.openai.com/v1")
-    .replace(/\/$/, "");
+    ?? (provider.openRouter ? "meta/muse-spark-1.3-contributor" : "gpt-4o-mini");
   const effort = chatReasoningEffort();
 
   return {

@@ -27,7 +27,7 @@
  *
  * 1. GATE — the semantic arm's cosine distance now rides on every search hit
  *    (SearchResultNode.distance). A candidate farther than
- *    TROVE_RECONCILE_SKIP_DISTANCE (default 0.45) is recorded as
+ *    SKIP_DISTANCE (0.45) is recorded as
  *    via="distance_gate" and never judged. The threshold is CALIBRATED, not
  *    guessed: on a labelled 48-atom corpus (scripts/calibrateReconcileBands.ts)
  *    every supersede pair measured 0.076-0.408 while 0.40 was already low
@@ -54,6 +54,7 @@
 
 import type { GraphNode } from "./contracts.js";
 import type { GraphOperationContext, GraphStore, ReconcileFlagCode, SearchResultNode } from "./graphCore.js";
+import { defaultUtilityModel, resolveLlmProvider } from "./llmProvider.js";
 
 export type ReconcileVerdict = "supersedes" | "duplicate" | "contradicts" | "related" | "distinct";
 
@@ -113,12 +114,13 @@ const MAX_CANDIDATES = 5;
 // CALIBRATED default — see the module doc and scripts/calibrateReconcileBands.ts.
 // Lowering this below ~0.42 loses real supersessions on the measured corpus
 // (a true pair sat at 0.408); it is not a free dial.
-const SKIP_DISTANCE_DEFAULT = 0.45;
+// Not an env var: a calibrated number belongs in the file that explains how it
+// was calibrated, where changing it is a reviewable diff next to its evidence
+// rather than an invisible edit in a deployment dashboard.
+const SKIP_DISTANCE = 0.45;
 
 function reconcileSkipDistance(): number {
-  const raw = process.env.TROVE_RECONCILE_SKIP_DISTANCE;
-  const parsed = Number(raw);
-  return raw && Number.isFinite(parsed) && parsed > 0 ? parsed : SKIP_DISTANCE_DEFAULT;
+  return SKIP_DISTANCE;
 }
 
 /**
@@ -304,8 +306,9 @@ function isEnabled(value: string | undefined): boolean {
 
 /**
  * Build the LLM judge from the environment, or return null when unconfigured.
- * Uses the OpenAI chat API directly (same key as embeddings); the model
- * defaults to gpt-4o-mini and is overridable via TROVE_RECONCILE_JUDGE_MODEL.
+ * The endpoint comes from the shared resolver (src/llmProvider.ts); the model
+ * defaults to a small utility model and is overridable via
+ * TROVE_RECONCILE_JUDGE_MODEL.
  *
  * OPT-IN — `TROVE_RECONCILE_JUDGE=1` is required. It was originally opt-OUT,
  * which meant any deployment with an OPENAI_API_KEY (i.e. any deployment with
@@ -317,10 +320,10 @@ function isEnabled(value: string | undefined): boolean {
  */
 export function createReconcileJudgeFromEnv(): ReconcileJudge | null {
   if (!isEnabled(process.env.TROVE_RECONCILE_JUDGE)) return null;
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return null;
-  const model = process.env.TROVE_RECONCILE_JUDGE_MODEL ?? "gpt-4o-mini";
-  const baseUrl = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+  const provider = resolveLlmProvider();
+  if (!provider) return null;
+  const { apiKey, baseUrl } = provider;
+  const model = process.env.TROVE_RECONCILE_JUDGE_MODEL ?? defaultUtilityModel(provider);
 
   return async ({ newNode, candidates }) => {
     if (candidates.length === 0) return [];

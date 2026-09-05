@@ -800,7 +800,10 @@ serve({ fetch: app.fetch, port }, (info) => {
 // TROVE_AUTORUN_JOBS=0.
 const worker = (process.env.TROVE_AUTORUN_JOBS ?? "1") !== "0"
   ? (() => {
-    const intervalMs = Number(process.env.TROVE_JOB_INTERVAL_MS ?? 30_000);
+    // How often the in-process worker looks for pending jobs. A constant: no
+    // deployment has ever wanted a different number, and one that did would
+    // rather change it in a diff than in a dashboard.
+    const intervalMs = 30_000;
     const started = startJobWorker(store, {
       intervalMs,
       log: (message) => console.log(`[job-worker] ${message}`),

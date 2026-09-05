@@ -287,14 +287,16 @@ export function lintMinIntervalSeconds(): number {
 }
 
 /**
- * Minimum seconds between two recall self-tests of one scope. A day by default,
- * two orders of magnitude slacker than lint, because a self-test is twenty
- * recalls rather than one pass over a snapshot — and because what it measures
- * moves on the scale of weeks, not writes. 0 disables the throttle (tests).
+ * Minimum seconds between two recall self-tests of one scope. A day: two orders
+ * of magnitude slacker than lint, because a self-test is twenty recalls rather
+ * than one pass over a snapshot — and because what it measures moves on the
+ * scale of weeks, not writes.
+ *
+ * A constant, not a variable. It shipped as one for about an hour and that was
+ * a mistake of exactly the kind this codebase had accumulated thirty of.
  */
 export function selfTestMinIntervalSeconds(): number {
-  const parsed = Number(process.env.TROVE_SELF_TEST_MIN_INTERVAL_SECONDS);
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 86_400;
+  return 86_400;
 }
 
 /**

@@ -73,44 +73,36 @@ describe("recall reranker", () => {
   });
 
   it("is unconfigured unless the opt-in flag and a key are both present", () => {
-    const noKeys = { TROVE_RERANK_API_KEY: undefined, TROVE_RERANK_BASE_URL: undefined };
+    const noKeys = { OPENAI_API_KEY: undefined, OPENROUTER_API_KEY: undefined, OPENAI_BASE_URL: undefined };
     withEnv({ ...noKeys, TROVE_RECALL_RERANK: undefined, OPENAI_API_KEY: "sk-test" }, () => {
       assert.equal(createRecallRerankerFromEnv(), null);
     });
-    withEnv({ ...noKeys, TROVE_RECALL_RERANK: "1", OPENAI_API_KEY: undefined }, () => {
+    withEnv({ ...noKeys, TROVE_RECALL_RERANK: "1" }, () => {
       assert.equal(createRecallRerankerFromEnv(), null);
     });
     withEnv({ ...noKeys, TROVE_RECALL_RERANK: "yes", OPENAI_API_KEY: "sk-test" }, () => {
       assert.equal(typeof createRecallRerankerFromEnv(), "function");
     });
-    // A rerank-only key is a key: embeddings keep OPENAI_API_KEY, reranking
-    // does not need one of its own to exist.
-    withEnv({
-      TROVE_RECALL_RERANK: "1",
-      OPENAI_API_KEY: undefined,
-      TROVE_RERANK_API_KEY: "or-test",
-      TROVE_RERANK_BASE_URL: undefined,
-    }, () => {
+    // Whichever LLM key the deployment has is the reranker's key too. It needs
+    // none of its own — two bespoke variables once existed for this and were
+    // the wrong answer to a duplicated resolver.
+    withEnv({ ...noKeys, TROVE_RECALL_RERANK: "1", OPENROUTER_API_KEY: "or-test" }, () => {
       assert.equal(typeof createRecallRerankerFromEnv(), "function");
     });
   });
 
   /**
-   * The whole point of the rerank-only credentials is that they move RERANKING
-   * and nothing else. These pin which endpoint the call actually reaches, since
-   * a resolver that silently fell back to OPENAI_BASE_URL would send the
-   * embeddings host an LLM request and look fine until it 404s in production.
+   * Reranking runs on every recall, so it is the call that most wants the cheap
+   * provider. These pin that it follows the shared resolver — including the
+   * model id, since a bare "gpt-4o-mini" is an OpenAI name and OpenRouter
+   * namespaces the same model.
    */
-  it("sends the rerank call to its own provider, leaving the shared ones alone", async () => {
+  it("follows the shared provider, model id and all", async () => {
     const seen: Array<{ url: string; auth: string | null; model: unknown }> = [];
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async (url: unknown, init: { headers?: Record<string, string>; body?: string }) => {
       const body = JSON.parse(init?.body ?? "{}") as { model?: unknown };
-      seen.push({
-        url: String(url),
-        auth: init?.headers?.authorization ?? null,
-        model: body.model,
-      });
+      seen.push({ url: String(url), auth: init?.headers?.authorization ?? null, model: body.model });
       return {
         ok: true,
         json: async () => ({ choices: [{ message: { content: '{"scores":[{"index":1,"score":0.5}]}' } }] }),
@@ -118,37 +110,33 @@ describe("recall reranker", () => {
     }) as unknown as typeof globalThis.fetch;
 
     try {
-      const onItsOwn = withEnv({
+      const cheap = withEnv({
         TROVE_RECALL_RERANK: "1",
+        OPENROUTER_API_KEY: "or-cheap",
         OPENAI_API_KEY: "sk-embeddings",
         OPENAI_BASE_URL: undefined,
-        TROVE_RERANK_API_KEY: "or-cheap",
-        TROVE_RERANK_BASE_URL: "https://openrouter.example/api/v1/",
-        TROVE_RECALL_RERANK_MODEL: "cheap/model",
-      }, () => createRecallRerankerFromEnv());
-      assert.ok(onItsOwn);
-      await onItsOwn({ query: "q", candidates: [candidate("a")] });
-
-      const shared = withEnv({
-        TROVE_RECALL_RERANK: "1",
-        OPENAI_API_KEY: "sk-embeddings",
-        OPENAI_BASE_URL: undefined,
-        TROVE_RERANK_API_KEY: undefined,
-        TROVE_RERANK_BASE_URL: undefined,
         TROVE_RECALL_RERANK_MODEL: undefined,
       }, () => createRecallRerankerFromEnv());
-      assert.ok(shared);
-      await shared({ query: "q", candidates: [candidate("a")] });
+      assert.ok(cheap);
+      await cheap({ query: "q", candidates: [candidate("a")] });
+
+      const openai = withEnv({
+        TROVE_RECALL_RERANK: "1",
+        OPENROUTER_API_KEY: undefined,
+        OPENAI_API_KEY: "sk-embeddings",
+        OPENAI_BASE_URL: undefined,
+        TROVE_RECALL_RERANK_MODEL: undefined,
+      }, () => createRecallRerankerFromEnv());
+      assert.ok(openai);
+      await openai({ query: "q", candidates: [candidate("a")] });
     } finally {
       globalThis.fetch = realFetch;
     }
 
     assert.equal(seen.length, 2);
-    // Its own provider, and the trailing slash does not become a double slash.
-    assert.equal(seen[0]?.url, "https://openrouter.example/api/v1/chat/completions");
+    assert.equal(seen[0]?.url, "https://openrouter.ai/api/v1/chat/completions");
     assert.equal(seen[0]?.auth, "Bearer or-cheap");
-    assert.equal(seen[0]?.model, "cheap/model");
-    // Nothing set: byte-identical to the behaviour before the split.
+    assert.equal(seen[0]?.model, "openai/gpt-4o-mini");
     assert.equal(seen[1]?.url, "https://api.openai.com/v1/chat/completions");
     assert.equal(seen[1]?.auth, "Bearer sk-embeddings");
     assert.equal(seen[1]?.model, "gpt-4o-mini");
