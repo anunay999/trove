@@ -40,6 +40,7 @@ import type { GraphNode } from "./contracts.js";
 import { contentTerms } from "./queryNormalize.js";
 import { defaultUtilityModel, resolveLlmProvider } from "./llmProvider.js";
 import { featureEnabled } from "./flags.js";
+import { observe, usageFrom, type Recorder } from "./tracing.js";
 
 /** What the reranker is shown about one candidate. Bounded by construction. */
 export type RerankCandidate = {
@@ -78,8 +79,26 @@ const RERANK_SUMMARY_CHARS = 240;
  */
 export const RERANK_MAX_CANDIDATES = 30;
 
-/** Hard ceiling for the rerank call. Recall is interactive; see the module doc. */
-const RERANK_TIMEOUT_MS_DEFAULT = 2_000;
+/**
+ * Hard ceiling for the rerank call.
+ *
+ * 2s was the shipped value and it was chosen before the call had ever run.
+ * Measured against production on 2026-09-05, the first day reranking was live:
+ * five probes returned scores identical to the un-reranked blend to three
+ * decimal places, while the reconcile judge — same provider, same model id, no
+ * deadline — was making real calls in the same minutes. The reranker was being
+ * built and called; its result was being thrown away by this timer.
+ *
+ * That the failure was invisible is the more important half. `rerankCandidates`
+ * fails open by design, and open looks exactly like "not configured": the same
+ * ordering, no error, nothing in a log. It is why the rerank call is now a
+ * traced generation — a timeout leaves a span with its true duration, so the
+ * next person sets this number from a measurement instead of from a guess.
+ *
+ * 8s is a ceiling, not a target: one batched call scoring up to 30 candidates
+ * against a small model. If traces show the p95 well under it, bring it down.
+ */
+const RERANK_TIMEOUT_MS_DEFAULT = 8_000;
 
 export function rerankTimeoutMs(): number {
   const parsed = Number(process.env.TROVE_RECALL_RERANK_TIMEOUT_MS);
@@ -193,6 +212,28 @@ export function createRecallRerankerFromEnv(): Reranker | null {
 
   return async ({ query, candidates }) => {
     if (candidates.length === 0) return [];
+    const prompt = rerankPrompt(query, candidates);
+    return observe("rerank", {
+      asType: "generation",
+      input: [{ role: "user", content: prompt }],
+      metadata: { model, candidates: candidates.length },
+    }, async (recorder) => {
+      recorder.update({ model });
+      return rerankOnce({ apiKey, baseUrl, model, prompt, count: candidates.length }, recorder);
+    });
+  };
+}
+
+/**
+ * One reranking call. Split out so the traced wrapper above reads as one line
+ * and this stays the plain HTTP it always was.
+ */
+async function rerankOnce(
+  call: { apiKey: string; baseUrl: string; model: string; prompt: string; count: number },
+  recorder: Recorder,
+): Promise<number[]> {
+  const { apiKey, baseUrl, model, prompt, count } = call;
+  {
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
@@ -204,15 +245,18 @@ export function createRecallRerankerFromEnv(): Reranker | null {
         model,
         temperature: 0,
         response_format: { type: "json_object" },
-        messages: [{ role: "user", content: rerankPrompt(query, candidates) }],
+        messages: [{ role: "user", content: prompt }],
       }),
     });
     if (!response.ok) throw new Error(`recall reranker: OpenAI ${response.status}`);
     const body = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    const scores = parseRerankScores(body.choices?.[0]?.message?.content ?? "", candidates.length);
+    const reply = body.choices?.[0]?.message?.content ?? "";
+    const usage = usageFrom(body);
+    recorder.update({ output: reply, ...(usage ? { usageDetails: usage } : {}) });
+    const scores = parseRerankScores(reply, count);
     if (!scores) throw new Error("recall reranker: unusable reply");
     return scores;
-  };
+  }
 }
 
 /**

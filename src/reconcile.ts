@@ -56,6 +56,7 @@ import type { GraphNode } from "./contracts.js";
 import type { GraphOperationContext, GraphStore, ReconcileFlagCode, SearchResultNode } from "./graphCore.js";
 import { defaultUtilityModel, resolveLlmProvider } from "./llmProvider.js";
 import { featureEnabled } from "./flags.js";
+import { observe, usageFrom } from "./tracing.js";
 
 export type ReconcileVerdict = "supersedes" | "duplicate" | "contradicts" | "related" | "distinct";
 
@@ -330,19 +331,30 @@ export function createReconcileJudgeFromEnv(): ReconcileJudge | null {
 
   return async ({ newNode, candidates }) => {
     if (candidates.length === 0) return [];
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
-        temperature: 0,
-        response_format: { type: "json_object" },
-        messages: [{ role: "user", content: judgePrompt(newNode, candidates) }],
-      }),
+    const prompt = judgePrompt(newNode, candidates);
+    return observe("reconcile-judge", {
+      asType: "generation",
+      input: [{ role: "user", content: prompt }],
+      metadata: { model, candidates: candidates.length, node: newNode.title },
+    }, async (recorder) => {
+      recorder.update({ model });
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model,
+          temperature: 0,
+          response_format: { type: "json_object" },
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+      if (!response.ok) throw new Error(`reconcile judge: OpenAI ${response.status}`);
+      const body = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      const reply = body.choices?.[0]?.message?.content ?? "";
+      const usage = usageFrom(body);
+      recorder.update({ output: reply, ...(usage ? { usageDetails: usage } : {}) });
+      return parseReconcileJudgments(reply, candidates.length, candidates);
     });
-    if (!response.ok) throw new Error(`reconcile judge: OpenAI ${response.status}`);
-    const body = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    return parseReconcileJudgments(body.choices?.[0]?.message?.content ?? "", candidates.length, candidates);
   };
 }
 
