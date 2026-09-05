@@ -76,6 +76,7 @@ import {
   type GraphEvent,
   type GraphEventFeed,
   type GraphEventStats,
+  type MemoryDay,
   isSmokeEvent,
   RECONCILE_FINDING_LIMIT,
   reconcileLintFinding,
@@ -111,6 +112,7 @@ import {
   UnknownEvidenceReferenceError,
 } from "./graphCore.js";
 import { performReconcileNode, type ReconcileJudge } from "./reconcile.js";
+import { runRecallSelfTest } from "./recallSelfTest.js";
 import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
 
@@ -123,6 +125,10 @@ type Revision = {
   content: string | null;
   createdAt: string;
 };
+
+function asSelfTestPayload(payload: unknown): Record<string, unknown> {
+  return payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+}
 
 /** Catalog/log-style pages are useful as pointers but starve search/recall. */
 const GIANT_CONTENT_CHARS = 12_000;
@@ -1252,6 +1258,34 @@ export class InMemoryGraphStore implements GraphStore {
     return files;
   }
 
+  /**
+   * Memories per day, dated by first write.
+   *
+   * There is no created_at on the in-memory node, so the first revision stands
+   * in for it — which is the same instant: a node and its revision 1 are
+   * written together. Later revisions are ignored on purpose, so an edit never
+   * moves a memory to the day it was edited.
+   */
+  memoryDays(): MemoryDay[] {
+    const firstWrite = new Map<string, string>();
+    for (const revision of this.revisions.values()) {
+      const current = firstWrite.get(revision.nodeId);
+      if (current === undefined || revision.createdAt < current) {
+        firstWrite.set(revision.nodeId, revision.createdAt);
+      }
+    }
+    const counts = new Map<string, number>();
+    for (const node of this.nodes.values()) {
+      if (this.deletedNodeIds.has(node.id)) continue;
+      const written = firstWrite.get(node.id) ?? node.updatedAt;
+      const date = written.slice(0, 10);
+      counts.set(date, (counts.get(date) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([date, memories]) => ({ date, memories }))
+      .sort((left, right) => left.date.localeCompare(right.date));
+  }
+
   exportGraph(): GraphSnapshot {
     const nodes = [...this.nodes.values()]
       .filter((node) => !this.deletedNodeIds.has(node.id))
@@ -1440,6 +1474,20 @@ export class InMemoryGraphStore implements GraphStore {
         prunedJobs,
         prunedEvents,
       };
+      return result;
+    }
+
+    if (job.kind === "recall_self_test") {
+      const payload = asSelfTestPayload(job.payload);
+      const ownerId = typeof payload.ownerId === "string" ? payload.ownerId : null;
+      const sampleSize = typeof payload.sampleSize === "number" ? payload.sampleSize : undefined;
+      // Owner-scoped like every other read: a self-test must ask the graph the
+      // way its owner would, or it measures a pool they cannot see.
+      const result: GraphJobResultMap["recall_self_test"] = await runRecallSelfTest(
+        this,
+        sampleSize === undefined ? {} : { sampleSize },
+        ownerId ? { ownerId } : undefined,
+      );
       return result;
     }
 

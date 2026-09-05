@@ -17,6 +17,22 @@ Optional:
 - `TROVE_WORKER_MAX_JOBS`, default `10` for the worker command
 - `TROVE_EMBEDDING_PROVIDER=openai`, `TROVE_EMBEDDING_MODEL`, `TROVE_EMBEDDING_DIMENSIONS`, and `OPENAI_API_KEY` for real embedding refresh
 
+`.env.example` is the complete list of what a deployment sets, and
+`tests/env-surface.test.ts` enforces that: secrets, endpoints, identity,
+topology, and the switches that decide which features are on. Nothing else is an
+environment variable. Timeouts, intervals, retention windows, budgets and
+calibrated thresholds are named constants beside the code they govern — thirty
+of them were variables that no deployment had ever set, which is not
+configuration but a claim of configurability nothing honours, and it made
+"what is this set to in production?" answerable only from a dashboard.
+
+One resolver (`src/llmProvider.ts`) picks the endpoint for every LLM call —
+graph chat, recall reranking and the reconcile judge. `OPENROUTER_API_KEY` wins
+when present; `OPENAI_API_KEY` is the fallback; `OPENAI_BASE_URL` names a
+specific gateway. **Embeddings deliberately do not use it**: the vectors already
+stored were produced by one model at one width, so pointing them elsewhere
+corrupts a column rather than switching providers.
+
 Service tokens use:
 
 ```text
@@ -84,7 +100,7 @@ Graph writes enqueue durable `graph_job` rows for:
 - `refresh_obsidian_projection`
 - `lint_graph`
 - `refresh_embeddings`
-- `reconcile_node` (write-time reconciliation; conservative heuristic by default — the LLM judge is opt-in via `TROVE_RECONCILE_JUDGE=1`. Cost is bounded by construction: candidates beyond `TROVE_RECONCILE_SKIP_DISTANCE` (default 0.45, calibrated) are gated out, survivors are judged in one batched call per write, and `TROVE_RECONCILE_JUDGE_BUDGET` is a per-owner-per-hour backstop (default 100, 0 disables). The budget is **in-process**: each worker tracks its own window and it resets on restart, so across N workers the effective ceiling is N×100 and a crash-loop re-arms it. The distance gate, not the budget, is the real cost bound — the budget only catches pathological bursts)
+- `reconcile_node` (write-time reconciliation; conservative heuristic by default — the LLM judge runs once an LLM key exists, and `TROVE_RECONCILE_JUDGE=0` turns it off. Cost is bounded by construction: candidates beyond the calibrated `SKIP_DISTANCE` (0.45, a constant in `src/reconcile.ts`) are gated out, survivors are judged in one batched call per write, and `TROVE_RECONCILE_JUDGE_BUDGET` is a per-owner-per-hour backstop (default 100, 0 disables). The budget is **in-process**: each worker tracks its own window and it resets on restart, so across N workers the effective ceiling is N×100 and a crash-loop re-arms it. The distance gate, not the budget, is the real cost bound — the budget only catches pathological bursts)
 
 Run a bounded worker pass:
 

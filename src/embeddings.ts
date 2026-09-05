@@ -26,9 +26,10 @@ export function createEmbeddingProviderFromEnv(): EmbeddingProvider | null {
 }
 
 /** Per-request ceiling for an embeddings call. See the fetch in OpenAiEmbeddingProvider. */
+const EMBEDDING_TIMEOUT_MS = 60_000;
+
 function embeddingTimeoutMs(): number {
-  const parsed = Number(process.env.TROVE_EMBEDDING_TIMEOUT_MS);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 60_000;
+  return EMBEDDING_TIMEOUT_MS;
 }
 
 export function vectorLiteral(values: number[]): string {

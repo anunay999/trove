@@ -50,6 +50,8 @@ export type Stats = {
   predicates: CountRow[];
   actions: CountRow[];
   eventsPerDay: Array<{ date: string; total: number; writes: number }>;
+  /** Memories by the day each was first written — the timeline's own subject. */
+  memoriesPerDay: Array<{ date: string; memories: number }>;
   /** Documents dated by domain time — the date each one claims for itself. */
   sourcesPerDay: Array<{ date: string; documents: number }>;
   /** The same documents dated by ingest time — the day Trove received them. */
@@ -72,6 +74,22 @@ export type Stats = {
     createdAt: string;
   }>;
   jobs: CountRow[];
+  /**
+   * The last recall self-test: which notes the graph could not find when asked
+   * about them in their own words. Null until the job has run once.
+   */
+  selfTest: {
+    probed: number;
+    found: number;
+    skipped: number;
+    blindSpots: Array<{
+      nodeId: string;
+      slug: string;
+      title: string;
+      shadowedBy: Array<{ id: string; title: string }>;
+    }>;
+    ranAt: string | null;
+  } | null;
   lint: {
     summary: { nodes: number; edges: number; findings: number; errors: number; warnings: number };
     findings: Array<{ severity: "info" | "warning" | "error"; code: string; message: string }>;

@@ -27,7 +27,7 @@
  *
  * 1. GATE — the semantic arm's cosine distance now rides on every search hit
  *    (SearchResultNode.distance). A candidate farther than
- *    TROVE_RECONCILE_SKIP_DISTANCE (default 0.45) is recorded as
+ *    SKIP_DISTANCE (0.45) is recorded as
  *    via="distance_gate" and never judged. The threshold is CALIBRATED, not
  *    guessed: on a labelled 48-atom corpus (scripts/calibrateReconcileBands.ts)
  *    every supersede pair measured 0.076-0.408 while 0.40 was already low
@@ -54,6 +54,8 @@
 
 import type { GraphNode } from "./contracts.js";
 import type { GraphOperationContext, GraphStore, ReconcileFlagCode, SearchResultNode } from "./graphCore.js";
+import { defaultUtilityModel, resolveLlmProvider } from "./llmProvider.js";
+import { featureEnabled } from "./flags.js";
 
 export type ReconcileVerdict = "supersedes" | "duplicate" | "contradicts" | "related" | "distinct";
 
@@ -94,7 +96,7 @@ export type ReconcileResult = {
   judge: string;
   candidates: ReconcileCandidateResult[];
   supersedesEdgesCreated: Array<{ fromNodeId: string; toNodeId: string }>;
-  flags: Array<{ code: ReconcileFlagCode | "judge_budget_exceeded"; nodeId: string; otherNodeId: string; detail: string }>;
+  flags: Array<{ code: ReconcileFlagCode | "judge_budget_exceeded" | "judge_unavailable"; nodeId: string; otherNodeId: string; detail: string }>;
   /** LLM judge calls this job made: 0 or 1 under the batched policy. The
    *  number backlog #27 exists to drive down — reported, not assumed. */
   judgeCalls: number;
@@ -113,12 +115,13 @@ const MAX_CANDIDATES = 5;
 // CALIBRATED default — see the module doc and scripts/calibrateReconcileBands.ts.
 // Lowering this below ~0.42 loses real supersessions on the measured corpus
 // (a true pair sat at 0.408); it is not a free dial.
-const SKIP_DISTANCE_DEFAULT = 0.45;
+// Not an env var: a calibrated number belongs in the file that explains how it
+// was calibrated, where changing it is a reviewable diff next to its evidence
+// rather than an invisible edit in a deployment dashboard.
+const SKIP_DISTANCE = 0.45;
 
 function reconcileSkipDistance(): number {
-  const raw = process.env.TROVE_RECONCILE_SKIP_DISTANCE;
-  const parsed = Number(raw);
-  return raw && Number.isFinite(parsed) && parsed > 0 ? parsed : SKIP_DISTANCE_DEFAULT;
+  return SKIP_DISTANCE;
 }
 
 /**
@@ -298,29 +301,32 @@ function judgePrompt(newNode: GraphNode, candidates: GraphNode[]): string {
  * unresolvable citation (#9). Anything unrecognised stays OFF, because the
  * expensive direction should never be reached by accident.
  */
-function isEnabled(value: string | undefined): boolean {
-  return value !== undefined && ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
-}
-
 /**
  * Build the LLM judge from the environment, or return null when unconfigured.
- * Uses the OpenAI chat API directly (same key as embeddings); the model
- * defaults to gpt-4o-mini and is overridable via TROVE_RECONCILE_JUDGE_MODEL.
+ * The endpoint comes from the shared resolver (src/llmProvider.ts); the model
+ * defaults to a small utility model and is overridable via
+ * TROVE_RECONCILE_JUDGE_MODEL.
  *
- * OPT-IN — `TROVE_RECONCILE_JUDGE=1` is required. It was originally opt-OUT,
- * which meant any deployment with an OPENAI_API_KEY (i.e. any deployment with
- * semantic search) silently took up to 5 LLM calls per write, proportional to
- * write volume and with no ceiling. The cost is now bounded by construction
- * (see the module doc): a distance gate excuses far candidates, survivors are
- * judged in ONE batched call, and a per-owner hourly budget is the backstop.
- * The flag stays opt-in until that bound has production mileage on it.
+ * ON once a provider exists; `TROVE_RECONCILE_JUDGE=0` turns it off.
+ *
+ * It was opt-OUT once, and that was genuinely wrong: any deployment with an
+ * OPENAI_API_KEY took up to 5 unbounded LLM calls per write. Making it opt-in
+ * bought time to bound the cost, which the module doc now describes — a
+ * distance gate excuses far candidates without a call, survivors are judged in
+ * ONE batched call per write, and a per-owner hourly budget backstops it.
+ *
+ * That debt is paid, and leaving the flag opt-in had its own price, invisible
+ * because nothing failed: 1,081 reconcile jobs ran in production without one
+ * judge call, so the graph never wrote a `supersedes` edge of its own and the
+ * whole automatic half of supersession was dormant. Default-on with a bounded
+ * cost is the honest resting state.
  */
 export function createReconcileJudgeFromEnv(): ReconcileJudge | null {
-  if (!isEnabled(process.env.TROVE_RECONCILE_JUDGE)) return null;
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return null;
-  const model = process.env.TROVE_RECONCILE_JUDGE_MODEL ?? "gpt-4o-mini";
-  const baseUrl = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+  if (!featureEnabled(process.env.TROVE_RECONCILE_JUDGE)) return null;
+  const provider = resolveLlmProvider();
+  if (!provider) return null;
+  const { apiKey, baseUrl } = provider;
+  const model = process.env.TROVE_RECONCILE_JUDGE_MODEL ?? defaultUtilityModel(provider);
 
   return async ({ newNode, candidates }) => {
     if (candidates.length === 0) return [];
@@ -440,12 +446,38 @@ export async function performReconcileNode(
     if (judge) {
       const ownerKey = input.ownerId ?? "global";
       if (consumeJudgeBudget(ownerKey)) {
-        const judgments = await judge({ newNode: node, candidates: toJudge.map((entry) => entry.node) });
-        result.judgeCalls = 1;
-        for (const [i, entry] of toJudge.entries()) {
-          const judgment = judgments[i] ?? { ...SAFE_DEFAULT };
-          record(entry, judgment, "judge");
-          await applyActions(entry, judgment);
+        // FAIL OPEN, the same contract the reranker keeps. A judge call is a
+        // network call to a model id somebody configured, so it can 404 on a
+        // provider that does not serve it, rate-limit, or time out — and this
+        // runs on EVERY write. An exception here used to escape and fail the
+        // reconcile job, which then retries, which is how a queue wedges. The
+        // fallback is not a special degraded mode: it is exactly what runs when
+        // no judge is configured at all, plus a flag saying why.
+        let judgments: ReconcileJudgment[] | null = null;
+        try {
+          judgments = await judge({ newNode: node, candidates: toJudge.map((entry) => entry.node) });
+        } catch (cause) {
+          result.judge = "heuristic";
+          result.flags.push({
+            code: "judge_unavailable",
+            nodeId: node.id,
+            otherNodeId: node.id,
+            detail: cause instanceof Error ? cause.message : "judge call failed",
+          });
+        }
+        if (judgments) {
+          result.judgeCalls = 1;
+          for (const [i, entry] of toJudge.entries()) {
+            const judgment = judgments[i] ?? { ...SAFE_DEFAULT };
+            record(entry, judgment, "judge");
+            await applyActions(entry, judgment);
+          }
+        } else {
+          for (const entry of toJudge) {
+            const judgment = heuristicJudgment(node, entry.node);
+            record(entry, judgment, "heuristic");
+            await applyActions(entry, judgment);
+          }
         }
       } else {
         // Budget spent: nothing is judged, and the result says so plainly.
@@ -487,8 +519,9 @@ export async function performReconcileNode(
  * set is written empty, which also clears anything an earlier judged pass left
  * on this node.
  *
- * A budget-exhausted pass judged nothing, so it is not evidence that the
- * node's earlier flags are stale: it writes nothing rather than clearing them.
+ * A pass that judged nothing — budget exhausted, or the judge unreachable —
+ * is not evidence that the node's earlier flags are stale: it writes nothing
+ * rather than clearing them.
  */
 async function persistFlags(
   store: GraphStore,
@@ -497,10 +530,11 @@ async function persistFlags(
   judged: boolean,
   context: GraphOperationContext | undefined,
 ): Promise<void> {
-  if (judged && result.flags.some((flag) => flag.code === "judge_budget_exceeded")) return;
+  const unjudged = new Set(["judge_budget_exceeded", "judge_unavailable"]);
+  if (judged && result.flags.some((flag) => unjudged.has(flag.code))) return;
   const flags = judged
     ? result.flags
-      .filter((flag): flag is typeof flag & { code: ReconcileFlagCode } => flag.code !== "judge_budget_exceeded")
+      .filter((flag): flag is typeof flag & { code: ReconcileFlagCode } => !unjudged.has(flag.code))
       .map((flag) => ({ code: flag.code, otherNodeId: flag.otherNodeId, detail: flag.detail }))
     : [];
   await store.recordReconcileFlags({ nodeId, flags }, context);

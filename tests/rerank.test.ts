@@ -72,16 +72,80 @@ describe("recall reranker", () => {
     assert.ok(rerankPrompt("q", [bounded]).length < 2_000);
   });
 
-  it("is unconfigured unless the opt-in flag and a key are both present", () => {
-    withEnv({ TROVE_RECALL_RERANK: undefined, OPENAI_API_KEY: "sk-test" }, () => {
+  it("needs a provider, and nothing else", () => {
+    const noKeys = { OPENAI_API_KEY: undefined, OPENROUTER_API_KEY: undefined, OPENAI_BASE_URL: undefined };
+    // No key, no reranking, whatever the flag says.
+    withEnv({ ...noKeys, TROVE_RECALL_RERANK: "1" }, () => {
       assert.equal(createRecallRerankerFromEnv(), null);
     });
-    withEnv({ TROVE_RECALL_RERANK: "1", OPENAI_API_KEY: undefined }, () => {
-      assert.equal(createRecallRerankerFromEnv(), null);
-    });
-    withEnv({ TROVE_RECALL_RERANK: "yes", OPENAI_API_KEY: "sk-test" }, () => {
+    // A key is enough: this shipped opt-in and then sat dark for months in the
+    // one deployment that had a key, handing every answer an unranked order.
+    withEnv({ ...noKeys, TROVE_RECALL_RERANK: undefined, OPENAI_API_KEY: "sk-test" }, () => {
       assert.equal(typeof createRecallRerankerFromEnv(), "function");
     });
+    // Whichever LLM key the deployment has is the reranker's key too. It needs
+    // none of its own — two bespoke variables once existed for this and were
+    // the wrong answer to a duplicated resolver.
+    withEnv({ ...noKeys, OPENROUTER_API_KEY: "or-test" }, () => {
+      assert.equal(typeof createRecallRerankerFromEnv(), "function");
+    });
+    // And a deployment can still say no.
+    for (const value of ["0", "false", "off", "no"]) {
+      withEnv({ ...noKeys, TROVE_RECALL_RERANK: value, OPENAI_API_KEY: "sk-test" }, () => {
+        assert.equal(createRecallRerankerFromEnv(), null, `value ${JSON.stringify(value)} must disable reranking`);
+      });
+    }
+  });
+
+  /**
+   * Reranking runs on every recall, so it is the call that most wants the cheap
+   * provider. These pin that it follows the shared resolver — including the
+   * model id, since a bare "gpt-4o-mini" is an OpenAI name and OpenRouter
+   * namespaces the same model.
+   */
+  it("follows the shared provider, model id and all", async () => {
+    const seen: Array<{ url: string; auth: string | null; model: unknown }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: unknown, init: { headers?: Record<string, string>; body?: string }) => {
+      const body = JSON.parse(init?.body ?? "{}") as { model?: unknown };
+      seen.push({ url: String(url), auth: init?.headers?.authorization ?? null, model: body.model });
+      return {
+        ok: true,
+        json: async () => ({ choices: [{ message: { content: '{"scores":[{"index":1,"score":0.5}]}' } }] }),
+      };
+    }) as unknown as typeof globalThis.fetch;
+
+    try {
+      const cheap = withEnv({
+        TROVE_RECALL_RERANK: "1",
+        OPENROUTER_API_KEY: "or-cheap",
+        OPENAI_API_KEY: "sk-embeddings",
+        OPENAI_BASE_URL: undefined,
+        TROVE_RECALL_RERANK_MODEL: undefined,
+      }, () => createRecallRerankerFromEnv());
+      assert.ok(cheap);
+      await cheap({ query: "q", candidates: [candidate("a")] });
+
+      const openai = withEnv({
+        TROVE_RECALL_RERANK: "1",
+        OPENROUTER_API_KEY: undefined,
+        OPENAI_API_KEY: "sk-embeddings",
+        OPENAI_BASE_URL: undefined,
+        TROVE_RECALL_RERANK_MODEL: undefined,
+      }, () => createRecallRerankerFromEnv());
+      assert.ok(openai);
+      await openai({ query: "q", candidates: [candidate("a")] });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    assert.equal(seen.length, 2);
+    assert.equal(seen[0]?.url, "https://openrouter.ai/api/v1/chat/completions");
+    assert.equal(seen[0]?.auth, "Bearer or-cheap");
+    assert.equal(seen[0]?.model, "openai/gpt-4o-mini");
+    assert.equal(seen[1]?.url, "https://api.openai.com/v1/chat/completions");
+    assert.equal(seen[1]?.auth, "Bearer sk-embeddings");
+    assert.equal(seen[1]?.model, "gpt-4o-mini");
   });
 
   describe("rerankCandidates fails open", () => {

@@ -21,7 +21,9 @@
  *
  * - PROVIDER INTERFACE. `Reranker` is a function type, injected at the call
  *   site, so tests reorder a known candidate set with zero network.
- * - OPT-IN. `TROVE_RECALL_RERANK=1` plus an `OPENAI_API_KEY`. Off by default,
+ * - ON WITH A PROVIDER. Whatever LLM key the deployment already has switches
+ *   this on (src/llmProvider.ts resolves it); `TROVE_RECALL_RERANK=0` turns
+ *   it off,
  *   because switching it on adds an LLM call to the latency of every recall —
  *   the interactive path, not a background job. With the flag unset recall is
  *   byte-identical to what it was before this module existed.
@@ -36,6 +38,8 @@
 
 import type { GraphNode } from "./contracts.js";
 import { contentTerms } from "./queryNormalize.js";
+import { defaultUtilityModel, resolveLlmProvider } from "./llmProvider.js";
+import { featureEnabled } from "./flags.js";
 
 /** What the reranker is shown about one candidate. Bounded by construction. */
 export type RerankCandidate = {
@@ -87,10 +91,6 @@ export function rerankTimeoutMs(): number {
  * `src/reconcile.ts`: a strict `=== "1"` turns `TROVE_RECALL_RERANK=true` into
  * config that reads as enabled and is not.
  */
-function isEnabled(value: string | undefined): boolean {
-  return value !== undefined && ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
-}
-
 /** The bounded view of a node the reranker is allowed to see. */
 export function toRerankCandidate(node: GraphNode): RerankCandidate {
   return {
@@ -168,20 +168,28 @@ export function parseRerankScores(reply: string, count: number): number[] | null
 
 /**
  * Build the LLM reranker from the environment, or return null when it is not
- * configured. Uses the OpenAI chat API directly, the same key and base URL as
- * embeddings and the reconcile judge; the model defaults to gpt-4o-mini and is
- * overridable via TROVE_RECALL_RERANK_MODEL.
+ * configured. The model defaults to a small utility model and is overridable
+ * via TROVE_RECALL_RERANK_MODEL.
  *
- * OPT-IN — `TROVE_RECALL_RERANK=1` is required. Unlike reconcile, which pays
- * its LLM call in a background job, this one sits inside an interactive read.
- * It stays off until the latency has production mileage on it.
+ * ON once a provider exists; `TROVE_RECALL_RERANK=0` turns it off. It shipped
+ * opt-in because it puts an LLM call inside an interactive read and had no
+ * production mileage. It then sat dark for months in the only deployment with a
+ * key, while recall handed every answer its unranked candidate order — and the
+ * benchmark in this module's header had already priced exactly that. An unset
+ * opt-in flag is indistinguishable from a deliberate no.
+ *
+ * The endpoint comes from the shared resolver (src/llmProvider.ts), so
+ * reranking rides whichever LLM key the deployment already has rather than
+ * needing one of its own. Reranking runs on every recall, which makes it the
+ * most price-sensitive call in the product and the one that most wants the
+ * cheap provider; the resolver prefers OpenRouter for exactly that reason.
  */
 export function createRecallRerankerFromEnv(): Reranker | null {
-  if (!isEnabled(process.env.TROVE_RECALL_RERANK)) return null;
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return null;
-  const model = process.env.TROVE_RECALL_RERANK_MODEL ?? "gpt-4o-mini";
-  const baseUrl = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+  if (!featureEnabled(process.env.TROVE_RECALL_RERANK)) return null;
+  const provider = resolveLlmProvider();
+  if (!provider) return null;
+  const { apiKey, baseUrl } = provider;
+  const model = process.env.TROVE_RECALL_RERANK_MODEL ?? defaultUtilityModel(provider);
 
   return async ({ query, candidates }) => {
     if (candidates.length === 0) return [];

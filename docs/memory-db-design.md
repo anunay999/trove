@@ -91,7 +91,7 @@ Ordered by leverage; the schema is already ~70% of the way there.
 > judges the surviving candidates. An LLM judge (OpenAI, `TROVE_RECONCILE_JUDGE_MODEL`, heuristic
 > fallback without a key) classifies supersedes / duplicate / contradicts / related /
 > distinct. Cost is bounded (backlog #27, 2026-07-20): a calibrated distance gate
-> (`TROVE_RECONCILE_SKIP_DISTANCE`, default 0.45) excuses far candidates without a
+> (`SKIP_DISTANCE`, 0.45) excuses far candidates without a
 > call, survivors are judged in one batched call per write, and a per-owner hourly
 > budget (`TROVE_RECONCILE_JUDGE_BUDGET`) is the backstop. A confident `supersedes`
 > verdict writes a non-destructive `supersedes`

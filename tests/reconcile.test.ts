@@ -389,6 +389,40 @@ describe("reconcile: distance gate (backlog #27)", () => {
     assert.equal(gated?.distance, 0.5);
   });
 
+  it("a judge that throws degrades to the heuristic instead of failing the write", async () => {
+    // This runs on EVERY write, against a model id somebody configured, so it
+    // can 404 on a provider that does not serve it. An exception escaping here
+    // fails the reconcile job, which retries — and that is how a queue wedges.
+    // Now that the judge is on by default, this is the difference between a
+    // misconfigured model being a flag and being an outage.
+    const near = { ...fakeNode("near", "Near neighbour"), distance: 0.1 };
+    let persisted: unknown = "never called";
+    const store = {
+      read: async () => fakeNode("new-node", "New fact title"),
+      search: async (input: { mode?: string }) =>
+        input.mode === "semantic" ? { nodes: [near], textUnits: [] } : { nodes: [], textUnits: [] },
+      link: async () => null,
+      recordReconcileFlags: async (input: unknown) => { persisted = input; },
+    } as unknown as GraphStore;
+
+    const result = await performReconcileNode(store, { nodeId: "new-node" }, async () => {
+      throw new Error("reconcile judge: OpenAI 404");
+    });
+
+    assert.equal(result.status, "reconciled", "the write must not fail with the judge");
+    assert.equal(result.judgeCalls, 0, "a throw is not a judge call");
+    assert.equal(result.judge, "heuristic", "the result must say what actually ran");
+    assert.equal(
+      result.candidates.find((candidate) => candidate.nodeId === "near")?.via,
+      "heuristic",
+      "candidates fall back to exactly what runs with no judge configured",
+    );
+    const flag = result.flags.find((entry) => entry.code === "judge_unavailable");
+    assert.ok(flag, "the failure is recorded, not swallowed");
+    assert.match(flag.detail, /404/, "the flag carries the provider's own reason");
+    assert.equal(persisted, "never called", "a pass that judged nothing must not clear earlier flags");
+  });
+
   it("a write with no near neighbour makes ZERO judge calls", async () => {
     let calls = 0;
     const result = await performReconcileNode(
@@ -461,12 +495,21 @@ describe("reconcile: judge is opt-in via TROVE_RECONCILE_JUDGE=1", () => {
     }
   }
 
-  it("stays off for absent, falsey and unrecognised values, even with a key present", () => {
-    // Unrecognised means OFF: the expensive direction must never be reached by
-    // accident. Absence of the var is the shipped default.
-    for (const value of [undefined, "", "0", "false", "no", "off", "maybe"]) {
+  it("runs once a provider exists, without anyone remembering a flag", () => {
+    // The judge was opt-in for a year and 1,081 production jobs ran without one
+    // call, so the graph never wrote a supersedes edge of its own. Nothing
+    // failed; the feature was simply dormant. A bounded cost belongs on.
+    for (const value of [undefined, ""]) {
       withEnv({ TROVE_RECONCILE_JUDGE: value, OPENAI_API_KEY: "sk-test" }, () => {
-        assert.equal(createReconcileJudgeFromEnv(), null, `value ${JSON.stringify(value)} must not enable the judge`);
+        assert.ok(createReconcileJudgeFromEnv(), `value ${JSON.stringify(value)} should leave the judge on`);
+      });
+    }
+  });
+
+  it("stays off only when a deployment says so", () => {
+    for (const value of ["0", "false", "no", "off", " OFF "]) {
+      withEnv({ TROVE_RECONCILE_JUDGE: value, OPENAI_API_KEY: "sk-test" }, () => {
+        assert.equal(createReconcileJudgeFromEnv(), null, `value ${JSON.stringify(value)} must disable the judge`);
       });
     }
   });
@@ -481,8 +524,8 @@ describe("reconcile: judge is opt-in via TROVE_RECONCILE_JUDGE=1", () => {
     }
   });
 
-  it("returns null with =1 but no OpenAI key", () => {
-    withEnv({ TROVE_RECONCILE_JUDGE: "1", OPENAI_API_KEY: undefined }, () => {
+  it("returns null with no LLM key at all, however the flag reads", () => {
+    withEnv({ TROVE_RECONCILE_JUDGE: "1", OPENAI_API_KEY: undefined, OPENROUTER_API_KEY: undefined }, () => {
       assert.equal(createReconcileJudgeFromEnv(), null);
     });
   });

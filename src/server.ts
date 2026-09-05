@@ -61,6 +61,7 @@ import {
 import { createGraphStore } from "./createStore.js";
 import { EdgeValidityConflictError, isSmokeEvent } from "./graphCore.js";
 import { sourceDaySeries } from "./sourceStats.js";
+import { jobResultAs } from "./jobResults.js";
 import { graphChatResponse } from "./graphChat.js";
 import { startJobWorker } from "./jobWorker.js";
 import { createTroveMcpServer } from "./mcpTools.js";
@@ -202,12 +203,13 @@ app.get("/v1/stats", async (context) => {
   if (auth instanceof Response) return auth;
 
   const owner = operationContextFromAuth(auth);
-  const [snapshot, jobList, lintReport, latest, sourceRows] = await Promise.all([
+  const [snapshot, jobList, lintReport, latest, sourceRows, memoryDays] = await Promise.all([
     store.exportGraph(owner),
     store.jobs({ limit: 100 }, owner),
     store.lint(owner),
     store.timeline(owner),
     store.sources({ limit: 5000 }, owner),
+    store.memoryDays(owner),
   ]);
 
   // Two honest readings of the same rows. Domain time answers "when is this
@@ -221,6 +223,15 @@ app.get("/v1/stats", async (context) => {
   // it never reached, so the cadence chart went blank for the most recent week
   // while writes were still landing.
   const eventStats = await store.eventStats(owner);
+
+  // Newest first: jobs come back most-recent-first, so the first match is the
+  // current answer and an older run must never overwrite it.
+  const latestSelfTest = jobList
+    .map((job) => {
+      const result = jobResultAs(job, "recall_self_test");
+      return result ? { ...result, ranAt: job.finishedAt ?? job.updatedAt } : null;
+    })
+    .find((row) => row !== null) ?? null;
 
   const countBy = <T>(items: T[], key: (item: T) => string): Array<{ key: string; count: number }> => {
     const counts = new Map<string, number>();
@@ -280,11 +291,20 @@ app.get("/v1/stats", async (context) => {
     predicates: countBy(snapshot.edges, (edge) => edge.predicate),
     actions: eventStats.actions,
     eventsPerDay: eventStats.perDay,
+    // The timeline's subject. Sources are the second series beside it, not the
+    // chart: a person writes atoms daily and ingests a document rarely, so a
+    // chart of sources alone reads as a broken chart on a growing graph.
+    memoriesPerDay: memoryDays,
     sourcesPerDay: sourceDays.byDocumentDate,
     sourcesIngestedPerDay: sourceDays.byIngestDate,
     topAccessed,
     recentEvents,
     jobs: countBy(jobList, (job) => job.status),
+    // The last self-test the worker ran: which notes the graph could not find
+    // when asked about them in their own words. Read off the job it already
+    // fetched rather than probed here — a self-test is 20 recalls, which is a
+    // background job's work, never a dashboard request's.
+    selfTest: latestSelfTest,
     lint: {
       summary: lintReport.summary,
       findings: lintReport.findings.slice(0, 8),
@@ -780,7 +800,10 @@ serve({ fetch: app.fetch, port }, (info) => {
 // TROVE_AUTORUN_JOBS=0.
 const worker = (process.env.TROVE_AUTORUN_JOBS ?? "1") !== "0"
   ? (() => {
-    const intervalMs = Number(process.env.TROVE_JOB_INTERVAL_MS ?? 30_000);
+    // How often the in-process worker looks for pending jobs. A constant: no
+    // deployment has ever wanted a different number, and one that did would
+    // rather change it in a diff than in a dashboard.
+    const intervalMs = 30_000;
     const started = startJobWorker(store, {
       intervalMs,
       log: (message) => console.log(`[job-worker] ${message}`),

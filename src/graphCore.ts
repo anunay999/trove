@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { recallInputSchema } from "./contracts.js";
 import { contentTerms } from "./queryNormalize.js";
 import { parseTemporalScope, temporalAffinity, type TemporalScope } from "./temporalScope.js";
+import { featureEnabled } from "./flags.js";
 import {
   createRecallRerankerFromEnv,
   mmrOrder,
@@ -156,6 +157,21 @@ export type GraphEventStats = {
 };
 
 /**
+ * Memories per day, by the day each one was first written.
+ *
+ * The dashboard's timeline plotted sources, which is the rarest thing a person
+ * does here: it read 0 or 1 on almost every day while the graph itself held
+ * fifteen hundred atoms. Atoms are what `remember` writes and what recall
+ * finds, so they are what a memory timeline is about.
+ *
+ * Dated by first write, never by `updated_at`: revising a March note today
+ * must not move it to today, or the chart quietly rewrites its own history
+ * every time anything is edited. Live nodes only, so the series always sums to
+ * the node count the rest of the dashboard reports.
+ */
+export type MemoryDay = { date: string; memories: number };
+
+/**
  * Row counts for the two owner types the embedding backfill touches.
  *
  * `GraphJob.result` is an untyped `Record<string, unknown>`, so producer and
@@ -269,6 +285,19 @@ export const TERMINAL_JOB_RETENTION_DAYS = 30;
 export function lintMinIntervalSeconds(): number {
   const parsed = Number(process.env.TROVE_LINT_MIN_INTERVAL_SECONDS);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 600;
+}
+
+/**
+ * Minimum seconds between two recall self-tests of one scope. A day: two orders
+ * of magnitude slacker than lint, because a self-test is twenty recalls rather
+ * than one pass over a snapshot — and because what it measures moves on the
+ * scale of weeks, not writes.
+ *
+ * A constant, not a variable. It shipped as one for about an hour and that was
+ * a mistake of exactly the kind this codebase had accumulated thirty of.
+ */
+export function selfTestMinIntervalSeconds(): number {
+  return 86_400;
 }
 
 /**
@@ -810,6 +839,8 @@ export type GraphStore = {
   timeline(context?: GraphOperationContext): MaybePromise<GraphEvent[]>;
   events(input?: EventFeedInput, context?: GraphOperationContext): MaybePromise<GraphEventFeed>;
   eventStats(context?: GraphOperationContext): MaybePromise<GraphEventStats>;
+  /** UTC day buckets of first-written memories, ascending; empty days absent. */
+  memoryDays(context?: GraphOperationContext): MaybePromise<MemoryDay[]>;
   lint(context?: GraphOperationContext): MaybePromise<GraphLintReport>;
   /**
    * Settle any buffered activation bumps. Reads strengthen a node's activation
@@ -968,8 +999,7 @@ const TEMPORAL_NEUTRAL_AFFINITY = 0.5;
 
 /** Query-side temporal scoping is on by default; set TROVE_TEMPORAL_SCOPE=0/off/false to fall back to present-day recall. */
 export function temporalScopeEnabled(): boolean {
-  const raw = process.env.TROVE_TEMPORAL_SCOPE?.trim().toLowerCase();
-  return raw === undefined || raw === "" || !["0", "false", "off", "no"].includes(raw);
+  return featureEnabled(process.env.TROVE_TEMPORAL_SCOPE);
 }
 
 /**
