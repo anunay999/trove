@@ -385,6 +385,7 @@ export const graphJobKindSchema = z.enum([
   "lint_graph",
   "refresh_embeddings",
   "reconcile_node",
+  "recall_self_test",
 ]);
 
 export const graphJobStatusSchema = z.enum([

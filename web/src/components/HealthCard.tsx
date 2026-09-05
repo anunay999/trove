@@ -7,6 +7,45 @@ const SEVERITY_COLOR: Record<string, string> = {
   info: STATUS.good,
 };
 
+/**
+ * Notes the graph could not retrieve when asked about them in their own words.
+ *
+ * Lint answers "is this note well-formed". This answers the only question that
+ * decides whether a memory graph works: when you go looking for something you
+ * wrote, does it come back. A note can be perfectly linked, freshly written and
+ * still unreachable, because reachability belongs to the note AND everything
+ * around it — so it degrades as the graph grows, with no defect anywhere to
+ * find. The usual cause is a general note in the same cluster absorbing the
+ * query, which is why the row names what stood in front of it: that is the
+ * half you can act on.
+ */
+function BlindSpots({ selfTest }: { selfTest: Stats["selfTest"] }) {
+  if (!selfTest || selfTest.probed === 0) return null;
+  const missed = selfTest.blindSpots.length;
+  const worst = selfTest.blindSpots[0];
+  const shadow = worst?.shadowedBy[0]?.title;
+
+  return (
+    <div className="border-t pt-3">
+      <p className="text-[13px] leading-snug text-muted-foreground">
+        <span
+          className="mr-1.5 inline-block size-1.5 rounded-full align-middle"
+          style={{ background: missed === 0 ? STATUS.good : SEVERITY_COLOR.warning }}
+          aria-hidden
+        />
+        <span className="text-foreground">{missed}</span>
+        {missed === 1 ? " note" : " notes"} unreachable of {selfTest.probed} sampled
+      </p>
+      {worst ? (
+        <p className="mt-1 truncate text-[12px] text-muted-foreground" title={worst.title}>
+          e.g. \u201c{worst.title}\u201d
+          {shadow ? <> \u2014 shadowed by \u201c{shadow}\u201d</> : null}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 // Status colors never carry meaning alone: each row pairs the dot with a label.
 export function HealthCard({ stats }: { stats: Stats }) {
   const { summary, findings } = stats.lint;
@@ -47,6 +86,7 @@ export function HealthCard({ stats }: { stats: Stats }) {
           <li className="text-sm text-muted-foreground">No lint findings. The graph is tidy.</li>
         ) : null}
       </ul>
+      <BlindSpots selfTest={stats.selfTest} />
       <p className="border-t pt-3 font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground">
         Jobs: {jobsPending} pending, {jobsFailed} failed
       </p>

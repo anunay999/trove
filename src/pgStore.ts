@@ -38,6 +38,7 @@ import {
   JOB_MAX_ATTEMPTS,
   TERMINAL_JOB_RETENTION_DAYS,
   lintMinIntervalSeconds,
+  selfTestMinIntervalSeconds,
   capEventPayload,
   eventPruneMaxRows,
   eventRetentionDays,
@@ -93,6 +94,7 @@ import {
   performReconcileNode,
   type ReconcileJudge,
 } from "./reconcile.js";
+import { runRecallSelfTest } from "./recallSelfTest.js";
 import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
 
@@ -2602,20 +2604,68 @@ export class PgGraphStore implements GraphStore {
         dedupeKey,
       }, context, actorUuid);
     }
+    await this.enqueueRecallSelfTest(client, scope, context, actorUuid);
+  }
+
+  /**
+   * The daily "can the graph still find its own notes" check.
+   *
+   * It rides the same mutation path as lint rather than a scheduler, because
+   * this codebase has no scheduler and a health check nobody remembers to run
+   * is not a feature. Its own throttle is a day, not lint's ten minutes: a
+   * self-test is twenty recalls, and what it measures — whether a new note is
+   * shadowed by the cluster it landed in — changes over weeks.
+   *
+   * Lowest priority in the queue. Nothing waits on this, and it must never
+   * delay an embedding refresh a live recall is about to want.
+   */
+  private async enqueueRecallSelfTest(
+    client: pg.PoolClient,
+    scope: ReturnType<typeof ownerScope>,
+    context: GraphOperationContext | undefined,
+    actorUuid: string | null,
+  ): Promise<void> {
+    const interval = selfTestMinIntervalSeconds();
+    if (interval <= 0) return;
+    // Owner-scoped like lint: a self-test must ask the graph the way its owner
+    // would, or it probes a pool they cannot see and reports blind spots that
+    // are not theirs.
+    const scoped = scope.scoped && scope.ownerId !== null;
+    const dedupeKey = scoped
+      ? `maintenance:recall_self_test:${scope.ownerId}`
+      : "maintenance:recall_self_test";
+    if (await this.maintenanceSucceededRecently(client, "recall_self_test", dedupeKey, interval)) return;
+    await this.enqueueJobWithClient(client, {
+      kind: "recall_self_test",
+      payload: scoped
+        ? { reason: "graph_mutation", ownerId: scope.ownerId }
+        : { reason: "graph_mutation" },
+      priority: 80,
+      dedupeKey,
+    }, context, actorUuid);
   }
 
   private async lintSucceededRecently(client: pg.PoolClient, dedupeKey: string): Promise<boolean> {
-    const interval = lintMinIntervalSeconds();
+    return this.maintenanceSucceededRecently(client, "lint_graph", dedupeKey, lintMinIntervalSeconds());
+  }
+
+  /** Has this exact maintenance job succeeded inside its own throttle window? */
+  private async maintenanceSucceededRecently(
+    client: pg.PoolClient,
+    kind: GraphJob["kind"],
+    dedupeKey: string,
+    interval: number,
+  ): Promise<boolean> {
     if (interval <= 0) return false;
     const recent = await client.query(
       `select 1
        from graph_job
-       where kind = 'lint_graph'
+       where kind = $3
          and dedupe_key = $1
          and status = 'succeeded'
          and finished_at > now() - make_interval(secs => $2::numeric)
        limit 1`,
-      [dedupeKey, interval],
+      [dedupeKey, interval, kind],
     );
     return (recent.rowCount ?? 0) > 0;
   }
@@ -2936,6 +2986,20 @@ export class PgGraphStore implements GraphStore {
         prunedJobs,
         prunedEvents,
       };
+      return result;
+    }
+
+    if (job.kind === "recall_self_test") {
+      const payload = asRecord(job.payload);
+      const ownerId = typeof payload.ownerId === "string" ? payload.ownerId : null;
+      const sampleSize = typeof payload.sampleSize === "number" ? payload.sampleSize : undefined;
+      // Owner-scoped like every other read: a self-test must ask the graph the
+      // way its owner would, or it measures a pool they cannot see.
+      const result: GraphJobResultMap["recall_self_test"] = await runRecallSelfTest(
+        this,
+        sampleSize === undefined ? {} : { sampleSize },
+        ownerId ? { ownerId } : undefined,
+      );
       return result;
     }
 
