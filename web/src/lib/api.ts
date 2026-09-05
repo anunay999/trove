@@ -140,10 +140,28 @@ async function authHeaders(): Promise<Record<string, string>> {
   };
 }
 
+/**
+ * A failed request that still knows what the server said.
+ *
+ * The status is the difference between "you are not signed in yet" and "that
+ * was refused", and callers that recover from one must not recover from the
+ * other. Losing it to a formatted string is how a 401 came to be treated as a
+ * rejected impersonation.
+ */
+export class HttpError extends Error {
+  readonly status: number;
+
+  constructor(path: string, status: number) {
+    super(`${path} failed: ${status}`);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
+
 async function getJson<T>(path: string): Promise<T> {
   const response = await fetch(path, { headers: await authHeaders() });
   if (!response.ok) {
-    throw new Error(`${path} failed: ${response.status}`);
+    throw new HttpError(path, response.status);
   }
   return response.json() as Promise<T>;
 }
@@ -363,7 +381,19 @@ export async function fetchMe(): Promise<Me> {
     return await getJson<Me>("/v1/me");
   } catch (cause) {
     const target = getImpersonation();
-    if (target) {
+    // ONLY a 403. Every way the server can refuse an impersonation is a 403 —
+    // insufficient_scope, unknown_user, inactive_user — while a 401 means the
+    // request carried no session at all, which is not the impersonation's
+    // fault and must not be blamed on it.
+    //
+    // That distinction is the whole bug this guard exists for. The dashboard
+    // probes /v1/me once at mount to learn the server's auth mode, and that
+    // probe runs BEFORE Clerk has restored the session, so it 401s on every
+    // load — while still carrying the impersonate header out of localStorage.
+    // Bouncing on it meant: pick an account, reload, the probe 401s, the choice
+    // is cleared as though it had been rejected, reload again, and you are
+    // yourself. Switching accounts appeared to do nothing at all.
+    if (target && cause instanceof HttpError && cause.status === 403) {
       // Leave a note across the reload. Without one this recovery is silent
       // and indistinguishable from "the switcher did nothing": the page
       // reloads, you are still yourself, and nothing says why.
