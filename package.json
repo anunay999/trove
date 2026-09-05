@@ -41,21 +41,21 @@
     "rebuild": "npm run clean && npm run build && npm run web:build"
   },
   "dependencies": {
-    "@clerk/backend": "^3.10.0",
-    "@hono/node-server": "^2.0.8",
+    "@clerk/backend": "^3.17.0",
+    "@hono/node-server": "^2.1.1",
     "@langfuse/otel": "^5.11.0",
     "@langfuse/tracing": "^5.11.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@opentelemetry/sdk-node": "^0.222.0",
-    "hono": "^4.12.27",
-    "pg": "^8.22.0",
-    "zod": "^4.4.3"
+    "hono": "^4.13.5",
+    "pg": "^8.23.0",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
-    "@types/node": "^26.1.0",
-    "@types/pg": "^8.20.0",
-    "oxlint": "^1.0.0",
-    "tsx": "^4.23.0",
+    "@types/node": "^26.4.1",
+    "@types/pg": "^8.23.1",
+    "oxlint": "^1.81.0",
+    "tsx": "^4.23.13",
     "typescript": "^6.0.3"
   }
 }
