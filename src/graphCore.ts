@@ -156,6 +156,21 @@ export type GraphEventStats = {
 };
 
 /**
+ * Memories per day, by the day each one was first written.
+ *
+ * The dashboard's timeline plotted sources, which is the rarest thing a person
+ * does here: it read 0 or 1 on almost every day while the graph itself held
+ * fifteen hundred atoms. Atoms are what `remember` writes and what recall
+ * finds, so they are what a memory timeline is about.
+ *
+ * Dated by first write, never by `updated_at`: revising a March note today
+ * must not move it to today, or the chart quietly rewrites its own history
+ * every time anything is edited. Live nodes only, so the series always sums to
+ * the node count the rest of the dashboard reports.
+ */
+export type MemoryDay = { date: string; memories: number };
+
+/**
  * Row counts for the two owner types the embedding backfill touches.
  *
  * `GraphJob.result` is an untyped `Record<string, unknown>`, so producer and
@@ -810,6 +825,8 @@ export type GraphStore = {
   timeline(context?: GraphOperationContext): MaybePromise<GraphEvent[]>;
   events(input?: EventFeedInput, context?: GraphOperationContext): MaybePromise<GraphEventFeed>;
   eventStats(context?: GraphOperationContext): MaybePromise<GraphEventStats>;
+  /** UTC day buckets of first-written memories, ascending; empty days absent. */
+  memoryDays(context?: GraphOperationContext): MaybePromise<MemoryDay[]>;
   lint(context?: GraphOperationContext): MaybePromise<GraphLintReport>;
   /**
    * Settle any buffered activation bumps. Reads strengthen a node's activation

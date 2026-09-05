@@ -50,6 +50,8 @@ export type Stats = {
   predicates: CountRow[];
   actions: CountRow[];
   eventsPerDay: Array<{ date: string; total: number; writes: number }>;
+  /** Memories by the day each was first written — the timeline's own subject. */
+  memoriesPerDay: Array<{ date: string; memories: number }>;
   /** Documents dated by domain time — the date each one claims for itself. */
   sourcesPerDay: Array<{ date: string; documents: number }>;
   /** The same documents dated by ingest time — the day Trove received them. */

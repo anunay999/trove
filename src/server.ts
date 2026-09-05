@@ -202,12 +202,13 @@ app.get("/v1/stats", async (context) => {
   if (auth instanceof Response) return auth;
 
   const owner = operationContextFromAuth(auth);
-  const [snapshot, jobList, lintReport, latest, sourceRows] = await Promise.all([
+  const [snapshot, jobList, lintReport, latest, sourceRows, memoryDays] = await Promise.all([
     store.exportGraph(owner),
     store.jobs({ limit: 100 }, owner),
     store.lint(owner),
     store.timeline(owner),
     store.sources({ limit: 5000 }, owner),
+    store.memoryDays(owner),
   ]);
 
   // Two honest readings of the same rows. Domain time answers "when is this
@@ -280,6 +281,10 @@ app.get("/v1/stats", async (context) => {
     predicates: countBy(snapshot.edges, (edge) => edge.predicate),
     actions: eventStats.actions,
     eventsPerDay: eventStats.perDay,
+    // The timeline's subject. Sources are the second series beside it, not the
+    // chart: a person writes atoms daily and ingests a document rarely, so a
+    // chart of sources alone reads as a broken chart on a growing graph.
+    memoriesPerDay: memoryDays,
     sourcesPerDay: sourceDays.byDocumentDate,
     sourcesIngestedPerDay: sourceDays.byIngestDate,
     topAccessed,
