@@ -307,7 +307,21 @@ export default function App() {
             full width, bled to the edges so it scrolls past the padding). From
             sm it sits back inline and absorbs any remaining squeeze by
             scrolling, so the document never gets a horizontal scrollbar. */}
-        <div className="mx-auto flex min-h-14 w-full max-w-7xl flex-wrap items-center gap-x-6 gap-y-2 px-6 py-2 sm:flex-nowrap sm:py-0 2xl:max-w-[88rem]">
+        <div
+          className={`flex min-h-14 w-full flex-wrap items-center gap-x-6 gap-y-2 px-6 py-2 sm:flex-nowrap sm:py-0 ${
+            /* The app bar spans the window. Centring the tabs was only half the
+               problem: the row itself sat in a max-w-7xl container, so on a wide
+               screen the wordmark and the account both stopped short of the
+               corners by whatever gutter the container left — about 180px at
+               2000px wide — and read as floating rather than anchored. The
+               canvas underneath is already full-bleed, which made it obvious.
+
+               The landing keeps the container: it is a marketing page whose
+               content is measured to a column, and a header wider than the page
+               it heads would be the same mistake in the other direction. */
+            showLanding ? "mx-auto max-w-7xl 2xl:max-w-[88rem]" : ""
+          }`}
+        >
           <span className="shrink-0 font-serif text-xl tracking-tight sm:flex-1">Trove</span>
           {dashboardReady && (
             <nav className="order-last -mx-6 flex w-[calc(100%+3rem)] items-center gap-1 overflow-x-auto px-6 py-1 [scrollbar-width:none] sm:order-none sm:mx-0 sm:w-auto sm:min-w-0 sm:shrink sm:justify-center sm:px-0 [&::-webkit-scrollbar]:hidden">
