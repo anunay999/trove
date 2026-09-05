@@ -12,6 +12,7 @@ import {
   ChatMessageMetadata,
   ChatToolCalls,
 } from "@astryxdesign/core/Chat";
+import { Collapsible } from "@astryxdesign/core/Collapsible";
 import { Citation } from "@astryxdesign/core/Citation";
 import { Divider } from "@astryxdesign/core/Divider";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -143,13 +144,8 @@ const styles = stylex.create({
    * here so the sentence measures what it measured inside the component.
    */
   idleDescription: { maxInlineSize: "22.5rem" },
-  /*
-   * The legend is the whole point of this panel before a question is asked, so
-   * it gets room to breathe rather than the compact rail treatment: the rail is
-   * 40% of the viewport and the empty state was a small block adrift in it.
-   */
+  /* The optional legend stays aligned when the reader opens it. */
   legend: { textAlign: "start" },
-  legendRow: { marginBlockStart: "var(--spacing-2)" },
   /*
    * The model line is metadata about the answer, not its last line. The bubble
    * pulls its metadata slot up by --spacing-1-5 so a timestamp sits tight under
@@ -198,8 +194,7 @@ const styles = stylex.create({
     borderWidth: "var(--border-width)",
     borderStyle: "solid",
     borderColor: "var(--color-border)",
-    boxShadow: "var(--shadow-high)",
-    width: "23rem",
+    boxShadow: "var(--shadow-low)",
     maxWidth: "100%",
   },
   /* The stage table: hairline-ruled, so the rows read as one block. */
@@ -209,10 +204,6 @@ const styles = stylex.create({
     borderBlockStartColor: "var(--color-border)",
     paddingBlockStart: "var(--spacing-1)",
   },
-  /* One fixed column so every label, detail and time lines up down the list. */
-  stageLabel: { width: "7.25rem", flexShrink: 0 },
-  stageDetail: { minWidth: 0, flexGrow: 1 },
-  stageElapsed: { flexShrink: 0 },
   citation: { cursor: "pointer" },
 });
 
@@ -237,9 +228,9 @@ function RingGlyph(props: SVGProps<SVGSVGElement>) {
 /**
  * The retrieval receipt: what ran, what it found, how long it took.
  *
- * Three columns, monospace, ruled — the same table the panel has always shown,
- * because the alignment is what makes eight stages scannable in one glance.
- * Rows arrive one beat at a time, in step with the nodes lighting on the canvas.
+ * Each stage keeps its label, detail, and server timing together in a row.
+ * Rows arrive in step with the nodes lighting on the canvas. The desktop HUD
+ * keeps the complete receipt visible as a compact live readout.
  */
 function StageTable({
   stages,
@@ -260,28 +251,18 @@ function StageTable({
           density="compact"
           xstyle={arrival}
           label={
-            <HStack gap={2} vAlign="center">
-              <Text type="code" size="xsm" xstyle={styles.stageLabel} maxLines={1}>
-                {stage.label}
-              </Text>
-              <Text
-                type="code"
-                size="xsm"
-                color="secondary"
-                maxLines={1}
-                xstyle={styles.stageDetail}
-              >
-                {stage.detail}
-              </Text>
-              <Text
-                type="code"
-                size="xsm"
-                color="secondary"
-                hasTabularNumbers
-                xstyle={styles.stageElapsed}
-              >
-                {formatMs(stage.elapsedMs)}
-              </Text>
+            <HStack gap={2} vAlign="start" width="100%">
+              <VStack width="38%">
+                <Text type="supporting">{stage.label}</Text>
+              </VStack>
+              <StackItem size="fill">
+                <Text type="supporting" color="secondary">{stage.detail}</Text>
+              </StackItem>
+              <StackItem size="static">
+                <Text type="supporting" color="secondary" hasTabularNumbers>
+                  {formatMs(stage.elapsedMs)}
+                </Text>
+              </StackItem>
             </HStack>
           }
         />
@@ -309,25 +290,17 @@ export function RetrievalHud({
   const reduced = usePrefersReducedMotion();
   return (
     <Theme theme={gothicTheme} mode={dark ? "dark" : "light"}>
-      <VStack gap={1} padding={3} xstyle={styles.hud}>
-        <HStack gap={1.5} vAlign="center">
-          {/*
-            A spinner while it runs, a dot once it has stopped. A pulsing dot
-            reads as decoration next to a table of numbers that is still
-            growing; a spinner is the one shape everyone already reads as
-            "not finished". Reduced motion keeps the dot, which does not spin.
-          */}
+      <VStack gap={2} padding={3} width="23rem" xstyle={styles.hud}>
+        <HStack gap={2} vAlign="center">
           {running && !reduced ? (
             <Spinner size="sm" shade="inherit" aria-label="Retrieving" />
           ) : (
             <StatusDot
               variant={running ? "accent" : "neutral"}
-              label={running ? "Retrieving" : "Retrieval finished"}
+              label={running ? "Retrieving" : "Retrieval activity"}
             />
           )}
-          <Text type="code" size="xsm" color="secondary">
-            RETRIEVAL
-          </Text>
+          <Text weight="medium">{running ? "Exploring your graph" : "Retrieval activity"}</Text>
         </HStack>
         <StageTable stages={stages} arrival={reduced ? null : styles.arrival} />
       </VStack>
@@ -346,30 +319,30 @@ export function RetrievalHud({
 function IdleState({ dark, narrow }: { dark: boolean; narrow: boolean }) {
   return (
     <EmptyState
-      title="Watch it retrieve"
+      title="Start with a question"
+      isCompact={narrow}
       xstyle={styles.idle}
       actions={
-        <VStack gap={narrow ? 3 : 5} hAlign="center">
+        <VStack gap={5} hAlign="center">
           <Text color="secondary" xstyle={styles.idleDescription}>
-            Ask a question. The graph dims, then lights up in the order retrieval touches it.
+            Find an answer in your notes, then follow its sources on the graph.
           </Text>
-          {/*
-            * The legend gets the room on a rail 40% of a monitor wide, and
-            * closes up where the panel is the bottom 62% of a phone: spacious
-            * rows there pushed the title off the top of the sheet.
-            */}
-          <List density={narrow ? "balanced" : "spacious"} xstyle={styles.legend}>
-            {(["seed", "expanded", "packed", "cited"] as const).map((state) => (
-              <ListItem
-                key={state}
-                label={CHAT_STATE_LABEL[state]}
-                xstyle={narrow ? null : styles.legendRow}
-                startContent={
-                  <Icon icon={RingGlyph} size="sm" xstyle={styles.ink(highlightInk(state, dark))} />
-                }
-              />
-            ))}
-          </List>
+          <Collapsible
+            defaultIsOpen={false}
+            trigger={<Text type="supporting" color="secondary">How graph highlights work</Text>}
+          >
+            <List density="balanced" xstyle={styles.legend}>
+              {(["seed", "expanded", "packed", "cited"] as const).map((state) => (
+                <ListItem
+                  key={state}
+                  label={CHAT_STATE_LABEL[state]}
+                  startContent={
+                    <Icon icon={RingGlyph} size="sm" xstyle={styles.ink(highlightInk(state, dark))} />
+                  }
+                />
+              ))}
+            </List>
+          </Collapsible>
         </VStack>
       }
     />
@@ -716,7 +689,7 @@ export function GraphChat({
               label="Show on the graph"
               onClick={() => onFocusNode(atom.id)}
             />
-            <Text type="code" size="xsm" color="secondary" hasTabularNumbers>
+            <Text type="supporting" color="secondary" hasTabularNumbers>
               {atom.tokens.toLocaleString()} tok
             </Text>
           </HStack>
@@ -750,7 +723,7 @@ export function GraphChat({
           />
         ) : null}
 
-        <HStack paddingInline={3} paddingBlock={2} gap={2} vAlign="center" hAlign="between">
+        <HStack paddingInline={4} paddingBlock={3} gap={2} vAlign="center" hAlign="between">
           <HStack gap={1.5} vAlign="center">
             <StatusDot
               variant={busy ? "accent" : "neutral"}
@@ -758,7 +731,7 @@ export function GraphChat({
               tooltip={replay.isReplaying ? "Replaying retrieval at a watchable pace" : undefined}
               isPulsing={busy && !reduced}
             />
-            <Heading level={3}>Ask the graph</Heading>
+            <Heading level={4}>Ask the graph</Heading>
           </HStack>
           <HStack gap={0.5} vAlign="center">
             {asked ? <Button variant="ghost" size="sm" label="Clear" onClick={reset} /> : null}
@@ -778,31 +751,24 @@ export function GraphChat({
             emptyState={<IdleState dark={dark} narrow={narrow} />}
             composer={
               <ChatComposer
-                density="compact"
+                density="balanced"
                 elevation="none"
                 value={question}
                 onChange={setQuestion}
                 onSubmit={() => void ask()}
-                placeholder="What does this graph know about…"
+                placeholder="Ask about your notes…"
                 isStopShown={running}
                 onStop={stop}
               />
             }
           >
             {asked ? (
-              <ChatMessageList density="compact" align="top" gap={2} isStreaming={running}>
+              <ChatMessageList density="balanced" align="top" gap={4} isStreaming={running}>
                 <ChatMessage sender="user">
                   <ChatMessageBubble>{asked}</ChatMessageBubble>
                 </ChatMessage>
 
                 <ChatMessage sender="assistant">
-                  {/* On a wide viewport these rows are the HUD over the canvas. */}
-                  {narrow && stages.length > 0 ? (
-                    <ChatMessageBubble variant="ghost" width="100%">
-                      <StageTable stages={stages} arrival={arrival} xstyle={styles.gutterPull} />
-                    </ChatMessageBubble>
-                  ) : null}
-
                   {answer ? (
                     <ChatMessageBubble
                       variant="ghost"
@@ -813,7 +779,7 @@ export function GraphChat({
                           <ChatMessageMetadata
                             xstyle={styles.modelLine}
                             footer={
-                              <Text type="code" size="xsm" color="secondary">
+                              <Text type="supporting" color="secondary">
                                 {model}
                               </Text>
                             }
@@ -822,7 +788,8 @@ export function GraphChat({
                       }
                     >
                       <Markdown
-                        density="compact"
+                        density="default"
+                        headingLevelStart={3}
                         isStreaming={running}
                         sources={prose.sources}
                         citationStyle="number"
@@ -845,7 +812,7 @@ export function GraphChat({
                       <List
                         density="compact"
                         header={
-                          <Text type="code" size="xsm" color="secondary">
+                          <Text type="supporting" color="secondary">
                             References
                           </Text>
                         }
@@ -928,8 +895,8 @@ export function GraphChat({
                       xstyle={[styles.turnBlock, arrival]}
                     >
                       <VStack gap={0.5}>
-                        <Text type="code" size="xsm" color="secondary">
-                          Cited · {cited.length}
+                        <Text type="supporting" color="secondary">
+                          Source details · {cited.length}
                         </Text>
                         <ChatToolCalls
                           calls={cited.map(toolCall)}
@@ -937,6 +904,18 @@ export function GraphChat({
                           onExpandedChange={setToolsExpanded}
                         />
                       </VStack>
+                    </ChatMessageBubble>
+                  ) : null}
+
+                  {narrow && stages.length > 0 ? (
+                    <ChatMessageBubble variant="ghost" width="100%" xstyle={styles.turnBlock}>
+                      <Collapsible
+                        key={asked}
+                        defaultIsOpen={false}
+                        trigger={<Text type="supporting" color="secondary">View retrieval steps</Text>}
+                      >
+                        <StageTable stages={stages} arrival={arrival} xstyle={styles.gutterPull} />
+                      </Collapsible>
                     </ChatMessageBubble>
                   ) : null}
 
