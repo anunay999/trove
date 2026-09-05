@@ -1,3 +1,4 @@
+import type { RecallSelfTestResult } from "./recallSelfTest.js";
 /**
  * Typed result envelopes for `graph_job` kinds (backlog #5).
  *
@@ -49,7 +50,11 @@ export type GraphJobResultMap = {
   refresh_embeddings: RefreshEmbeddingsResult;
   refresh_obsidian_projection: RefreshObsidianProjectionJobResult;
   reconcile_node: ReconcileResult;
+  recall_self_test: RecallSelfTestResult;
 };
+
+/** What the graph could not find in its own words; see src/recallSelfTest.ts. */
+export type { RecallSelfTestResult };
 
 export type GraphJobResult<K extends GraphJobKind = GraphJobKind> = GraphJobResultMap[K];
 

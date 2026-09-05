@@ -112,6 +112,7 @@ import {
   UnknownEvidenceReferenceError,
 } from "./graphCore.js";
 import { performReconcileNode, type ReconcileJudge } from "./reconcile.js";
+import { runRecallSelfTest } from "./recallSelfTest.js";
 import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
 
@@ -124,6 +125,10 @@ type Revision = {
   content: string | null;
   createdAt: string;
 };
+
+function asSelfTestPayload(payload: unknown): Record<string, unknown> {
+  return payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+}
 
 /** Catalog/log-style pages are useful as pointers but starve search/recall. */
 const GIANT_CONTENT_CHARS = 12_000;
@@ -1469,6 +1474,20 @@ export class InMemoryGraphStore implements GraphStore {
         prunedJobs,
         prunedEvents,
       };
+      return result;
+    }
+
+    if (job.kind === "recall_self_test") {
+      const payload = asSelfTestPayload(job.payload);
+      const ownerId = typeof payload.ownerId === "string" ? payload.ownerId : null;
+      const sampleSize = typeof payload.sampleSize === "number" ? payload.sampleSize : undefined;
+      // Owner-scoped like every other read: a self-test must ask the graph the
+      // way its owner would, or it measures a pool they cannot see.
+      const result: GraphJobResultMap["recall_self_test"] = await runRecallSelfTest(
+        this,
+        sampleSize === undefined ? {} : { sampleSize },
+        ownerId ? { ownerId } : undefined,
+      );
       return result;
     }
 

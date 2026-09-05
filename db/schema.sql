@@ -217,7 +217,7 @@ create table graph_view (
 
 create table graph_job (
   id uuid primary key default gen_random_uuid(),
-  kind text not null check (kind in ('refresh_obsidian_projection', 'lint_graph', 'refresh_embeddings', 'reconcile_node')),
+  kind text not null check (kind in ('refresh_obsidian_projection', 'lint_graph', 'refresh_embeddings', 'reconcile_node', 'recall_self_test')),
   status text not null default 'pending' check (status in ('pending', 'running', 'succeeded', 'failed', 'cancelled', 'dead')),
   priority integer not null default 50 check (priority between 0 and 100),
   payload jsonb not null default '{}'::jsonb,
