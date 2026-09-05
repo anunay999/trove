@@ -52,7 +52,7 @@ function NodeIdChip({ id }: { id: string }) {
           window.setTimeout(() => setCopied(false), 1400);
         });
       }}
-      className="mt-1.5 flex max-w-full items-center gap-1.5 font-mono text-[10px] text-muted-foreground transition-colors hover:text-foreground"
+      className="mt-1.5 flex max-w-full items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
     >
       <span className="shrink-0 uppercase tracking-[0.08em]">id</span>
       <span className="truncate">{id}</span>
@@ -126,6 +126,7 @@ export function GraphView({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const graphRef = useRef<any>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const frameLabels = useRef<Array<{ text: string; x: number; y: number; priority: number; degree: number }>>([]);
   const didFitRef = useRef(false);
   const [size, setSize] = useState({ width: 800, height: 600 });
   const [query, setQuery] = useState("");
@@ -387,7 +388,7 @@ export function GraphView({
   };
 
   const ink = dark ? "#f5f5f2" : "#111111";
-  const linkInk = dark ? "rgba(255,255,255,0.14)" : "rgba(17,17,17,0.12)";
+  const linkInk = dark ? "rgba(255,255,255,0.09)" : "rgba(17,17,17,0.07)";
   // While the chat drives the graph, edges between two lit nodes stay drawn and
   // the rest recede: the traversal's own path is the thing worth seeing.
   const litLinkInk = dark ? "rgba(255,255,255,0.34)" : "rgba(17,17,17,0.30)";
@@ -405,7 +406,7 @@ export function GraphView({
    */
   const HUD_HEIGHT_PX = 300;
   /** Matches the readout card's own width; see the HUD styles in GraphChat. */
-  const HUD_WIDTH_PX = 470;
+  const HUD_WIDTH_PX = 368;
   const hudOpen = chatOpen && !narrow && chatStages.length > 0;
   /**
    * Ceiling for the post-pack camera. Close enough to read the labels, far
@@ -422,7 +423,7 @@ export function GraphView({
     .filter((text) => text.trim().length > 3 && !/^-+$/.test(text.trim()));
 
   return (
-    <div ref={containerRef} className="relative h-full w-full overflow-hidden">
+    <div ref={containerRef} className="relative h-full w-full overflow-hidden bg-background">
       {snapshot ? (
         <ForceGraph2D
           ref={graphRef}
@@ -443,7 +444,7 @@ export function GraphView({
             return highlights.has(from) && highlights.has(to) ? litLinkInk : coldLinkInk;
           }}
           linkWidth={1}
-          linkDirectionalArrowLength={2.5}
+          linkDirectionalArrowLength={1.8}
           linkDirectionalArrowRelPos={1}
           d3VelocityDecay={0.45}
           cooldownTicks={140}
@@ -460,6 +461,45 @@ export function GraphView({
           onNodeClick={(node) => focusNode(node as VizNode)}
           onNodeHover={(node) => setHoverId(node ? (node as VizNode).id : null)}
           onBackgroundClick={() => setSelectedId(null)}
+          onRenderFramePre={() => { frameLabels.current = []; }}
+          onRenderFramePost={(ctx, globalScale) => {
+            // Reserve space for the labels that matter most before painting the
+            // rest. This changes text only: node positions and hit targets stay put.
+            const occupied: Array<{ left: number; right: number; top: number; bottom: number }> = [];
+            ctx.save();
+            ctx.font = `${12 / globalScale}px "Geist Variable", system-ui, sans-serif`;
+            ctx.textAlign = "center";
+            ctx.textBaseline = "top";
+            ctx.fillStyle = ink;
+            ctx.globalAlpha = 1;
+            const padding = 4 / globalScale;
+            // The canvas transform includes pan, zoom and device pixel ratio.
+            const transform = ctx.getTransform();
+            const viewport = {
+              left: -transform.e / transform.a,
+              right: (ctx.canvas.width - transform.e) / transform.a,
+              top: -transform.f / transform.d,
+              bottom: (ctx.canvas.height - transform.f) / transform.d,
+            };
+            let ordinaryCandidates = 0;
+            for (const label of frameLabels.current.sort((a, b) => b.priority - a.priority || b.degree - a.degree)) {
+              if (label.priority < 3 && ordinaryCandidates >= 120) break;
+              const halfWidth = ctx.measureText(label.text).width / 2;
+              const box = { left: label.x - halfWidth - padding, right: label.x + halfWidth + padding, top: label.y - padding, bottom: label.y + 12 / globalScale + padding };
+              if (label.priority < 3) {
+                if (box.right < viewport.left || box.left > viewport.right || box.bottom < viewport.top || box.top > viewport.bottom) continue;
+                // Bound collision work even when zoom reveals a dense graph.
+                // Sorting above gives cited and packed memories first choice.
+                ordinaryCandidates += 1;
+              }
+              const overlaps = occupied.some((other) => box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top);
+              // A hovered or selected memory always gets its full label.
+              if (label.priority < 3 && overlaps) continue;
+              occupied.push(box);
+              ctx.fillText(label.text, label.x, label.y);
+            }
+            ctx.restore();
+          }}
           nodeCanvasObject={(rawNode, ctx, globalScale) => {
             const node = rawNode as VizNode;
             const radius = 2.5 + Math.sqrt(node.degree + 1) * 1.3;
@@ -519,22 +559,25 @@ export function GraphView({
               ctx.stroke();
             }
             const showLabel =
-              !dimmed &&
-              (isSelected ||
-                node.id === hoverId ||
-                // Anything the answer leaned on is named without a hover: the
-                // point of the run is to read which notes were used.
+              isSelected || node.id === hoverId ||
+              (!dimmed && (
+                // Answer memories are eligible without hovering; the frame
+                // pass gives cited and packed labels priority when space is tight.
                 (lit?.state === "cited" || lit?.state === "packed") ||
                 (isNeighbor && globalScale > 1.2) ||
                 globalScale > 2.4 ||
-                (node.degree >= 12 && globalScale > 1.1));
+                (node.degree >= 12 && globalScale > 1.1)));
             if (showLabel) {
-              const label = node.title.length > 34 ? `${node.title.slice(0, 32)}…` : node.title;
-              ctx.font = `${11 / globalScale}px "SF Pro Display", system-ui, sans-serif`;
-              ctx.textAlign = "center";
-              ctx.textBaseline = "top";
-              ctx.fillStyle = ink;
-              ctx.fillText(label, node.x ?? 0, (node.y ?? 0) + radius + 2 / globalScale);
+              const label = !isSelected && node.id !== hoverId && node.title.length > 38
+                ? `${node.title.slice(0, 37)}…`
+                : node.title;
+              frameLabels.current.push({
+                text: label,
+                x: node.x ?? 0,
+                y: (node.y ?? 0) + radius + 5 / globalScale,
+                priority: isSelected || node.id === hoverId ? 3 : lit?.state === "cited" ? 2 : lit?.state === "packed" ? 1 : 0,
+                degree: node.degree,
+              });
             }
             ctx.globalAlpha = 1;
           }}
@@ -555,30 +598,31 @@ export function GraphView({
 
       {/* At 375px the chat takes the bottom two thirds; the floating search
           card would then cover most of what is left of the graph. */}
-      <div className={`absolute left-4 top-4 w-80 ${chatOpen && narrow ? "hidden" : ""}`}>
-        <div className="rounded-lg border bg-card">
-          <div className="flex items-center gap-2 px-3">
+      <div className={`absolute left-4 top-4 z-10 w-80 max-w-full pr-4 sm:pr-0 ${chatOpen && narrow ? "hidden" : ""}`}>
+        <div className="rounded-xl border border-border/70 bg-card shadow-sm focus-within:ring-2 focus-within:ring-ring">
+          <div className="flex items-center gap-3 px-4">
             <input
               ref={searchRef}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={onSearchKey}
-              placeholder="Search memories"
-              className="h-9 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+              placeholder="Search your memories"
+              aria-label="Search your memories"
+              className="h-11 min-w-0 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
             />
-            <kbd className="rounded border bg-background px-1.5 font-mono text-[10px] text-muted-foreground">
+            <kbd className="shrink-0 rounded-md border border-border/60 px-1.5 text-xs text-muted-foreground">
               ⌘K
             </kbd>
           </div>
           {matches.length > 0 ? (
-            <div className="border-t p-1.5">
+            <div className="border-t border-border/70 p-2">
               {matches.map((node, index) => (
                 <button
                   key={node.id}
                   type="button"
                   onClick={() => focusNode(node)}
                   onMouseEnter={() => setActiveMatch(index)}
-                  className={`flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left ${
+                  className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                     index === activeMatch ? "bg-muted" : ""
                   }`}
                 >
@@ -587,29 +631,29 @@ export function GraphView({
                     style={{ background: typeColor(node.type, dark) }}
                     aria-hidden
                   />
-                  <span className="truncate text-[13px]">{node.title}</span>
-                  <span className="ml-auto shrink-0 pl-2 font-mono text-[10px] text-muted-foreground">
+                  <span className="truncate text-sm">{node.title}</span>
+                  <span className="ml-auto shrink-0 pl-2 text-xs text-muted-foreground">
                     {node.type}
                   </span>
                 </button>
               ))}
-              <p className="border-t px-2 pb-1 pt-1.5 font-mono text-[10px] text-muted-foreground">
+              <p className="mt-1 border-t border-border/70 px-2 pb-1 pt-2 text-xs text-muted-foreground">
                 {matches.length} of {data.nodes.length} · Enter to open
               </p>
             </div>
           ) : query.trim().length >= 2 ? (
-            <p className="border-t px-3 py-2 text-[13px] text-muted-foreground">No matches.</p>
+            <p className="border-t px-3 py-2 text-sm text-muted-foreground">No matches.</p>
           ) : null}
         </div>
         {chatOpen ? null : (
           <button
             type="button"
             onClick={() => setChatOpen(true)}
-            className="mt-2 flex w-full items-center gap-2 rounded-lg border bg-card px-3 py-2 text-left text-[13px] transition-colors hover:bg-muted"
+            className="mt-2 flex w-full items-center gap-2 rounded-xl border border-border/70 bg-card px-4 py-3 text-left text-sm transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <span>Ask the graph</span>
-            <span className="ml-auto font-mono text-[10px] text-muted-foreground">
-              watch it retrieve →
+            <span className="ml-auto text-xs text-muted-foreground">
+              →
             </span>
           </button>
         )}
@@ -622,7 +666,7 @@ export function GraphView({
         // bottom-left the type legend — and the camera above keeps the lit
         // cluster out from under it.
         <div
-          className="pointer-events-none absolute bottom-4 z-30"
+          className="pointer-events-auto absolute bottom-4 z-30"
           style={{ right: railPx + 16 }}
         >
           <RetrievalHud
@@ -645,8 +689,8 @@ export function GraphView({
           // Astryx; the aside itself is not.
           className={
             narrow
-              ? "absolute inset-x-0 bottom-0 z-20 h-[62%] border-t"
-              : "absolute inset-y-0 right-0 z-20 border-l"
+              ? "absolute inset-x-0 bottom-0 z-20 h-[62%] border-t border-border/70"
+              : "absolute inset-y-0 right-0 z-20 border-l border-border/70"
           }
           style={narrow ? undefined : { width: rail.size }}
         >
@@ -716,41 +760,42 @@ export function GraphView({
         </aside>
       ) : null}
 
-      <div
-        className={`absolute bottom-4 left-4 rounded-lg border bg-card p-3 ${
+      <details
+        className={`absolute bottom-4 left-4 rounded-xl border border-border/60 bg-card/95 p-2 ${
           chatOpen && narrow ? "hidden" : ""
         }`}
       >
-        <p className="pb-1.5 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
-          Node types
-        </p>
+        <summary className="cursor-pointer rounded-lg px-2 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          {focusType ? `Node types · ${focusType}` : "Node types"}
+        </summary>
         <div className="flex flex-col gap-0.5">
           {typeCounts.map(([type, count]) => (
             <button
               key={type}
               type="button"
               onClick={() => setFocusType(focusType === type ? null : type)}
-              className={`flex items-center gap-2 rounded-sm px-1 py-0.5 text-left text-xs transition-opacity hover:bg-muted ${
-                focusType !== null && focusType !== type ? "opacity-40" : ""
+              aria-pressed={focusType === type}
+              className={`flex min-h-8 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                focusType !== null && focusType !== type ? "opacity-50" : ""
               }`}
             >
               <span className="size-2 rounded-full" style={{ background: typeColor(type, dark) }} aria-hidden />
               <span className="text-foreground">{type}</span>
-              <span className="ml-auto pl-4 font-mono tabular-nums text-muted-foreground">{count}</span>
+              <span className="ml-auto pl-4 tabular-nums text-muted-foreground">{count}</span>
             </button>
           ))}
         </div>
-      </div>
+      </details>
 
       {selected && !docOpen ? (
         <div
-          className="absolute top-4 flex max-h-[calc(100%-2rem)] w-80 flex-col rounded-lg border bg-card p-4"
+          className="absolute bottom-4 z-30 flex max-h-[calc(100%-6rem)] w-80 max-w-[calc(100%-2rem)] flex-col rounded-2xl border border-border/70 bg-card p-5 shadow-sm sm:bottom-auto sm:top-4 sm:max-h-[calc(100%-2rem)]"
           // The chat docks to the right edge on a wide viewport, so the node
           // card steps aside rather than hiding under it.
           style={{ right: railPx > 0 ? railPx + 16 : 16 }}
         >
           <div className="flex items-start justify-between gap-3">
-            <p className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
+            <p className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
               <span
                 className="size-2 rounded-full"
                 style={{ background: typeColor(selected.type, dark) }}
@@ -762,13 +807,13 @@ export function GraphView({
               type="button"
               onClick={() => setSelectedId(null)}
               aria-label="Close panel"
-              className="rounded-md px-1.5 text-lg leading-none text-muted-foreground hover:text-foreground"
+              className="flex size-7 shrink-0 items-center justify-center rounded-lg text-lg leading-none text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               ×
             </button>
           </div>
-          <h2 className="mt-1 font-serif text-lg leading-snug">{selected.title}</h2>
-          <p className="mt-1.5 font-mono text-[11px] text-muted-foreground">
+          <h2 className="mt-2 text-lg font-semibold leading-snug tracking-tight">{selected.title}</h2>
+          <p className="mt-1.5 text-xs text-muted-foreground">
             {selected.degree} connections · recalled{" "}
             {detailNode ? detailNode.accessCount : selected.accessCount}x
           </p>
@@ -779,9 +824,9 @@ export function GraphView({
               <Skeleton className="h-3.5 w-4/5" />
             </div>
           ) : summary ? (
-            <p className="mt-3 text-[13px] leading-relaxed text-muted-foreground">{plainText(summary)}</p>
+            <p className="mt-4 text-sm leading-6 text-muted-foreground">{plainText(summary)}</p>
           ) : evidenceTexts[0] ? (
-            <p className="mt-3 text-[13px] leading-relaxed text-muted-foreground">
+            <p className="mt-4 text-sm leading-6 text-muted-foreground">
               {plainText(evidenceTexts[0]).slice(0, 280)}
             </p>
           ) : null}
@@ -789,44 +834,44 @@ export function GraphView({
             <button
               type="button"
               onClick={() => setDocOpen(true)}
-              className="mt-3 w-full rounded-md border px-3 py-1.5 text-left text-[13px] text-foreground transition-colors hover:bg-muted"
+              className="mt-4 w-full rounded-lg border border-border/70 px-3 py-2.5 text-left text-sm text-foreground transition-colors hover:bg-muted"
             >
               Open document
-              <span className="float-right font-mono text-[10px] text-muted-foreground">
+              <span className="float-right text-xs text-muted-foreground">
                 {Math.max(1, Math.round(document.contentText.length / 1000))}k chars
               </span>
             </button>
           ) : null}
-          <div className="mt-3 min-h-0 flex-1 overflow-y-auto border-t pt-2">
+          <div className="mt-4 min-h-0 flex-1 overflow-y-auto border-t border-border/70 pt-3">
             {selectedEdges.map((edge) => (
               <button
                 key={edge.id}
                 type="button"
                 onClick={() => edge.other && focusNode(edge.other as VizNode)}
-                className="flex w-full items-baseline gap-2 rounded-sm px-1 py-1 text-left hover:bg-muted"
+                className="flex w-full items-baseline gap-2 rounded-lg px-2 py-2 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 title={edge.other?.title}
               >
-                <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                <span className="shrink-0 text-xs text-muted-foreground">
                   {edge.outbound ? "→" : "←"} {edge.predicate}
                 </span>
-                <span className="truncate text-[13px]">{edge.other?.title}</span>
+                <span className="truncate text-sm">{edge.other?.title}</span>
               </button>
             ))}
             {selectedEdges.length === 0 ? (
-              <p className="px-1 py-1 text-[13px] text-muted-foreground">No connections yet.</p>
+              <p className="px-1 py-1 text-sm text-muted-foreground">No connections yet.</p>
             ) : null}
           </div>
         </div>
       ) : null}
 
       {selected && docOpen && document ? (
-        <aside className="absolute inset-y-0 right-0 flex w-[28rem] max-w-full flex-col border-l bg-card">
-          <header className="border-b px-5 pb-4 pt-4">
+        <aside className="absolute inset-y-0 right-0 z-30 flex w-[28rem] max-w-full flex-col border-l border-border/70 bg-card">
+          <header className="border-b border-border/70 px-6 py-5">
             <div className="flex items-center justify-between gap-3">
               <button
                 type="button"
                 onClick={() => setDocOpen(false)}
-                className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground hover:text-foreground"
+                className="text-xs uppercase tracking-[0.08em] text-muted-foreground hover:text-foreground"
               >
                 ← Back
               </button>
@@ -834,18 +879,18 @@ export function GraphView({
                 type="button"
                 onClick={() => setSelectedId(null)}
                 aria-label="Close panel"
-                className="rounded-md px-1.5 text-lg leading-none text-muted-foreground hover:text-foreground"
+                className="flex size-7 shrink-0 items-center justify-center rounded-lg text-lg leading-none text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 ×
               </button>
             </div>
-            <h2 className="mt-2 font-serif text-xl leading-snug">{selected.title}</h2>
+            <h2 className="mt-3 text-xl font-semibold leading-snug tracking-tight">{selected.title}</h2>
             {document.uri ? (
-              <p className="mt-1.5 font-mono text-[10px] text-muted-foreground">{document.uri}</p>
+              <p className="mt-1.5 text-xs text-muted-foreground">{document.uri}</p>
             ) : null}
             <NodeIdChip id={selected.id} />
           </header>
-          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
             <div
               className="doc-prose"
               dangerouslySetInnerHTML={{ __html: renderDocument(document.contentText) }}

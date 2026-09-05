@@ -1,31 +1,7 @@
 /**
- * Gothic Theme — our copy, tuned for the graph chat panel.
- *
- * `astryx theme add gothic` gave us the shipped theme as editable source; this
- * is that theme with three deliberate departures, all of them made so the panel
- * reads as a room in this dashboard rather than a building next door.
- *
- * 1. It is no longer dark-only. The panel lives inside a dashboard with a light
- *    and a dark mode, and a permanently dark panel in a light dashboard is a
- *    foreign island. Every surface, text, border and accent token is now a
- *    [light, dark] tuple: dark keeps gothic's deep blue-grays untouched, light
- *    gets their counterparts off the same H=210 neutral ramp — still cool and
- *    still ink-on-paper next to the dashboard's warm bone, so the panel is
- *    recognisably its own object without being a different product.
- *
- * 2. The fonts are the dashboard's. Fustat, JetBrains Mono and Manufacturing
- *    Consent are named by the shipped theme but not loaded by this app, so all
- *    three would have quietly fallen back. Body and code become Geist and Geist
- *    Mono — already loaded, already every other panel's type. The signature
- *    display face becomes the serif the dashboard already sets on node titles
- *    and headlines, so the panel's editorial voice is the dashboard's own.
- *
- * 3. The scale and radii are the dashboard's: 14px base rather than 16, and a
- *    chat radius that matches the cards it sits beside instead of a 28px pill.
- *
- * Core dark palette: #E8F1F6, #96A0AB, #495056, #24292D, #101314
- * Categorical colors keep the shipped pastel-on-dark pattern (light background,
- * dark text) — they read the same in either mode, so they stay single values.
+ * Graph-chat theme, scoped to the rail and retrieval HUD.
+ * Warm neutral surfaces and Geist match the surrounding dashboard in both modes.
+ * Categorical and syntax colors retain the existing graph palette.
  */
 
 import {defineTheme, defineSyntaxTheme} from '@astryxdesign/core/theme';
@@ -71,14 +47,10 @@ export const gothicTheme = defineTheme({
       fallbacks:
         '"SF Pro Display", "Helvetica Neue", system-ui, -apple-system, sans-serif',
     },
-    // Headings carry the signature serif. Gothic reserves its display face for
-    // display sizes only, but this panel has no display-scale text — its
-    // largest line is the question you just asked — so the serif lives on
-    // headings or it never appears at all.
     heading: {
-      family: 'Iowan Old Style',
-      fallbacks: 'Baskerville, Georgia, "Times New Roman", serif',
-      weights: {3: 'normal', 4: 'normal'},
+      family: 'Geist Variable',
+      fallbacks: '"SF Pro Display", "Helvetica Neue", system-ui, -apple-system, sans-serif',
+      weights: {3: 'semibold', 4: 'semibold'},
     },
     code: {
       family: 'Geist Mono Variable',
@@ -92,30 +64,22 @@ export const gothicTheme = defineTheme({
   syntax: gothicSyntax,
 
   tokens: {
-    // =========================================================================
-    // Colors — [light, dark]. Dark is the shipped gothic palette, unchanged:
-    //   #E8F1F6, #96A0AB, #495056, #24292D, #101314
-    // Light is the same H=210 neutral ramp read from the other end (see
-    // gothicPalettes.neutral at the foot of this file), so the panel stays
-    // cool and ink-on-paper against the dashboard's warm bone rather than
-    // turning into a second, unrelated palette.
-    // =========================================================================
-
+    // Semantic pairs follow the dashboard's warm light and neutral dark surfaces.
     // Core semantic. Light flips the accent: parchment-on-ink becomes
     // ink-on-parchment, which is the same idea with the lamp turned on.
     '--color-accent': ['#24292D', '#E8F1F6'],
     '--color-accent-muted': ['#24292D14', '#E8F1F620'],
     '--color-neutral': ['#24292D14', '#E8F1F61A'],
-    '--color-background-surface': ['#f3f6f8', '#101314'],
-    '--color-background-body': ['#f3f6f8', '#101314'],
+    '--color-background-surface': ['#ffffff', '#1a1a19'],
+    '--color-background-body': ['#f7f6f3', '#0d0d0d'],
     '--color-overlay': ['#181c1fA6', '#101314CC'],
     '--color-overlay-hover': ['#24292D0D', '#E8F1F60D'],
     '--color-overlay-pressed': ['#24292D14', '#E8F1F61A'],
-    '--color-background-muted': ['#e7edf1', '#24292D'],
+    '--color-background-muted': ['#f1f0ec', '#262624'],
 
     // Text
-    '--color-text-primary': ['#161a1d', '#E8F1F6'],
-    '--color-text-secondary': ['#5d646b', '#96A0AB'],
+    '--color-text-primary': ['#111111', '#f5f5f2'],
+    '--color-text-secondary': ['#6b6a66', '#a3a29b'],
     '--color-text-disabled': ['#a8b1bb', '#495056'],
     '--color-text-accent': ['#24292D', '#E8F1F6'],
     '--color-on-dark': '#E8F1F6',
@@ -127,13 +91,13 @@ export const gothicTheme = defineTheme({
 
     // Icon
     '--color-icon-accent': ['#24292D', '#E8F1F6'],
-    '--color-icon-primary': ['#161a1d', '#E8F1F6'],
-    '--color-icon-secondary': ['#5d646b', '#96A0AB'],
+    '--color-icon-primary': ['#111111', '#f5f5f2'],
+    '--color-icon-secondary': ['#6b6a66', '#a3a29b'],
     '--color-icon-disabled': ['#a8b1bb', '#495056'],
 
     // Surface variants
-    '--color-background-card': ['#fbfdfe', '#1a1d20'],
-    '--color-background-popover': ['#ffffff', '#24292D'],
+    '--color-background-card': ['#ffffff', '#1a1a19'],
+    '--color-background-popover': ['#ffffff', '#262624'],
     '--color-background-inverted': ['#181c1f', '#E8F1F6'],
 
     // Status / Sentiment — dusty pastels matching the categorical
@@ -148,8 +112,8 @@ export const gothicTheme = defineTheme({
     // Border. The dashboard draws hairlines, not rules; light matches its
     // weight so the panel's internal dividers do not read heavier than the
     // card borders six pixels to their left.
-    '--color-border': ['#24292D1F', '#E8F1F61A'],
-    '--color-border-emphasized': ['#b7c0c8', '#495056'],
+    '--color-border': ['#eaeaea', '#2c2c2a'],
+    '--color-border-emphasized': ['#d3d2cd', '#494944'],
 
     // Effects
     '--color-skeleton': ['#dfe6eb', '#495056'],
@@ -416,10 +380,7 @@ export const gothicTheme = defineTheme({
       },
     },
 
-    // Display sizes follow the headings onto the serif. The shipped theme
-    // points them at Manufacturing Consent, a blackletter face this app never
-    // loads; every browser would have fallen through to its default serif
-    // anyway, so we name the one the dashboard already uses and mean it.
+    // Keep display text on the same family as conversation headings.
     text: {
       'type:display-1': {fontFamily: 'var(--font-family-heading)'},
       'type:display-2': {fontFamily: 'var(--font-family-heading)'},
