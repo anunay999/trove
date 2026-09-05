@@ -76,6 +76,7 @@ import {
   type GraphEvent,
   type GraphEventFeed,
   type GraphEventStats,
+  type MemoryDay,
   isSmokeEvent,
   RECONCILE_FINDING_LIMIT,
   reconcileLintFinding,
@@ -1250,6 +1251,34 @@ export class InMemoryGraphStore implements GraphStore {
       }
     }
     return files;
+  }
+
+  /**
+   * Memories per day, dated by first write.
+   *
+   * There is no created_at on the in-memory node, so the first revision stands
+   * in for it — which is the same instant: a node and its revision 1 are
+   * written together. Later revisions are ignored on purpose, so an edit never
+   * moves a memory to the day it was edited.
+   */
+  memoryDays(): MemoryDay[] {
+    const firstWrite = new Map<string, string>();
+    for (const revision of this.revisions.values()) {
+      const current = firstWrite.get(revision.nodeId);
+      if (current === undefined || revision.createdAt < current) {
+        firstWrite.set(revision.nodeId, revision.createdAt);
+      }
+    }
+    const counts = new Map<string, number>();
+    for (const node of this.nodes.values()) {
+      if (this.deletedNodeIds.has(node.id)) continue;
+      const written = firstWrite.get(node.id) ?? node.updatedAt;
+      const date = written.slice(0, 10);
+      counts.set(date, (counts.get(date) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([date, memories]) => ({ date, memories }))
+      .sort((left, right) => left.date.localeCompare(right.date));
   }
 
   exportGraph(): GraphSnapshot {

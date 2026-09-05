@@ -7,12 +7,19 @@ const DAY_LABELS = ["Mon", "", "Wed", "", "Fri", "", ""];
 
 type HoverCell = { date: string; count: number; left: number; top: number };
 
-// GitHub-style cadence heatmap: one sequential hue, light -> dark.
+/**
+ * GitHub-style cadence heatmap: one sequential hue, light -> dark.
+ *
+ * Writes, not every event. The total counts recalls, jobs and reconciles too,
+ * so a day the graph was only read looked exactly like a day it grew, and a
+ * background drain could darken a week nobody touched. The rollup has carried
+ * a `writes` count all along; this is the chart it was for.
+ */
 export function ActivityHeatmap({ stats, dark }: { stats: Stats; dark: boolean }) {
   const gridRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<HoverCell | null>(null);
-  const byDate = new Map(stats.eventsPerDay.map((row) => [row.date, row.total]));
-  const max = Math.max(1, ...stats.eventsPerDay.map((row) => row.total));
+  const byDate = new Map(stats.eventsPerDay.map((row) => [row.date, row.writes]));
+  const max = Math.max(1, ...stats.eventsPerDay.map((row) => row.writes));
 
   const today = new Date();
   const end = new Date(today);
@@ -79,7 +86,7 @@ export function ActivityHeatmap({ stats, dark }: { stats: Stats; dark: boolean }
           >
             <span className="text-xs text-foreground">{formatDay(hover.date)}</span>{" "}
             <span className="font-mono text-xs tabular-nums text-muted-foreground">
-              {hover.count.toLocaleString()} event{hover.count === 1 ? "" : "s"}
+              {hover.count.toLocaleString()} write{hover.count === 1 ? "" : "s"}
             </span>
           </div>
         ) : null}

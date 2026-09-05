@@ -67,6 +67,7 @@ import {
   type GraphEventFeed,
   type EmbeddingCounts,
   type GraphEventStats,
+  type MemoryDay,
   WRITE_ACTIONS,
   type GraphJob,
   type GraphOperationContext,
@@ -1995,6 +1996,30 @@ export class PgGraphStore implements GraphStore {
         .map(([key, count]) => ({ key, count }))
         .sort((left, right) => right.count - left.count || left.key.localeCompare(right.key)),
     };
+  }
+
+  /**
+   * Memories per day, bucketed in the database on first-write time.
+   *
+   * `created_at`, not `updated_at`: the column that answers "when did I learn
+   * this" rather than "when did I last touch it". Same UTC bucketing as
+   * eventStats so the two charts on the dashboard share an axis, and the same
+   * live-rows filter as the node count so the series sums to the number shown
+   * beside it.
+   */
+  async memoryDays(context?: GraphOperationContext): Promise<MemoryDay[]> {
+    const scope = ownerScope(context);
+    const result = await this.pool.query(
+      `select to_char(created_at at time zone 'UTC', 'YYYY-MM-DD') as date,
+              count(*)::int as memories
+       from node
+       where deleted_at is null
+         and ($1 or owner_id = $2)
+       group by 1
+       order by 1`,
+      [!scope.scoped, scope.ownerId],
+    );
+    return result.rows.map((row) => ({ date: String(row.date), memories: Number(row.memories) }));
   }
 
   async lint(context?: GraphOperationContext): Promise<GraphLintReport> {
