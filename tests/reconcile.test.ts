@@ -461,12 +461,21 @@ describe("reconcile: judge is opt-in via TROVE_RECONCILE_JUDGE=1", () => {
     }
   }
 
-  it("stays off for absent, falsey and unrecognised values, even with a key present", () => {
-    // Unrecognised means OFF: the expensive direction must never be reached by
-    // accident. Absence of the var is the shipped default.
-    for (const value of [undefined, "", "0", "false", "no", "off", "maybe"]) {
+  it("runs once a provider exists, without anyone remembering a flag", () => {
+    // The judge was opt-in for a year and 1,081 production jobs ran without one
+    // call, so the graph never wrote a supersedes edge of its own. Nothing
+    // failed; the feature was simply dormant. A bounded cost belongs on.
+    for (const value of [undefined, ""]) {
       withEnv({ TROVE_RECONCILE_JUDGE: value, OPENAI_API_KEY: "sk-test" }, () => {
-        assert.equal(createReconcileJudgeFromEnv(), null, `value ${JSON.stringify(value)} must not enable the judge`);
+        assert.ok(createReconcileJudgeFromEnv(), `value ${JSON.stringify(value)} should leave the judge on`);
+      });
+    }
+  });
+
+  it("stays off only when a deployment says so", () => {
+    for (const value of ["0", "false", "no", "off", " OFF "]) {
+      withEnv({ TROVE_RECONCILE_JUDGE: value, OPENAI_API_KEY: "sk-test" }, () => {
+        assert.equal(createReconcileJudgeFromEnv(), null, `value ${JSON.stringify(value)} must disable the judge`);
       });
     }
   });
@@ -481,8 +490,8 @@ describe("reconcile: judge is opt-in via TROVE_RECONCILE_JUDGE=1", () => {
     }
   });
 
-  it("returns null with =1 but no OpenAI key", () => {
-    withEnv({ TROVE_RECONCILE_JUDGE: "1", OPENAI_API_KEY: undefined }, () => {
+  it("returns null with no LLM key at all, however the flag reads", () => {
+    withEnv({ TROVE_RECONCILE_JUDGE: "1", OPENAI_API_KEY: undefined, OPENROUTER_API_KEY: undefined }, () => {
       assert.equal(createReconcileJudgeFromEnv(), null);
     });
   });

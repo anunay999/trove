@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { recallInputSchema } from "./contracts.js";
 import { contentTerms } from "./queryNormalize.js";
 import { parseTemporalScope, temporalAffinity, type TemporalScope } from "./temporalScope.js";
+import { featureEnabled } from "./flags.js";
 import {
   createRecallRerankerFromEnv,
   mmrOrder,
@@ -998,8 +999,7 @@ const TEMPORAL_NEUTRAL_AFFINITY = 0.5;
 
 /** Query-side temporal scoping is on by default; set TROVE_TEMPORAL_SCOPE=0/off/false to fall back to present-day recall. */
 export function temporalScopeEnabled(): boolean {
-  const raw = process.env.TROVE_TEMPORAL_SCOPE?.trim().toLowerCase();
-  return raw === undefined || raw === "" || !["0", "false", "off", "no"].includes(raw);
+  return featureEnabled(process.env.TROVE_TEMPORAL_SCOPE);
 }
 
 /**

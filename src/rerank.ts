@@ -21,8 +21,9 @@
  *
  * - PROVIDER INTERFACE. `Reranker` is a function type, injected at the call
  *   site, so tests reorder a known candidate set with zero network.
- * - OPT-IN. `TROVE_RECALL_RERANK=1` plus whatever LLM key the deployment
- *   already has (src/llmProvider.ts resolves it). Off by default,
+ * - ON WITH A PROVIDER. Whatever LLM key the deployment already has switches
+ *   this on (src/llmProvider.ts resolves it); `TROVE_RECALL_RERANK=0` turns
+ *   it off,
  *   because switching it on adds an LLM call to the latency of every recall —
  *   the interactive path, not a background job. With the flag unset recall is
  *   byte-identical to what it was before this module existed.
@@ -38,6 +39,7 @@
 import type { GraphNode } from "./contracts.js";
 import { contentTerms } from "./queryNormalize.js";
 import { defaultUtilityModel, resolveLlmProvider } from "./llmProvider.js";
+import { featureEnabled } from "./flags.js";
 
 /** What the reranker is shown about one candidate. Bounded by construction. */
 export type RerankCandidate = {
@@ -89,10 +91,6 @@ export function rerankTimeoutMs(): number {
  * `src/reconcile.ts`: a strict `=== "1"` turns `TROVE_RECALL_RERANK=true` into
  * config that reads as enabled and is not.
  */
-function isEnabled(value: string | undefined): boolean {
-  return value !== undefined && ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
-}
-
 /** The bounded view of a node the reranker is allowed to see. */
 export function toRerankCandidate(node: GraphNode): RerankCandidate {
   return {
@@ -173,9 +171,12 @@ export function parseRerankScores(reply: string, count: number): number[] | null
  * configured. The model defaults to a small utility model and is overridable
  * via TROVE_RECALL_RERANK_MODEL.
  *
- * OPT-IN — `TROVE_RECALL_RERANK=1` is required. Unlike reconcile, which pays
- * its LLM call in a background job, this one sits inside an interactive read.
- * It stays off until the latency has production mileage on it.
+ * ON once a provider exists; `TROVE_RECALL_RERANK=0` turns it off. It shipped
+ * opt-in because it puts an LLM call inside an interactive read and had no
+ * production mileage. It then sat dark for months in the only deployment with a
+ * key, while recall handed every answer its unranked candidate order — and the
+ * benchmark in this module's header had already priced exactly that. An unset
+ * opt-in flag is indistinguishable from a deliberate no.
  *
  * The endpoint comes from the shared resolver (src/llmProvider.ts), so
  * reranking rides whichever LLM key the deployment already has rather than
@@ -184,7 +185,7 @@ export function parseRerankScores(reply: string, count: number): number[] | null
  * cheap provider; the resolver prefers OpenRouter for exactly that reason.
  */
 export function createRecallRerankerFromEnv(): Reranker | null {
-  if (!isEnabled(process.env.TROVE_RECALL_RERANK)) return null;
+  if (!featureEnabled(process.env.TROVE_RECALL_RERANK)) return null;
   const provider = resolveLlmProvider();
   if (!provider) return null;
   const { apiKey, baseUrl } = provider;

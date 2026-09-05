@@ -137,3 +137,29 @@ describe("environment surface", () => {
     );
   });
 });
+
+/**
+ * The shape of a flag is a decision with a cost either way, so it is pinned
+ * rather than left to whoever writes the next one.
+ */
+describe("feature flag defaults", () => {
+  it("treats an unset default-on flag as on, and only an explicit no as off", async () => {
+    const { featureEnabled } = await import("../src/flags.js");
+    for (const value of [undefined, "", "1", "true", "yes", "on", "maybe"]) {
+      assert.equal(featureEnabled(value), true, `${JSON.stringify(value)} should stay on`);
+    }
+    for (const value of ["0", "false", "no", "off", " OFF "]) {
+      assert.equal(featureEnabled(value), false, `${JSON.stringify(value)} should turn it off`);
+    }
+  });
+
+  it("keeps opt-in strict, so the expensive direction is never reached by accident", async () => {
+    const { optedIn } = await import("../src/flags.js");
+    for (const value of [undefined, "", "0", "false", "no", "off", "maybe"]) {
+      assert.equal(optedIn(value), false, `${JSON.stringify(value)} must not opt in`);
+    }
+    for (const value of ["1", "true", "TRUE", "yes", "on", " true "]) {
+      assert.equal(optedIn(value), true, `${JSON.stringify(value)} should opt in`);
+    }
+  });
+});
