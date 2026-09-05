@@ -21,9 +21,8 @@
  *
  * - PROVIDER INTERFACE. `Reranker` is a function type, injected at the call
  *   site, so tests reorder a known candidate set with zero network.
- * - OPT-IN. `TROVE_RECALL_RERANK=1` plus a key — `TROVE_RERANK_API_KEY` if
- *   reranking should ride a provider of its own, else `OPENAI_API_KEY`. Off
- *   by default,
+ * - OPT-IN. `TROVE_RECALL_RERANK=1` plus whatever LLM key the deployment
+ *   already has (src/llmProvider.ts resolves it). Off by default,
  *   because switching it on adds an LLM call to the latency of every recall —
  *   the interactive path, not a background job. With the flag unset recall is
  *   byte-identical to what it was before this module existed.
@@ -38,6 +37,7 @@
 
 import type { GraphNode } from "./contracts.js";
 import { contentTerms } from "./queryNormalize.js";
+import { defaultUtilityModel, resolveLlmProvider } from "./llmProvider.js";
 
 /** What the reranker is shown about one candidate. Bounded by construction. */
 export type RerankCandidate = {
@@ -170,41 +170,25 @@ export function parseRerankScores(reply: string, count: number): number[] | null
 
 /**
  * Build the LLM reranker from the environment, or return null when it is not
- * configured. The model defaults to gpt-4o-mini and is overridable via
- * TROVE_RECALL_RERANK_MODEL.
+ * configured. The model defaults to a small utility model and is overridable
+ * via TROVE_RECALL_RERANK_MODEL.
  *
  * OPT-IN — `TROVE_RECALL_RERANK=1` is required. Unlike reconcile, which pays
  * its LLM call in a background job, this one sits inside an interactive read.
  * It stays off until the latency has production mileage on it.
  *
- * CREDENTIALS OF ITS OWN, and this is the point of TROVE_RERANK_API_KEY.
- * `OPENAI_API_KEY` is doing two unrelated jobs in this codebase: it is the
- * embeddings key, where it must be OpenAI proper because that is who serves the
- * embedding model, and it is the fallback LLM key. Chat already escaped that by
- * preferring OPENROUTER_API_KEY (src/chatModel.ts), for cost. Reranking runs on
- * EVERY recall, so it is the most price-sensitive LLM call in the product and
- * the one that most wants the cheap provider — but it could not have it, because
- * the only lever was OPENAI_BASE_URL, which is shared with embeddings and would
- * point them somewhere that does not serve them.
- *
- * So: an optional key and base URL that belong to reranking alone. Set neither
- * and behaviour is exactly what it was — OPENAI_API_KEY at OPENAI_BASE_URL.
- * Set both to an OpenAI-compatible provider (OpenRouter, or anything else) and
- * only the reranker moves; embeddings, the reconcile judge and chat are
- * untouched. Name the model explicitly when you do: the gpt-4o-mini default is
- * an OpenAI id, and a provider that does not serve it will 404 rather than
- * quietly picking something else.
+ * The endpoint comes from the shared resolver (src/llmProvider.ts), so
+ * reranking rides whichever LLM key the deployment already has rather than
+ * needing one of its own. Reranking runs on every recall, which makes it the
+ * most price-sensitive call in the product and the one that most wants the
+ * cheap provider; the resolver prefers OpenRouter for exactly that reason.
  */
 export function createRecallRerankerFromEnv(): Reranker | null {
   if (!isEnabled(process.env.TROVE_RECALL_RERANK)) return null;
-  const apiKey = process.env.TROVE_RERANK_API_KEY?.trim() || process.env.OPENAI_API_KEY;
-  if (!apiKey) return null;
-  const model = process.env.TROVE_RECALL_RERANK_MODEL ?? "gpt-4o-mini";
-  const baseUrl = (
-    process.env.TROVE_RERANK_BASE_URL?.trim()
-    || process.env.OPENAI_BASE_URL
-    || "https://api.openai.com/v1"
-  ).replace(/\/$/, "");
+  const provider = resolveLlmProvider();
+  if (!provider) return null;
+  const { apiKey, baseUrl } = provider;
+  const model = process.env.TROVE_RECALL_RERANK_MODEL ?? defaultUtilityModel(provider);
 
   return async ({ query, candidates }) => {
     if (candidates.length === 0) return [];
