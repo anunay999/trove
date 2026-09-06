@@ -5,11 +5,11 @@ import {
   attachMemoryInputSchema,
 } from "./itemAttachContracts.js";
 import { attachFromItemDesc, attachMemory } from "./itemAttachOps.js";
-import { operationContextFromAuth, type AuthContext } from "./auth.js";
+import { operationContextFromAuth, type AuthContext, type TroveScope } from "./auth.js";
 import type { GraphStore } from "./graphCore.js";
 import { EdgeValidityConflictError } from "./graphCore.js";
 
-type Authorize = (headers: Headers, scopes: readonly string[]) => Promise<AuthContext | Response>;
+type Authorize = (headers: Headers, scopes: TroveScope[]) => Promise<AuthContext | Response>;
 type ParseJson = <T>(raw: Promise<unknown>, schema: { parse: (v: unknown) => T }) => Promise<T>;
 
 async function withEdgeValidityConflict<T>(
