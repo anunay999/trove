@@ -1,5 +1,6 @@
 import type { Hono } from "hono";
 import type { Context as HonoContext } from "hono";
+import type { z } from "zod";
 import {
   attachFromItemDescInputSchema,
   attachMemoryInputSchema,
@@ -9,8 +10,15 @@ import { operationContextFromAuth, type AuthContext, type TroveScope } from "./a
 import type { GraphStore } from "./graphCore.js";
 import { EdgeValidityConflictError } from "./graphCore.js";
 
-type Authorize = (headers: Headers, scopes: TroveScope[]) => Promise<AuthContext | Response>;
-type ParseJson = <T>(raw: Promise<unknown>, schema: { parse: (v: unknown) => T }) => Promise<T>;
+type Authorize = (
+  headers: Headers,
+  scopes: TroveScope[],
+) => Promise<AuthContext | Response>;
+
+type ParseJson = <Schema extends z.ZodType>(
+  raw: Promise<unknown>,
+  schema: Schema,
+) => Promise<z.infer<Schema>>;
 
 async function withEdgeValidityConflict<T>(
   context: HonoContext,
