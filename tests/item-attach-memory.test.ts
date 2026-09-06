@@ -6,7 +6,7 @@ import {
   ensureItemHub,
   itemBucketPredicate,
   itemHubSlug,
-} from "../src/agentOps.js";
+} from "../src/itemAttachOps.js";
 import { statusForBucket } from "../src/relayMemoryEvents.js";
 import { suiteStore, closeStore } from "./helpers.js";
 
