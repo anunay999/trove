@@ -10,10 +10,11 @@ import { operationContextFromAuth, type AuthContext, type TroveScope } from "./a
 import type { GraphStore } from "./graphCore.js";
 import { EdgeValidityConflictError } from "./graphCore.js";
 
+/** Looser than a named Authorize alias so server.ts function refs typecheck. */
 type Authorize = (
   headers: Headers,
   scopes: TroveScope[],
-) => Promise<AuthContext | Response>;
+) => Promise<unknown>;
 
 type ParseJson = <Schema extends z.ZodType>(
   raw: Promise<unknown>,
@@ -45,7 +46,9 @@ export function mountItemAttachHttpRoutes(
     const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:capture", "graph:write:link"]);
     if (auth instanceof Response) return auth;
     const input = await parseJsonOrThrow(context.req.json(), attachMemoryInputSchema);
-    const result = await withEdgeValidityConflict(context, () => attachMemory(store, input, operationContextFromAuth(auth)));
+    const result = await withEdgeValidityConflict(context, () =>
+      attachMemory(store, input, operationContextFromAuth(auth as AuthContext)),
+    );
     if (result instanceof Response) return result;
     return context.json(result, 201);
   });
@@ -54,7 +57,9 @@ export function mountItemAttachHttpRoutes(
     const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:ingest", "graph:write:capture", "graph:write:link"]);
     if (auth instanceof Response) return auth;
     const input = await parseJsonOrThrow(context.req.json(), attachFromItemDescInputSchema);
-    const result = await withEdgeValidityConflict(context, () => attachFromItemDesc(store, input, operationContextFromAuth(auth)));
+    const result = await withEdgeValidityConflict(context, () =>
+      attachFromItemDesc(store, input, operationContextFromAuth(auth as AuthContext)),
+    );
     if (result instanceof Response) return result;
     return context.json(result, 201);
   });
