@@ -18,6 +18,7 @@ import {
   rememberInputSchema,
   runJobInputSchema,
 } from "./contracts.js";
+import { attachFromItemDescTool, attachMemoryTool } from "./itemAttachToolDefs.js";
 import type { TroveScope } from "./auth.js";
 
 /**
@@ -128,7 +129,9 @@ export const troveTools = [
       "Retire a belief that is no longer true. Pass nodeIds/slugs to tombstone whole notes (they leave recall, grep, and read), edgeIds to expire links, or a query to preview first (dryRun defaults true in query mode). Nothing is hard-deleted — supersession history stays queryable via neighborhood includeExpired/asOf.",
     inputSchema: forgetInputSchema,
   },
+  attachMemoryTool,
   // ---- curator ---------------------------------------------------------------
+  attachFromItemDescTool,
   {
     name: "ingest",
     tier: "curator",

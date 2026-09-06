@@ -38,7 +38,7 @@ describe("mcp stdio server", () => {
   it("lists the current agent toolset without legacy names", async () => {
     const tools = await client.request({ method: "tools/list", params: {} }, ListToolsResultSchema);
     const toolNames = tools.tools.map((tool) => tool.name);
-    for (const required of ["remember", "recall", "grep", "read", "connect", "forget", "ingest", "jobs"]) {
+    for (const required of ["remember", "recall", "grep", "read", "connect", "forget", "attach_memory", "ingest", "attach_from_item_desc", "jobs"]) {
       assert.ok(toolNames.includes(required), `tool ${required} missing from tools/list`);
     }
     assert.ok(

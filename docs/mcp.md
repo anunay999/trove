@@ -128,10 +128,12 @@ Core (the everyday agent vocabulary):
 - `read` - full node body or raw source by id/slug; node reads accept `asOf` for recorded fact history
 - `connect` - typed edges; `supersedesEdgeId` replaces a belief on the record
 - `forget` - retire beliefs; query mode previews (dryRun) first, explicit edgeIds apply immediately
+- `attach_memory` - attach (or create+attach) a memory to Relay WorkItem hub `item-{itemId}`; see [item-attach-memory.md](item-attach-memory.md)
 
 Curator (ingestion and curation flows):
 
 - `ingest` - raw evidence text units only — then remember distilled facts citing them
+- `attach_from_item_desc` - ingest item title+note → remember short claims → attach to item hub
 - `annotate` - attach meaning to evidence without rewriting it
 - `neighborhood` - expand graph neighbors, optionally `asOf` a past time
 - `project` - render markdown, mind map, or agent context
