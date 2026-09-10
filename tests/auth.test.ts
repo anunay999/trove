@@ -1,13 +1,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { CallToolResultSchema, ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
 const baseUrl = process.env.TROVE_BASE_URL ?? "http://localhost:8787";
 const readToken = process.env.TROVE_READ_TOKEN ?? "read-token";
 const writeToken = process.env.TROVE_WRITE_TOKEN ?? "write-token";
 const adminToken = process.env.TROVE_ADMIN_TOKEN ?? "admin-token";
+// actor_id of the write token in TROVE_SERVICE_TOKENS — timeline attribution
+// records it as actorHandle. Set it to whatever your .env declares.
+const writeActor = process.env.TROVE_WRITE_ACTOR ?? "agent";
 
 async function expectStatus(path: string, token: string | undefined, expectedStatus: number): Promise<void> {
   const response = await fetch(`${baseUrl}${path}`, {
@@ -44,7 +45,7 @@ async function connectMcp(token: string, requestId?: string): Promise<Client> {
       },
     },
   });
-  await client.connect(transport as never);
+  await client.connect(transport);
   return client;
 }
 
@@ -72,7 +73,9 @@ describe("auth & scopes", { skip: process.env.TROVE_E2E === "1" ? false : "set T
     await expectStatus("/v1/tools", undefined, 401);
     await expectStatus("/v1/tools", readToken, 200);
     await expectStatus("/v1/export/obsidian", readToken, 403);
-    await expectStatus("/v1/jobs", readToken, 200);
+    // GET /v1/jobs is the operator surface and requires graph:admin (#84);
+    // a read token must be refused.
+    await expectStatus("/v1/jobs", readToken, 403);
     await expectStatus("/v1/views", readToken, 200);
     await expectStatus("/v1/events", readToken, 200);
     await expectJsonStatus("/v1/jobs", readToken, 403, {
@@ -92,7 +95,7 @@ describe("auth & scopes", { skip: process.env.TROVE_E2E === "1" ? false : "set T
     for (const token of [readToken, writeToken]) {
       const client = await connectMcp(token);
       try {
-        const tools = await client.request({ method: "tools/list", params: {} }, ListToolsResultSchema);
+        const tools = await client.request({ method: "tools/list", params: {} });
         assert.ok(tools.tools.some((tool) => tool.name === "grep"), "grep was not listed");
         const names = new Set(tools.tools.map((tool) => tool.name));
         const isWrite = token !== readToken;
@@ -100,7 +103,6 @@ describe("auth & scopes", { skip: process.env.TROVE_E2E === "1" ? false : "set T
         assert.ok(!names.has("jobs"), "operator tools must be hidden from non-admin tokens");
         await client.request(
           { method: "tools/call", params: { name: "grep", arguments: { pattern: "Trove", limit: 1 } } },
-          CallToolResultSchema,
         );
       } finally {
         await client.close();
@@ -125,7 +127,6 @@ describe("auth & scopes", { skip: process.env.TROVE_E2E === "1" ? false : "set T
             },
           },
         },
-        CallToolResultSchema,
       );
       denied = Boolean(result.isError);
     } catch {
@@ -156,7 +157,7 @@ describe("auth & scopes", { skip: process.env.TROVE_E2E === "1" ? false : "set T
     assert.equal(response.status, 201, `HTTP capture returned ${response.status}`);
     await expectTimelineEvent(writeToken, {
       action: "capture",
-      actorHandle: "agent",
+      actorHandle: writeActor,
       interfaceId: "auth-smoke-http",
       requestId,
     });
@@ -179,7 +180,6 @@ describe("auth & scopes", { skip: process.env.TROVE_E2E === "1" ? false : "set T
             },
           },
         },
-        CallToolResultSchema,
       );
       assert.ok(!result.isError, `MCP capture returned a tool error: ${JSON.stringify(result)}`);
     } finally {
@@ -187,7 +187,7 @@ describe("auth & scopes", { skip: process.env.TROVE_E2E === "1" ? false : "set T
     }
     await expectTimelineEvent(writeToken, {
       action: "capture",
-      actorHandle: "agent",
+      actorHandle: writeActor,
       interfaceId: "mcp",
       requestId,
     });

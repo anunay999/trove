@@ -1,5 +1,6 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
+import { TASKS_EXTENSION_ID } from "./mcpTasks.js";
 import {
   annotateInputSchema,
   createViewInputSchema,
@@ -27,7 +28,26 @@ import { toolDescription, TROVE_AGENT_DOCTRINE, visibleTiers } from "./toolDefin
 import { getSkill } from "./skills.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
 
-export function createTroveMcpServer(store: GraphStore, authContext?: AuthContext): McpServer {
+/**
+ * Serving posture for one McpServer instance. The HTTP handler constructs one
+ * per request, keyed off the request's protocol era and auth context; the
+ * stdio entry constructs one per connection.
+ *
+ * `tasks` advertises the io.modelcontextprotocol/tasks extension in the
+ * server's capabilities, and only makes sense where the extension's methods
+ * are actually dispatched (modern-era HTTP with a durable task store — see
+ * src/mcpTasks.ts for why dispatch lives at the HTTP seam).
+ */
+export type TroveMcpServerOptions = {
+  era?: "legacy" | "modern";
+  tasks?: boolean;
+};
+
+export function createTroveMcpServer(
+  store: GraphStore,
+  authContext?: AuthContext,
+  options: TroveMcpServerOptions = {},
+): McpServer {
   const operationContext = authContext ? operationContextFromAuth(authContext) : undefined;
   const tiers = visibleTiers(authContext?.scopes);
   const canWrite = !authContext
@@ -37,7 +57,26 @@ export function createTroveMcpServer(store: GraphStore, authContext?: AuthContex
   // initialize (Claude, Cursor, Codex, custom hosts). Skills are optional.
   const server = new McpServer(
     { name: "trove", version: "0.2.0" },
-    { instructions: TROVE_AGENT_DOCTRINE },
+    {
+      instructions: TROVE_AGENT_DOCTRINE,
+      // 2026-07-28 cache hints: tool/resource/prompt lists are stable for a
+      // given caller between deploys, but they are per-caller (scope-tiered),
+      // so a shared intermediary must never cache them — ttlMs is a gift to
+      // the caller's own cache, cacheScope "private" is a wall for everyone
+      // else's. Doctrine and prompts move slower than the tool set, so they
+      // earn a longer lease.
+      cacheHints: {
+        "tools/list": { ttlMs: 300_000, cacheScope: "private" },
+        "resources/list": { ttlMs: 300_000, cacheScope: "private" },
+        "prompts/list": { ttlMs: 3_600_000, cacheScope: "private" },
+      },
+      // Advertise the tasks extension only on the era that can speak it: a
+      // 2025-era client has no per-request capability envelope and the
+      // extension's methods are dispatched at the HTTP seam, not on stdio.
+      ...(options.tasks && options.era === "modern"
+        ? { capabilities: { extensions: { [TASKS_EXTENSION_ID]: {} } } }
+        : {}),
+    },
   );
 
   registerTroveResources(server, store, authContext, operationContext);

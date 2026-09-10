@@ -8,7 +8,7 @@ import v8 from "node:v8";
 
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
 import { Hono, type Context as HonoContext } from "hono";
 import { cors } from "hono/cors";
 import { getSkill, llmsTxt, skillsIndexMarkdown } from "./skills.js";
@@ -65,6 +65,18 @@ import { jobResultAs } from "./jobResults.js";
 import { flushTracing, startTracing, tracingEnabled } from "./tracing.js";
 import { graphChatResponse } from "./graphChat.js";
 import { startJobWorker } from "./jobWorker.js";
+import {
+  declaresTasksExtension,
+  isTasksMethodRequest,
+  type JsonRpcRequestLike,
+  McpTaskStore,
+  runExportObsidianTask,
+  TASKS_EXTENSION_ID,
+  taskAckResult,
+  taskCreateResult,
+  taskDetailedResult,
+  type TaskViewer,
+} from "./mcpTasks.js";
 import { createTroveMcpServer } from "./mcpTools.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
 import { troveTools, visibleTiers } from "./toolDefinitions.js";
@@ -100,9 +112,160 @@ app.use("/mcp", cors({
     "mcp-session-id",
     "Last-Event-ID",
     "mcp-protocol-version",
+    // Required on every 2026-07-28 POST (SEP-2243): without these in the CORS
+    // allowlist a browser connector (claude.ai, Cursor web) cannot send them,
+    // and every request dies at the -32020 header check.
+    "Mcp-Method",
+    "Mcp-Name",
+    "Mcp-Param-*",
   ],
   exposeHeaders: ["mcp-session-id", "mcp-protocol-version"],
 }));
+
+// ---- MCP serving (SDK v2: protocol 2026-07-28 + 2025-era fallback) ----------
+//
+// One web-standard handler serves both eras from /mcp: modern requests carry
+// their own per-request _meta envelope (no initialize, no session ids); 2025
+// clients keep their handshake and are served per-request statelessly — the
+// same posture the old code built by hand. The factory runs once per request
+// (per connection on stdio), and the per-caller auth context travels through
+// the handler's documented authInfo pass-through: the SDK never reads
+// Authorization itself.
+const taskStore = process.env.DATABASE_URL
+  ? new McpTaskStore({ connectionString: process.env.DATABASE_URL })
+  : null;
+
+/** Identity the server stamps in every result's _meta (2026-07-28 SHOULD). */
+const TROVE_MCP_SERVER_INFO = { name: "trove", version: "0.2.0" };
+
+const mcpHandler = createMcpHandler(
+  (ctx) => createTroveMcpServer(store, mcpAuthContextFrom(ctx.authInfo), {
+    era: ctx.era,
+    tasks: taskStore !== null,
+  }),
+  { onerror: (error) => console.error("[mcp]", error) },
+);
+
+/** Pull the trove AuthContext back out of the authInfo pass-through. */
+function mcpAuthContextFrom(authInfo: AuthInfo | undefined): AuthContext | undefined {
+  const carried = (authInfo?.extra as { troveAuth?: AuthContext } | undefined)?.troveAuth;
+  if (carried) return carried;
+  // serveStdio-style callers pass no authInfo; without one the surface is the
+  // full local-dev toolset, which only happens here when auth is disabled.
+  return undefined;
+}
+
+function troveMcpAuthInfo(authContext: AuthContext, authorization: string | undefined): AuthInfo {
+  return {
+    token: parseBearer(authorization) ?? "",
+    clientId: authContext.actorId,
+    scopes: authContext.scopes,
+    extra: { troveAuth: authContext },
+  };
+}
+
+function parseBearer(authorization: string | undefined): string | null {
+  if (!authorization) return null;
+  const [scheme, token] = authorization.split(" ", 2);
+  return scheme?.toLowerCase() === "bearer" && token ? token : null;
+}
+
+async function readJsonBody(request: Request): Promise<unknown> {
+  try {
+    return JSON.parse(await request.text());
+  } catch {
+    // A body the JSON parser rejects is the SDK handler's problem to answer
+    // (it owns the protocol-level parse errors), not the seam's.
+    return undefined;
+  }
+}
+
+function isToolCallFor(parsed: unknown, toolName: string): parsed is JsonRpcRequestLike {
+  if (typeof parsed !== "object" || parsed === null) return false;
+  const method = (parsed as { method?: unknown }).method;
+  if (method !== "tools/call") return false;
+  const params = (parsed as { params?: unknown }).params;
+  if (typeof params !== "object" || params === null) return false;
+  return (params as { name?: unknown }).name === toolName;
+}
+
+function taskViewerFrom(authContext: AuthContext): TaskViewer {
+  return {
+    actorId: authContext.actorId,
+    ownerId: authContext.ownerId,
+    superuser: authContext.superuser,
+  };
+}
+
+const JSON_RPC_HEADERS = { "content-type": "application/json" };
+
+function jsonRpcResultResponse(id: unknown, result: unknown): Response {
+  if (id === undefined) return new Response(null, { status: 202 });
+  return new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), { status: 200, headers: JSON_RPC_HEADERS });
+}
+
+function jsonRpcErrorResponse(id: unknown, code: number, message: string, data?: unknown): Response {
+  if (id === undefined) return new Response(null, { status: 202 });
+  return new Response(
+    JSON.stringify({ jsonrpc: "2.0", id, error: { code, message, ...(data === undefined ? {} : { data }) } }),
+    { status: 200, headers: JSON_RPC_HEADERS },
+  );
+}
+
+/** tasks/get | tasks/update | tasks/cancel, dispatched ahead of the SDK. */
+async function tasksMethodResponse(parsed: JsonRpcRequestLike, authContext: AuthContext): Promise<Response> {
+  if (!declaresTasksExtension(parsed)) {
+    // The extension's methods exist only for clients that declared the
+    // capability — on any request shape (spec: MUST return -32021).
+    return jsonRpcErrorResponse(parsed.id, -32021, "Missing required client capability", {
+      requiredCapabilities: { extensions: { [TASKS_EXTENSION_ID]: {} } },
+    });
+  }
+  if (!taskStore) {
+    return jsonRpcErrorResponse(parsed.id, -32603, "Task store unavailable (no DATABASE_URL configured).");
+  }
+  const taskId = (parsed.params as { taskId?: unknown } | undefined)?.taskId;
+  if (typeof taskId !== "string") {
+    return jsonRpcErrorResponse(parsed.id, -32602, "Invalid params: taskId is required.");
+  }
+  const task = await taskStore.get(taskId, taskViewerFrom(authContext));
+  if (!task) {
+    return jsonRpcErrorResponse(parsed.id, -32602, "Failed to retrieve task: Task not found");
+  }
+  if (parsed.method === "tasks/get") {
+    return jsonRpcResultResponse(parsed.id, taskDetailedResult(task, TROVE_MCP_SERVER_INFO));
+  }
+  if (parsed.method === "tasks/update") {
+    // Trove tasks never enter input_required (no mid-task elicitation), so
+    // no input request is ever outstanding — per spec, responses for
+    // non-outstanding keys are ignored and the update is acknowledged.
+    return jsonRpcResultResponse(parsed.id, taskAckResult(TROVE_MCP_SERVER_INFO));
+  }
+  // tasks/cancel: cooperative. The row flips to cancelled only if the work
+  // had not finished; either way the client is done with the handle.
+  await taskStore.cancel(taskId);
+  return jsonRpcResultResponse(parsed.id, taskAckResult(TROVE_MCP_SERVER_INFO));
+}
+
+/**
+ * export_obsidian with the tasks extension negotiated: insert the durable
+ * task row (its commit is the extension's "durably created" requirement),
+ * answer tools/call with the task handle, run the export off the request,
+ * and let the client poll tasks/get for the CallToolResult.
+ */
+async function exportObsidianTaskResponse(parsed: JsonRpcRequestLike, authContext: AuthContext): Promise<Response> {
+  const owner = operationContextFromAuth(authContext);
+  const task = await taskStore!.create({
+    kind: "export_obsidian",
+    request: {
+      tool: "export_obsidian",
+      arguments: (parsed.params as { arguments?: unknown } | undefined)?.arguments ?? {},
+    },
+    viewer: taskViewerFrom(authContext),
+  });
+  void runExportObsidianTask(store, taskStore!, task.id, owner);
+  return jsonRpcResultResponse(parsed.id, taskCreateResult(task, TROVE_MCP_SERVER_INFO));
+}
 
 app.get("/health", (context) => {
   return context.json({
@@ -145,10 +308,38 @@ app.get("/ready", async (context) => {
 app.all("/mcp", async (context) => {
   try {
     const authContext = await requireAuthFromHeaders(context.req.raw.headers, ["graph:read"], "mcp", authResolvers);
-    const transport = new WebStandardStreamableHTTPServerTransport();
-    const mcpServer = createTroveMcpServer(store, authContext);
-    await mcpServer.connect(transport);
-    return transport.handleRequest(context.req.raw);
+
+    // Tasks-extension seam. The io.modelcontextprotocol/tasks methods and
+    // task-capable tools/call (export_obsidian) are dispatched HERE, ahead of
+    // the SDK handler, because the SDK cannot serve them today: the v2 era
+    // gate shadows the historical tasks/get / tasks/cancel core method names
+    // with -32601 (typescript-sdk #2598, fix #2599 unmerged at 2.0.0) and the
+    // high-level registerTool callback cannot author the "task" result
+    // family. Everything else — both eras — goes to the SDK handler below.
+    // See src/mcpTasks.ts for the durable Postgres task store.
+    if (
+      context.req.method === "POST"
+      && (context.req.header("content-type") ?? "").startsWith("application/json")
+    ) {
+      const parsed = await readJsonBody(context.req.raw.clone());
+      if (parsed !== undefined && !Array.isArray(parsed)) {
+        if (isTasksMethodRequest(parsed)) {
+          return tasksMethodResponse(parsed, authContext);
+        }
+        if (
+          taskStore
+          && isToolCallFor(parsed, "export_obsidian")
+          // Same scope semantics as the tool handler: graph:admin is a
+          // super-scope (src/auth.ts hasScope), so either grants export.
+          && (authContext.scopes.includes("graph:admin") || authContext.scopes.includes("graph:export"))
+          && declaresTasksExtension(parsed)
+        ) {
+          return exportObsidianTaskResponse(parsed, authContext);
+        }
+      }
+    }
+
+    return await mcpHandler.fetch(context.req.raw, { authInfo: troveMcpAuthInfo(authContext, context.req.header("authorization")) });
   } catch (error) {
     if (error instanceof AuthError) {
       // Point browser MCP clients at the resource metadata so they can start
@@ -829,6 +1020,11 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.once(signal, () => {
     void (async () => {
       await worker?.stop();
+      // Tears down the modern MCP leg: aborts in-flight exchanges and closes
+      // their per-request instances. Polling tasks survive in Postgres; a
+      // task still executing here is failed by the stale-working check.
+      await mcpHandler.close();
+      await taskStore?.close();
       if ("close" in store && typeof store.close === "function") await store.close();
       // Spans are batched, so whatever is still buffered dies with the process
       // unless the exporter is drained here — and the last minute before a

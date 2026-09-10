@@ -1,14 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import {
-  CallToolResultSchema,
-  ListPromptsResultSchema,
-  ListResourcesResultSchema,
-  ListToolsResultSchema,
-  ReadResourceResultSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
 const endpoint = process.env.TROVE_MCP_URL ?? "http://localhost:8787/mcp";
 const serviceToken = process.env.TROVE_SERVICE_TOKEN;
@@ -24,7 +16,7 @@ describe("mcp http transport", { skip: process.env.TROVE_E2E === "1" ? false : "
       new URL(endpoint),
       serviceToken ? { requestInit: { headers: { authorization: `Bearer ${serviceToken}` } } } : undefined,
     );
-    await client.connect(transport as never);
+    await client.connect(transport);
   });
 
   after(async () => {
@@ -32,9 +24,9 @@ describe("mcp http transport", { skip: process.env.TROVE_E2E === "1" ? false : "
   });
 
   it("lists tools, resources, and prompts over HTTP", async () => {
-    const tools = await client.request({ method: "tools/list", params: {} }, ListToolsResultSchema);
-    const resources = await client.request({ method: "resources/list", params: {} }, ListResourcesResultSchema);
-    const prompts = await client.request({ method: "prompts/list", params: {} }, ListPromptsResultSchema);
+    const tools = await client.request({ method: "tools/list", params: {} });
+    const resources = await client.request({ method: "resources/list", params: {} });
+    const prompts = await client.request({ method: "prompts/list", params: {} });
     assert.ok(tools.tools.some((tool) => tool.name === "grep"), "grep missing over HTTP");
     assert.ok(resources.resources.length > 0, "expected resources over HTTP");
     assert.ok(prompts.prompts.length >= 0, "prompts list should resolve");
@@ -42,10 +34,7 @@ describe("mcp http transport", { skip: process.env.TROVE_E2E === "1" ? false : "
 
   it("reads the health, jobs, views, and events resources", async () => {
     for (const uri of ["trove://health", "trove://jobs", "trove://views", "trove://events"]) {
-      const resource = await client.request(
-        { method: "resources/read", params: { uri } },
-        ReadResourceResultSchema,
-      );
+      const resource = await client.request({ method: "resources/read", params: { uri } });
       assert.ok(resource.contents.length > 0, `resource ${uri} returned no contents`);
     }
   });
@@ -57,10 +46,7 @@ describe("mcp http transport", { skip: process.env.TROVE_E2E === "1" ? false : "
       ["views", { limit: 5 }],
       ["events", { limit: 5 }],
     ] as const) {
-      const result = await client.request(
-        { method: "tools/call", params: { name, arguments: args } },
-        CallToolResultSchema,
-      );
+      const result = await client.request({ method: "tools/call", params: { name, arguments: args } });
       assert.ok(result.content.length > 0, `tool ${name} returned no content`);
     }
   });
