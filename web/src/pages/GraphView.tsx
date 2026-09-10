@@ -1,4 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ToggleButton, ToggleButtonGroup } from "@astryxdesign/core/ToggleButton";
+import { Theme } from "@astryxdesign/core/theme";
+import { gothicTheme } from "@/themes/gothic";
+import type { Graph3DHandle } from "@/components/Graph3D";
 import ForceGraph2D from "react-force-graph-2d";
 import { forceCollide, forceX, forceY } from "d3-force-3d";
 import { useResizable } from "@astryxdesign/core/Resizable";
@@ -21,6 +25,15 @@ import {
   type NodeType,
   type SourceDocument,
 } from "@/lib/api";
+
+const Graph3D = lazy(() => import("@/components/Graph3D"));
+
+class Graph3DBoundary extends Component<{ children: React.ReactNode; onFailure: () => void }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch() { this.props.onFailure(); }
+  render() { return this.state.failed ? null : this.props.children; }
+}
 
 type VizNode = {
   id: string;
@@ -125,6 +138,10 @@ export function GraphView({
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const graphRef = useRef<any>(null);
+  const graph3DRef = useRef<Graph3DHandle>(null);
+  const [mode, setMode] = useState<"2d" | "3d">("2d");
+  const [threeDError, setThreeDError] = useState(false);
+  const on3DFailure = useCallback(() => { setMode("2d"); setThreeDError(true); }, []);
   const searchRef = useRef<HTMLInputElement>(null);
   const frameLabels = useRef<Array<{ text: string; x: number; y: number; priority: number; degree: number }>>([]);
   const didFitRef = useRef(false);
@@ -247,7 +264,7 @@ export function GraphView({
     // Re-shape from the new forces, and let onEngineStop refit to the result.
     didFitRef.current = false;
     graph.d3ReheatSimulation();
-  }, [data]);
+  }, [data, mode]);
 
   // Opening or closing the chat changes the canvas box, and whatever the camera
   // was framing before is now half off the edge. Re-fit the connected core so
@@ -257,6 +274,10 @@ export function GraphView({
     if (!didMountChat.current) {
       didMountChat.current = true;
       return;
+    }
+    if (mode === "3d") {
+      const timer = window.setTimeout(() => graph3DRef.current?.fit(), 60);
+      return () => window.clearTimeout(timer);
     }
     const graph = graphRef.current;
     if (!graph || data.nodes.length === 0) return;
@@ -372,13 +393,14 @@ export function GraphView({
       setSelectedId(node.id);
       setQuery("");
       searchRef.current?.blur();
+      if (mode === "3d") { graph3DRef.current?.focus(node.id); return; }
       const live = nodeById.get(node.id);
       if (graphRef.current && live && live.x !== undefined && live.y !== undefined) {
         graphRef.current.centerAt(live.x, live.y, 600);
         graphRef.current.zoom(3.2, 600);
       }
     },
-    [nodeById],
+    [nodeById, mode],
   );
 
   const onSearchKey = (event: React.KeyboardEvent) => {
@@ -432,8 +454,19 @@ export function GraphView({
     .filter((text) => text.trim().length > 3 && !/^-+$/.test(text.trim()));
 
   return (
-    <div ref={containerRef} className="relative h-full w-full overflow-hidden bg-background">
-      {snapshot ? (
+    <div ref={containerRef} className="relative h-full w-full overflow-hidden bg-background text-foreground">
+      {snapshot && mode === "3d" ? (
+        <Graph3DBoundary onFailure={on3DFailure}>
+          <Suspense fallback={<p role="status" className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading 3D graph...</p>}>
+            <Graph3D ref={graph3DRef} snapshot={snapshot} dark={dark}
+              width={Math.max(240, size.width - railPx)}
+              height={chatOpen && narrow ? Math.round(size.height * 0.38) : size.height}
+              selectedId={selectedId} neighborIds={neighborIds} focusType={focusType}
+              highlights={highlights} reducedMotion={reducedMotion} onFailure={on3DFailure}
+              onSelect={(id) => { const node = id ? nodeById.get(id) : null; if (node) focusNode(node); else setSelectedId(null); }} />
+          </Suspense>
+        </Graph3DBoundary>
+      ) : snapshot ? (
         <ForceGraph2D
           ref={graphRef}
           // The chat takes real estate rather than floating over it. Handing
@@ -605,6 +638,18 @@ export function GraphView({
         </div>
       )}
 
+      <section aria-label="Graph view controls" className={`absolute left-4 z-10 rounded-xl border border-border/70 bg-card p-1 shadow-sm ${chatOpen && narrow ? "top-4" : "bottom-20"}`}>
+        <Theme theme={gothicTheme} mode={dark ? "dark" : "light"}>
+          <ToggleButtonGroup label="Graph dimensions" type="single" size="sm" value={mode}
+            onChange={(value) => { if (value === "2d" || value === "3d") { setMode(value); setThreeDError(false); setHoverId(null); } }}>
+            <ToggleButton value="2d" label="2D" />
+            <ToggleButton value="3d" label="3D" />
+          </ToggleButtonGroup>
+        </Theme>
+      </section>
+      {mode === "3d" && !chatOpen ? <p className="pointer-events-none absolute bottom-20 right-4 text-xs text-muted-foreground">Drag to orbit · Scroll to zoom</p> : null}
+      {threeDError ? <p role="status" className="absolute bottom-32 left-4 z-10 max-w-xs rounded-lg border border-border bg-card p-3 text-sm">3D could not load on this device. You can keep exploring in 2D.</p> : null}
+
       {/* At 375px the chat takes the bottom two thirds; the floating search
           card would then cover most of what is left of the graph. */}
       <div className={`absolute left-4 top-4 z-10 w-80 max-w-full pr-4 sm:pr-0 ${chatOpen && narrow ? "hidden" : ""}`}>
@@ -725,6 +770,7 @@ export function GraphView({
               // and the dimmed graph they were pulled out of disappears, which is
               // the context that makes the demonstration mean anything. Centre on
               // them, and clamp how close the camera is allowed to get.
+              if (mode === "3d") { graph3DRef.current?.fit(nodeIds); return; }
               const graph = graphRef.current;
               if (!graph || nodeIds.length === 0) return;
               const packed = new Set(nodeIds);
