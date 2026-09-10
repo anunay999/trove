@@ -1,4 +1,5 @@
-import type { ChatHighlights } from "./graphChatState";
+// Keep this pure queue independent of browser hooks and their DOM types.
+type RetrievalHighlights = ReadonlyMap<string, { state: string; at: number }> | null;
 
 /** Camera visits are sampled from actual replay promotions, never invented nodes. */
 export class RetrievalTravel {
@@ -7,7 +8,7 @@ export class RetrievalTravel {
   interrupted = false;
   active = false;
 
-  ingest(highlights: ChatHighlights, knownIds: ReadonlySet<string>): void {
+  ingest(highlights: RetrievalHighlights, knownIds: ReadonlySet<string>): void {
     if (highlights === null || highlights.size === 0) {
       this.seen.clear();
       this.queue = [];
