@@ -8,8 +8,18 @@ Use stdio when an agent runs on the same machine and can spawn Trove as a child 
 
 Relevant MCP references:
 
-- https://modelcontextprotocol.io/specification/2025-11-25/basic/transports
-- https://ts.sdk.modelcontextprotocol.io/
+- https://modelcontextprotocol.io/specification/2026-07-28 (current; stateless core, MRTR, extensions)
+- https://modelcontextprotocol.io/specification/2025-11-25/basic/transports (fallback era)
+- https://ts.sdk.modelcontextprotocol.io/v2/ (TypeScript SDK v2)
+
+## Protocol Eras and the Tasks Extension
+
+Trove serves **both MCP protocol eras from one endpoint** (`/mcp`):
+
+- **2026-07-28 (stateless)** — no `initialize` handshake, no `Mcp-Session-Id`; every request carries its protocol version and capabilities in `_meta`. `Mcp-Method`/`Mcp-Name` headers are required on POSTs and header/body disagreement is rejected with `-32020`. Tools/resources/prompts are served with cache hints (`ttlMs` + `cacheScope`), so clients skip redundant list round-trips.
+- **2025-era (initialize handshake)** — served per-request statelessly for older clients; behavior is byte-compatible with the pre-migration server.
+
+The **tasks extension** (`io.modelcontextprotocol/tasks`) is advertised on the 2026 era. A client that declares the extension per-request gets `export_obsidian` as a polled task: `tools/call` returns `resultType: "task"` with a durable `taskId` (state lives in the `mcp_task` table, so any instance serves `tasks/get`), the client polls until `completed`, and the final `CallToolResult` arrives inlined in the task. Clients that do not declare the extension — including all 2025-era clients — keep the blocking behavior. The three extension methods are dispatched at the HTTP seam; see `src/mcpTasks.ts` for why they cannot live inside the SDK request table today (typescript-sdk #2598).
 
 ## Local Stdio Server
 
@@ -103,7 +113,7 @@ Supported scopes:
 
 MCP clients do **not** need Claude skills. Doctrine is baked into the server:
 
-1. **Server `instructions`** — returned on MCP initialize; hosts that surface them inject the full loop (grep/read/recall + ingest→remember→connect + mid-session capture).
+1. **Server `instructions`** — returned on the 2025-era initialize handshake and on the 2026-era `server/discover`; hosts that surface them inject the full loop (grep/read/recall + ingest→remember→connect + mid-session capture).
 2. **Resource `trove://doctrine`** — same text; agents can `resources/read` it at session start if instructions are ignored.
 3. **Tool descriptions** — each tool states when to use it (shared source: `src/toolDefinitions.ts`, used by both MCP and `GET /v1/tools`).
 4. **Prompts** — `trove-recall`, `trove-remember`, `trove-session` for structured workflows.
@@ -198,7 +208,7 @@ The store, MCP-stdio, and Obsidian suites run with `npm test` (add `DATABASE_URL
 DATABASE_URL=postgres://trove:trove@localhost:5432/trove npm test
 ```
 
-The HTTP-transport and token-auth suites need a running server and are opt-in via `TROVE_E2E=1` (which `test:e2e` sets):
+The HTTP-transport, token-auth, 2026-era, and tasks-extension suites need a running server and are opt-in via `TROVE_E2E=1` (which `test:e2e` sets):
 
 ```bash
 TROVE_SERVICE_TOKENS='read-token|reader|graph:read;write-token|agent|graph:read,graph:write,graph:export;admin-token|ops|graph:admin' \
@@ -210,6 +220,8 @@ TROVE_READ_TOKEN=read-token TROVE_WRITE_TOKEN=write-token TROVE_ADMIN_TOKEN=admi
   TROVE_SERVICE_TOKEN=write-token TROVE_MCP_URL=http://localhost:8787/mcp \
   npm run test:e2e
 ```
+
+`tests/mcp-tasks.test.ts` drives the 2026-07-28 era over raw JSON-RPC fetch (no SDK client in between) and covers `server/discover`, header mismatch rejection (`-32020`), cache hints, the blocking-vs-polled `export_obsidian` split, `-32021`/`-32602` task errors, and cooperative cancel.
 
 Expected result:
 
