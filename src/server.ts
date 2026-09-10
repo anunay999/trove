@@ -67,10 +67,11 @@ import { graphChatResponse } from "./graphChat.js";
 import { startJobWorker } from "./jobWorker.js";
 import {
   declaresTasksExtension,
+  drainExportTasks,
   isTasksMethodRequest,
   type JsonRpcRequestLike,
   McpTaskStore,
-  runExportObsidianTask,
+  startExportObsidianTask,
   TASKS_EXTENSION_ID,
   taskAckResult,
   taskCreateResult,
@@ -263,7 +264,7 @@ async function exportObsidianTaskResponse(parsed: JsonRpcRequestLike, authContex
     },
     viewer: taskViewerFrom(authContext),
   });
-  void runExportObsidianTask(store, taskStore!, task.id, owner);
+  startExportObsidianTask(store, taskStore!, task.id, owner);
   return jsonRpcResultResponse(parsed.id, taskCreateResult(task, TROVE_MCP_SERVER_INFO));
 }
 
@@ -1019,12 +1020,23 @@ const worker = (process.env.TROVE_AUTORUN_JOBS ?? "1") !== "0"
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.once(signal, () => {
     void (async () => {
+      // In-flight task executors are fire-and-forget on the request path.
+      // On a deliberate exit, drain them briefly so their rows complete
+      // instead of sitting "working" until the ten-minute stale check fails
+      // them; anything that did not finish inside the grace period is
+      // failed here, honestly and immediately.
+      for (const taskId of await drainExportTasks(20_000)) {
+        await taskStore?.fail(taskId, {
+          code: -32603,
+          message: "Task lost: the server restarted mid-execution.",
+        });
+      }
       await worker?.stop();
       // Tears down the modern MCP leg: aborts in-flight exchanges and closes
-      // their per-request instances. Polling tasks survive in Postgres; a
-      // task still executing here is failed by the stale-working check.
+      // their per-request instances. Polling tasks survive in Postgres.
       await mcpHandler.close();
       await taskStore?.close();
+      await userStore?.close();
       if ("close" in store && typeof store.close === "function") await store.close();
       // Spans are batched, so whatever is still buffered dies with the process
       // unless the exporter is drained here — and the last minute before a

@@ -55,12 +55,21 @@ try {
   );
   const revisionIds = revisions.rows.map((row) => String(row.id));
 
+  // MCP task handles past their advertised TTL are discardable by spec, and
+  // never live: this cannot race an in-flight task. (Fresh rows are left
+  // alone; the task store's own create-time purge handles the rest.)
+  const tasks = await client.query(
+    `select id from mcp_task where created_at < now() - make_interval(secs => greatest(ttl_ms, 3600000) / 1000.0)`,
+  );
+  const taskIds = tasks.rows.map((row) => String(row.id));
+
   const plan = {
     nodes: nodeIds.length,
     sources: sourceIds.length,
     textUnits: unitIds.length,
     revisions: revisionIds.length,
     views: viewIds.length,
+    mcpTasks: taskIds.length,
   };
 
   if (!apply) {
@@ -90,6 +99,7 @@ try {
   await client.query(`delete from node where id = any($1::uuid[])`, [nodeIds]);
   await client.query(`delete from text_unit where source_id = any($1::uuid[])`, [sourceIds]);
   await client.query(`delete from source where id = any($1::uuid[])`, [sourceIds]);
+  await client.query(`delete from mcp_task where id = any($1::uuid[])`, [taskIds]);
   await client.query(
     `insert into graph_event (action, entity_table, entity_id, interface_id, after)
      values ('cleanup_smoke_data', 'node', gen_random_uuid(), 'cleanup-script', $1::jsonb)`,

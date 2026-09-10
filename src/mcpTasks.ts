@@ -277,24 +277,59 @@ export function isTasksMethodRequest(parsed: unknown): parsed is JsonRpcRequestL
 
 // ---- task execution ---------------------------------------------------------
 
-/** Runs the export_obsidian work for a task and records the outcome. */
-export async function runExportObsidianTask(
+/**
+ * Fire-and-forget executors running right now, keyed by task id. The request
+ * path never awaits them; the shutdown path does, so a deliberate exit
+ * (deploy, SIGTERM) completes in-flight tasks instead of leaving their rows
+ * `working` until the ten-minute stale check fails them.
+ */
+const inFlightExports = new Map<string, Promise<void>>();
+
+/**
+ * Runs the export_obsidian work for a task off the request that created it,
+ * recording the outcome in the task row. The returned promise never rejects:
+ * execution errors are written to the row as a `failed` state.
+ */
+export function startExportObsidianTask(
   store: GraphStore,
   taskStore: McpTaskStore,
   taskId: string,
   owner: Parameters<GraphStore["exportMarkdown"]>[0],
-): Promise<void> {
+): void {
+  const execution = (async () => {
+    try {
+      const value = buildObsidianVaultExport(
+        await store.exportMarkdown(owner),
+        await store.timeline(owner),
+        await store.exportGraph(owner),
+      );
+      await taskStore.complete(taskId, toolResultFromValue(value));
+    } catch (error) {
+      await taskStore.fail(taskId, {
+        code: -32603,
+        message: error instanceof Error ? error.message : "Export failed.",
+      });
+    }
+  })();
+  inFlightExports.set(taskId, execution);
+  void execution.finally(() => inFlightExports.delete(taskId));
+}
+
+/**
+ * Wait (bounded) for every in-flight executor to finish, then report the task
+ * ids that did not. Callers should fail those rows immediately — a bounded
+ * drain beats a silent ten-minute stale window on every deploy.
+ */
+export async function drainExportTasks(timeoutMs: number): Promise<string[]> {
+  if (inFlightExports.size === 0) return [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, timeoutMs);
+  });
   try {
-    const value = buildObsidianVaultExport(
-      await store.exportMarkdown(owner),
-      await store.timeline(owner),
-      await store.exportGraph(owner),
-    );
-    await taskStore.complete(taskId, toolResultFromValue(value));
-  } catch (error) {
-    await taskStore.fail(taskId, {
-      code: -32603,
-      message: error instanceof Error ? error.message : "Export failed.",
-    });
+    await Promise.race([Promise.allSettled([...inFlightExports.values()]), timeout]);
+  } finally {
+    clearTimeout(timer);
   }
+  return [...inFlightExports.keys()];
 }
