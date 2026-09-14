@@ -23,6 +23,7 @@ import {
 } from "./contracts.js";
 import { assertScopes, operationContextFromAuth, type AuthContext, type TroveScope } from "./auth.js";
 import { forget, readAny, remember } from "./agentOps.js";
+import { registerItemAttachMcpTools } from "./registerItemAttachMcp.js";
 import type { GraphStore } from "./graphCore.js";
 import { toolDescription, TROVE_AGENT_DOCTRINE, visibleTiers } from "./toolDefinitions.js";
 import { getSkill } from "./skills.js";
@@ -156,6 +157,8 @@ export function createTroveMcpServer(
       async () => jsonToolResult(await forget(store, input, operationContext)),
     ),
   );
+
+  registerItemAttachMcpTools(server, store, authContext, operationContext, canWrite, tiers.has("curator"));
 
   // ---- curator: ingestion and curation flows ------------------------------
 

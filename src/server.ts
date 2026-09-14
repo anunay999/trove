@@ -41,6 +41,7 @@ import {
   updateInputSchema,
 } from "./contracts.js";
 import { forget, remember } from "./agentOps.js";
+import { mountItemAttachHttpRoutes } from "./itemAttachHttp.js";
 import {
   AuthError,
   applyImpersonation,
@@ -626,6 +627,8 @@ app.post("/v1/remember", async (context) => {
   return context.json(await remember(store, input, operationContextFromAuth(auth)), 201);
 });
 
+mountItemAttachHttpRoutes(app, store, authorizeRequest, parseJsonOrThrow);
+
 app.post("/v1/grep", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
@@ -802,8 +805,8 @@ const approveUserInputSchema = z.object({
 });
 
 const setUserStatusInputSchema = z.object({
-  clerkUserId: z.string().min(1),
   status: z.enum(["active", "waitlisted", "suspended"]),
+  clerkUserId: z.string().min(1),
 });
 
 // Who am I? Passes with zero scopes so waitlisted users can see their status.

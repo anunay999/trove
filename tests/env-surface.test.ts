@@ -59,11 +59,9 @@ const TEST_SEAMS = new Set([
  * somebody makes on purpose — with this line in the diff — rather than the path
  * of least resistance it was for the first forty-four.
  */
-const MAX_DOCUMENTED = 27;
-// 24 -> 27 on 2026-09-05 for the three LANGFUSE_* credentials. Recorded rather
-// than nudged: they are secrets for an external service, which is exactly what
-// this file is for, and the raise is the decision the ratchet exists to force
-// somebody to make in a diff.
+const MAX_DOCUMENTED = 28;
+// 24 -> 27 on 2026-09-05 for the three LANGFUSE_* credentials.
+// 27 -> 28 on 2026-09-06 for RELAY_MEMORY_EVENTS_URL (Outcome OS item-attach webhook).
 
 async function sourceFiles(dir: URL): Promise<URL[]> {
   const entries = await readdir(dir, { withFileTypes: true });
