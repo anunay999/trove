@@ -46,7 +46,7 @@
     "@langfuse/otel": "^5.11.0",
     "@langfuse/tracing": "^5.11.0",
     "@modelcontextprotocol/client": "^2.0.0",
-    "@modelcontextprotocol/server": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.3.0",
     "@opentelemetry/sdk-node": "^0.222.0",
     "hono": "^4.13.5",
     "pg": "^8.23.0",
