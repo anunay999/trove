@@ -34,12 +34,12 @@ export function Landing({ onJoin, onLogin, onConnectKey }: LandingProps) {
           {...enter(1)}
           className="mt-7 text-balance text-[clamp(2.5rem,6vw,4.5rem)] font-medium leading-[1.02] tracking-[-0.04em]"
         >
-          Teach one agent.
+          Context that keeps
           <br />
-          Every agent knows.
+          getting better.
         </motion.h1>
         <motion.p {...enter(2)} className="mt-5 max-w-md text-pretty text-base text-muted-foreground md:text-lg">
-          Shared memory for your AI agents, with the source behind every fact.
+          Use Claude alone or every agent you have. Trove keeps what they learn, shows where it came from, and replaces what goes stale.
         </motion.p>
         <motion.div {...enter(3)} className="mt-8 w-full max-w-md">
           <WaitlistForm onJoin={onJoin} idPrefix="hero" />

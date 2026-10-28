@@ -1,5 +1,6 @@
 import { useRef, useState, type ReactNode } from "react";
 import { motion, useInView, useReducedMotion } from "motion/react";
+import { Check } from "lucide-react";
 
 const PICK = { duration: 0.7, ease: [0.32, 0.72, 0, 1] } as const;
 const AGENTS = ["Claude", "Codex", "Cursor"];
@@ -36,22 +37,35 @@ function Card({ title, body, badge, children }: { title: string; body: string; b
 
 const pill = "rounded-full border px-3 py-1 text-[13px] whitespace-nowrap";
 
+// The rule is taught in Claude; Codex and Cursor pick it up one after the other.
 function LearnOnce({ on }: { on: boolean }) {
   return (
-    <div className="flex gap-3">
-      {AGENTS.map((agent, i) => (
-        <div key={agent} className="flex w-20 flex-col items-center gap-3 sm:w-24">
-          <span className="text-[13px] text-muted-foreground">{agent}</span>
-          <motion.span
-            initial={false}
-            animate={{ opacity: i === 0 || on ? 1 : 0.18, y: i === 0 || on ? 0 : 4 }}
-            transition={{ ...PICK, delay: on ? i * 0.12 : 0 }}
-            className={`${pill} ${i === 0 ? "border-[var(--signal)] text-foreground" : "border-border text-foreground"}`}
-          >
-            pnpm
-          </motion.span>
-        </div>
-      ))}
+    <div className="flex flex-col items-center gap-5">
+      <span className={`${pill} border-[var(--signal)] text-foreground`}>Never deploy on Fridays</span>
+      <div className="flex gap-2">
+        {AGENTS.map((agent, i) => {
+          const knows = i === 0 || on;
+          return (
+            <motion.span
+              key={agent}
+              initial={false}
+              animate={{ opacity: knows ? 1 : 0.35 }}
+              transition={{ ...PICK, delay: on ? i * 0.25 : 0 }}
+              className={`${pill} flex items-center gap-1.5 border-border text-foreground`}
+            >
+              <motion.span
+                initial={false}
+                animate={{ scale: knows ? 1 : 0, opacity: knows ? 1 : 0 }}
+                transition={{ ...PICK, delay: on ? i * 0.25 + 0.1 : 0 }}
+                className="inline-flex"
+              >
+                <Check className="size-3.5 text-foreground" />
+              </motion.span>
+              {agent}
+            </motion.span>
+          );
+        })}
+      </div>
     </div>
   );
 }
