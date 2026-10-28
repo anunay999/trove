@@ -210,12 +210,18 @@ export const graphChatInputSchema = z.object({
   depth: z.number().int().min(0).max(2).default(1),
 });
 
+/** Which space a write lands in. Unset: the team when one is active, else private. */
+export const writeSpaceSchema = z.enum(["mine", "team"]).describe(
+  "Where this is saved. team: knowledge about shared work (a repo, service, customer, decision) that teammates' agents should know. mine: about this person (preferences, their workflow, opinions about colleagues). Default: team when a team is active, else mine. Credentials are refused for team.",
+);
+
 export const ingestInputSchema = z.object({
   kind: sourceKindSchema,
   title: z.string().min(1),
   uri: z.string().optional(),
   contentText: z.string().min(1),
   metadata: z.record(z.string(), z.unknown()).default({}),
+  space: writeSpaceSchema.optional(),
 });
 
 export const evidenceRefSchema = z.object({
@@ -269,6 +275,7 @@ export const rememberInputSchema = z.object({
   })).default([]),
   nodeId: z.string().uuid().optional(),
   slug: z.string().min(1).optional(),
+  space: writeSpaceSchema.optional(),
 });
 
 export const forgetInputSchema = z.object({

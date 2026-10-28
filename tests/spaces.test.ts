@@ -117,11 +117,11 @@ describe("tenants and spaces", { skip: databaseUrl ? false : "requires a Postgre
     assert.equal(after?.summary, "team", "a shared-space reader rewrote the shared node");
   });
 
-  it("makes remember with a shared node's title create the member's own note, not revise the shared one", async () => {
+  it("makes a private remember with a shared node's title create the member's own note, not revise the shared one", async () => {
     const title = `Retry policy ${MARK}`;
     const shared = await store.capture({ title, type: "decision", summary: "team says 3 retries", evidence: [], links: [] }, ctx(workspaceId, "ws"));
     const alice = ctx(aliceId, "sp-alice", [workspaceId]);
-    const result = await remember(store, { title, summary: "alice says 5 retries", type: "decision" } as RememberInput, alice);
+    const result = await remember(store, { title, summary: "alice says 5 retries", type: "decision", space: "mine" } as RememberInput, alice);
     assert.notEqual(result.node.id, shared.id, "remember revised the shared node");
     const after = await store.read({ nodeId: shared.id }, ctx(workspaceId, "ws"));
     assert.equal(after?.summary, "team says 3 retries");
@@ -129,11 +129,11 @@ describe("tenants and spaces", { skip: databaseUrl ? false : "requires a Postgre
     assert.equal(bySlug?.id, result.node.id, "a slug in both spaces did not resolve to the member's own node");
   });
 
-  it("refuses remember aimed at a shared node by id", async () => {
+  it("refuses a private remember aimed at a shared node by id", async () => {
     const shared = await store.capture({ title: `Owned elsewhere ${MARK}`, type: "claim", summary: "team copy", evidence: [], links: [] }, ctx(workspaceId, "ws"));
     const alice = ctx(aliceId, "sp-alice", [workspaceId]);
     await assert.rejects(
-      remember(store, { nodeId: shared.id, title: shared.title, summary: "member rewrite" } as RememberInput, alice),
+      remember(store, { nodeId: shared.id, title: shared.title, summary: "member rewrite", space: "mine" } as RememberInput, alice),
       /no node with id/,
     );
     const after = await store.read({ nodeId: shared.id }, ctx(workspaceId, "ws"));
