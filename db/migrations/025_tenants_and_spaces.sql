@@ -16,6 +16,12 @@
 --
 -- Idempotent: guarded creates, an on-conflict backfill, and constraints swapped
 -- only when the old one is still there.
+--
+-- Swapping the foreign keys locks all ten graph tables until commit. If the
+-- running server holds a long transaction on one of them, give up after 5s
+-- (the boot fails and retries) rather than queue every request behind us.
+
+set local lock_timeout = '5s';
 
 create table if not exists tenant (
   id uuid primary key default gen_random_uuid(),
