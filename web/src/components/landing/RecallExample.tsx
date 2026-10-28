@@ -46,7 +46,7 @@ export function RecallExample() {
             {w.when} &middot; {w.agent}
           </p>
           <p className="mt-1.5 text-foreground">
-            <span className="text-[var(--signal)]">remember</span> &ldquo;Install dependencies&rdquo;
+            <span className="font-medium text-foreground">remember</span> &ldquo;Install dependencies&rdquo;
           </p>
           <p className="text-foreground">{w.summary}</p>
           <p className="mt-1 text-muted-foreground">
@@ -58,7 +58,7 @@ export function RecallExample() {
       <motion.div {...step(2)} className="p-4">
         <p className="tnum text-muted-foreground">Oct 28 &middot; Cursor</p>
         <p className="mt-1.5 text-foreground">
-          <span className="text-[var(--signal)]">recall</span> &ldquo;how do I install dependencies?&rdquo;
+          <span className="font-medium text-foreground">recall</span> &ldquo;how do I install dependencies?&rdquo;
         </p>
 
         <motion.div
@@ -78,7 +78,7 @@ export function RecallExample() {
 
       <motion.div {...step(3)} className="border-t border-border p-4">
         <p className="text-foreground">
-          <span className="text-[var(--signal)]">read</span> &ldquo;Install dependencies&rdquo; asOf Jun 3
+          <span className="font-medium text-foreground">read</span> &ldquo;Install dependencies&rdquo; asOf Jun 3
         </p>
         <p className="text-muted-foreground">
           <span className="line-through decoration-muted-foreground/70">Run npm install.</span> Replaced, not deleted.

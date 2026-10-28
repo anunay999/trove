@@ -76,11 +76,31 @@ function Hero({ onJoin, onLogin, onConnectKey }: LandingProps) {
         </div>
 
         <motion.div {...enter(3)} className="lg:pt-3">
+          <RecallExample />
+        </motion.div>
+      </div>
+    </section>
+  );
+}
+
+function Connect() {
+  return (
+    <section className={`${CONTAINER} border-t border-border py-24 md:py-32`}>
+      <div className="grid items-start gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:gap-16">
+        <div>
+          <h2 className="max-w-[18ch] text-balance text-3xl font-medium leading-[1.08] tracking-[-0.035em] md:text-[2.75rem]">
+            One command in the agent you already use.
+          </h2>
+          <p className="mt-5 max-w-[30rem] text-pretty leading-relaxed text-muted-foreground">
+            Every key you create reads and writes the same memory, so connect each agent once and they all share it.
+          </p>
+        </div>
+        <div className="min-w-0">
           <SetupTabs />
           <div className="mt-5">
             <AgentLogos />
           </div>
-        </motion.div>
+        </div>
       </div>
     </section>
   );
@@ -106,12 +126,9 @@ function Problem() {
         </div>
 
         <div ref={ref} className="border-t border-border font-mono text-[13px]">
-          {MEMORY_FILES.map((row, i) => (
-            <motion.div
+          {MEMORY_FILES.map((row) => (
+            <div
               key={row.file}
-              initial={reduceMotion ? false : { opacity: 0, y: 6 }}
-              animate={show ? { opacity: 1, y: 0 } : undefined}
-              transition={{ duration: 0.5, delay: i * 0.04, ease: EASE }}
               className="grid grid-cols-[7.5rem_1fr] gap-x-4 gap-y-1 border-b border-border py-4 sm:grid-cols-[7.5rem_1fr_auto]"
             >
               <span className="text-muted-foreground">{row.file}</span>
@@ -131,28 +148,9 @@ function Problem() {
                 {row.agent}
                 {row.age && <> &middot; {row.age}</>}
               </span>
-            </motion.div>
+            </div>
           ))}
         </div>
-      </div>
-    </section>
-  );
-}
-
-function Example() {
-  return (
-    <section className={`${CONTAINER} border-t border-border py-24 md:py-32`}>
-      <div className="grid items-start gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:gap-16">
-        <div className="lg:sticky lg:top-24">
-          <h2 className="max-w-[18ch] text-balance text-3xl font-medium leading-[1.08] tracking-[-0.035em] md:text-[2.75rem]">
-            Ask any agent. Get the current answer and where it came from.
-          </h2>
-          <p className="mt-5 max-w-[30rem] text-pretty leading-relaxed text-muted-foreground">
-            Codex saved a rule in June. Claude Code corrected it in October and cited the file. Today Cursor asks, and
-            gets the corrected rule with the line that backs it. The June version is kept, not deleted.
-          </p>
-        </div>
-        <RecallExample />
       </div>
     </section>
   );
@@ -235,7 +233,7 @@ export function Landing({ onJoin, onLogin, onConnectKey }: LandingProps) {
     <main className="landing-shell relative flex-1 overflow-hidden">
       <Hero onJoin={onJoin} onLogin={onLogin} onConnectKey={onConnectKey} />
       <Problem />
-      <Example />
+      <Connect />
       <Tools />
       <Teams />
       <Hosting />
