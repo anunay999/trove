@@ -166,22 +166,25 @@ export async function remember(
   input: RememberInput,
   context?: GraphOperationContext,
 ): Promise<RememberResult> {
+  // The revise target is looked up in the caller's own space only: a shared
+  // node is never revised through remember (sharing is its own verb).
+  const ownContext = context && { ...context, sharedOwnerIds: undefined };
   let target: ReadResult | null = null;
   if (input.nodeId) {
-    target = await store.read({ nodeId: input.nodeId }, context, { trackAccess: false });
+    target = await store.read({ nodeId: input.nodeId }, ownContext, { trackAccess: false });
     if (!target) throw new Error(`remember: no node with id ${input.nodeId}.`);
   } else if (input.slug) {
-    target = await store.read({ slug: input.slug }, context, { trackAccess: false });
+    target = await store.read({ slug: input.slug }, ownContext, { trackAccess: false });
     if (!target) throw new Error(`remember: no node with slug ${input.slug}.`);
   }
 
   let similar: RememberResult["similar"] = [];
   if (!target) {
-    const matches = await store.findSimilarTitles(input.title, 5, context);
+    const matches = await store.findSimilarTitles(input.title, 5, ownContext);
     const wantedSlug = slugify(input.title);
     const wantedTitle = normalizeTitle(input.title);
     const exact = matches.find((match) => match.node.slug === wantedSlug || normalizeTitle(match.node.title) === wantedTitle);
-    if (exact) target = await store.read({ nodeId: exact.node.id }, context, { trackAccess: false });
+    if (exact) target = await store.read({ nodeId: exact.node.id }, ownContext, { trackAccess: false });
     similar = matches
       .filter((match) => match.node.id !== exact?.node.id)
       .slice(0, 3)

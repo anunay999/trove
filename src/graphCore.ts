@@ -245,8 +245,10 @@ export type GraphOperationContext = {
   actorId?: string;
   interfaceId?: string;
   requestId?: string;
-  /** app_user.id this operation reads/writes as. Absent → see-all (superuser). */
+  /** space.id this operation reads/writes as. Absent → see-all (superuser). */
   ownerId?: string | undefined;
+  /** Shared spaces (workspaces) this caller may also read. Never written to through this context. */
+  sharedOwnerIds?: string[] | undefined;
   /** Bypass owner scoping entirely (auth-disabled local/CI, maintenance jobs). */
   superuser?: boolean | undefined;
 };
@@ -255,10 +257,14 @@ export type GraphOperationContext = {
  * Resolve the owner scope for a store operation.
  * - `scoped: false` — no owner filter (superuser, or no context supplied, e.g.
  *   maintenance jobs and internal callers). Writes stamp owner_id = NULL.
- * - `scoped: true` — reads filter by `ownerId`; a scoped-but-null owner matches
- *   nothing, so an authed request that failed to resolve an owner fails closed.
+ * - `scoped: true` — writes stamp and mutate only `ownerId`; a scoped-but-null
+ *   owner matches nothing, so an authed request that failed to resolve an owner
+ *   fails closed.
+ * - `readOwnerIds` — `ownerId` plus its shared spaces. Only the agent-facing
+ *   read paths (search, recall, read, grep, neighborhood, evidence) use it;
+ *   listings, lint, export, jobs and every write use `ownerId` alone.
  */
-export type OwnerScope = { scoped: boolean; ownerId: string | null };
+export type OwnerScope = { scoped: boolean; ownerId: string | null; readOwnerIds: string[] };
 
 /**
  * Attempts a job gets across all causes -- failures and lease reclaims alike.
@@ -380,8 +386,9 @@ export function ownerScope(context?: GraphOperationContext): OwnerScope {
   // without an ownerId (internal/maintenance callers) all see the whole graph.
   // Every authenticated user credential carries an ownerId, so real requests
   // are always scoped; only trusted operator/internal paths reach see-all.
-  if (!context || context.superuser || !context.ownerId) return { scoped: false, ownerId: null };
-  return { scoped: true, ownerId: context.ownerId };
+  if (!context || context.superuser || !context.ownerId) return { scoped: false, ownerId: null, readOwnerIds: [] };
+  const shared = (context.sharedOwnerIds ?? []).filter((id) => id !== context.ownerId);
+  return { scoped: true, ownerId: context.ownerId, readOwnerIds: [context.ownerId, ...shared] };
 }
 
 /**
