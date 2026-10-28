@@ -815,6 +815,8 @@ app.get("/v1/me", async (context) => {
     mode: auth.mode,
     scopes: auth.scopes,
     identity: auth.identity ?? null,
+    // The tenant this caller's credentials act in (the dashboard's active Clerk org, else personal).
+    tenantId: auth.tenantId ?? null,
     // Set while an admin is viewing Trove as someone else; the dashboard shows
     // this account's graph and keys, and offers the way back.
     impersonating: auth.impersonating ?? null,
