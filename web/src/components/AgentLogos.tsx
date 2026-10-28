@@ -19,23 +19,17 @@ const AGENTS = [
   { name: "MCP", glyph: <Glyph path={MODELCONTEXTPROTOCOL_PATH} label="Model Context Protocol" /> },
 ];
 
-/** "Works with your agents" strip on the landing page. */
+/** "Works with" row under the landing hero. */
 export function AgentLogos() {
   return (
-    <section className="border-y border-border">
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-6 py-8 md:flex-row md:items-center md:justify-between lg:px-10 2xl:max-w-[88rem]">
-        <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
-          One memory layer for the agents you already run
-        </p>
-        <div className="flex flex-wrap items-center gap-x-8 gap-y-5 text-muted-foreground md:justify-end">
-        {AGENTS.map((agent) => (
-          <span key={agent.name} className="flex items-center gap-2.5 transition-colors duration-200 hover:text-foreground">
-            {agent.glyph}
-            <span className="text-sm font-medium">{agent.name}</span>
-          </span>
-        ))}
-        </div>
-      </div>
-    </section>
+    <div className="flex flex-wrap items-center gap-x-6 gap-y-3 text-muted-foreground">
+      <span className="text-[13px]">Works with</span>
+      {AGENTS.map((agent) => (
+        <span key={agent.name} className="flex items-center gap-2">
+          {agent.glyph}
+          <span className="text-[13px] font-medium">{agent.name}</span>
+        </span>
+      ))}
+    </div>
   );
 }

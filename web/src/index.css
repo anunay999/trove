@@ -225,55 +225,6 @@
   z-index: 1;
 }
 
-/*
- * Film grain over the whole landing, fixed so it doesn't scroll away. The SVG
- * turbulence tile is inline so no asset request is needed. Kept under 4% — any
- * more and it reads as dirt instead of texture.
- */
-.grain-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  pointer-events: none;
-  opacity: 0.035;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
-}
-
-/* The hero's faint blueprint grid, masked so it dissolves toward the fold. */
-.hero-grid {
-  background-image:
-    linear-gradient(rgba(148, 178, 220, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(148, 178, 220, 0.045) 1px, transparent 1px);
-  background-size: 56px 56px;
-  mask-image: radial-gradient(ellipse 90% 80% at 50% 30%, black 25%, transparent 78%);
-}
-
-/* The stream's live dot. Slower than a cursor blink — a pulse, not an alarm. */
-@keyframes pulse-dot {
-  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, var(--signal) 55%, transparent); }
-  50% { opacity: 0.55; box-shadow: 0 0 0 5px transparent; }
-}
-.live-dot {
-  animation: pulse-dot 2.4s ease-in-out infinite;
-}
-
-/*
- * Rows in the memory stream enter from below and settle. The older rows are
- * not removed — they dim and compress, because the whole point of the page is
- * that nothing is thrown away.
- */
-.stream-mask {
-  mask-image: linear-gradient(to bottom, transparent 0%, black 14%);
-}
-
-/* Superseded beliefs stay visible, struck through — retired, not deleted. */
-.superseded-line {
-  text-decoration: line-through;
-  text-decoration-color: color-mix(in srgb, var(--signal) 60%, transparent);
-  text-decoration-thickness: 1px;
-  text-underline-offset: 2px;
-}
-
 /* Tabular numerals anywhere the landing shows counts or timestamps. */
 .tnum {
   font-variant-numeric: tabular-nums;
