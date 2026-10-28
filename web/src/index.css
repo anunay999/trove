@@ -225,6 +225,12 @@
   z-index: 1;
 }
 
+/* The hero's hairline figure: plates match the page, the lifted card's edge is the amber signal. */
+.memory-tray {
+  --hairline-plate: var(--background);
+  --hairline-highlight: var(--signal);
+}
+
 /* Tabular numerals anywhere the landing shows counts or timestamps. */
 .tnum {
   font-variant-numeric: tabular-nums;

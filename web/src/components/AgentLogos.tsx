@@ -19,17 +19,15 @@ const AGENTS = [
   { name: "MCP", glyph: <Glyph path={MODELCONTEXTPROTOCOL_PATH} label="Model Context Protocol" /> },
 ];
 
-/** "Works with" row under the landing hero. */
+/** Glyph-only row of the agents Trove works with; names are the glyphs' accessible labels. */
 export function AgentLogos() {
   return (
-    <div className="flex flex-wrap items-center gap-x-6 gap-y-3 text-muted-foreground">
-      <span className="text-[13px]">Works with</span>
+    <span className="flex items-center gap-2 text-foreground/80 [&_svg]:size-4">
       {AGENTS.map((agent) => (
-        <span key={agent.name} className="flex items-center gap-2">
+        <span key={agent.name} title={agent.name}>
           {agent.glyph}
-          <span className="text-[13px] font-medium">{agent.name}</span>
         </span>
       ))}
-    </div>
+    </span>
   );
 }
