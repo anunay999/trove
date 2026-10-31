@@ -296,6 +296,18 @@ export const forgetInputSchema = z.object({
   },
 );
 
+export const shareInputSchema = z.object({
+  nodeIds: z.array(z.string().uuid()).optional(),
+  slugs: z.array(z.string().min(1)).optional(),
+}).refine((value) => (value.nodeIds?.length ?? 0) + (value.slugs?.length ?? 0) > 0, {
+  message: "Provide nodeIds or slugs.",
+});
+
+export const shareableInputSchema = z.object({
+  limit: z.number().int().min(1).max(200).optional(),
+  offset: z.number().int().min(0).optional(),
+});
+
 export const readAnyInputSchema = z.object({
   id: z.string().uuid().optional(),
   slug: z.string().min(1).optional(),
@@ -462,4 +474,6 @@ export type GrepInput = z.input<typeof grepInputSchema>;
 export type QuoteEvidenceRef = z.input<typeof quoteEvidenceRefSchema>;
 export type RememberInput = z.input<typeof rememberInputSchema>;
 export type ForgetInput = z.infer<typeof forgetInputSchema>;
+export type ShareInput = z.infer<typeof shareInputSchema>;
+export type ShareableInput = z.infer<typeof shareableInputSchema>;
 export type ReadAnyInput = z.infer<typeof readAnyInputSchema>;

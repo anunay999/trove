@@ -21,6 +21,8 @@ import {
   enqueueJobInputSchema,
   eventFeedInputSchema,
   forgetInputSchema,
+  shareInputSchema,
+  shareableInputSchema,
   graphChatInputSchema,
   grepInputSchema,
   ingestInputSchema,
@@ -640,6 +642,25 @@ app.post("/v1/forget", async (context) => {
   const input = await parseJsonOrThrow(context.req.json(), forgetInputSchema);
   return context.json(await forget(store, input, operationContextFromAuth(auth)));
 });
+
+app.post("/v1/shareable", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  if (auth instanceof Response) return auth;
+  if (!store.shareable) return context.json({ error: "teams_need_postgres" }, 501);
+  const input = await parseJsonOrThrow(context.req.json(), shareableInputSchema);
+  return context.json(await store.shareable(input, operationContextFromAuth(auth)));
+});
+
+for (const action of ["share", "unshare"] as const) {
+  app.post(`/v1/${action}`, async (context) => {
+    const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:capture"]);
+    if (auth instanceof Response) return auth;
+    const move = store[action];
+    if (!move) return context.json({ error: "teams_need_postgres" }, 501);
+    const input = await parseJsonOrThrow(context.req.json(), shareInputSchema);
+    return context.json(await move.call(store, input, operationContextFromAuth(auth)));
+  });
+}
 
 app.post("/v1/annotate", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:update"]);

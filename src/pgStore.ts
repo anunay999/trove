@@ -26,6 +26,8 @@ import type {
   RecallInput,
   RunJobInput,
   SearchInput,
+  ShareableInput,
+  ShareInput,
   TextUnit,
   UpdateInput,
 } from "./contracts.js";
@@ -72,6 +74,8 @@ import {
   WRITE_ACTIONS,
   type GraphJob,
   type GraphOperationContext,
+  type ShareableResult,
+  type SpaceMoveResult,
   type GraphLintFinding,
   type GraphLintReport,
   type GraphSnapshot,
@@ -98,6 +102,7 @@ import { runRecallSelfTest } from "./recallSelfTest.js";
 import { observe, withTraceAttributes } from "./tracing.js";
 import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
+import { looksLikeCredential, TeamSpaceError } from "./agentOps.js";
 
 const { Pool } = pg;
 
@@ -3623,6 +3628,128 @@ export class PgGraphStore implements GraphStore {
     return String(result.rows[0].id);
   }
 
+  /** The caller's private notes, newest first, for an agent deciding what to share with the team. */
+  async shareable(input: ShareableInput, context?: GraphOperationContext): Promise<ShareableResult> {
+    const { mine } = teamSpaces(context);
+    const [count, page] = await Promise.all([
+      this.pool.query("select count(*)::int as n from node where owner_id = $1 and deleted_at is null", [mine]),
+      this.pool.query(
+        `select n.id, n.slug, n.title, n.summary, n.updated_at, r.content
+         from node n left join node_revision r on r.id = n.current_revision_id
+         where n.owner_id = $1 and n.deleted_at is null
+         order by n.updated_at desc, n.id
+         limit $2 offset $3`,
+        [mine, input.limit ?? 50, input.offset ?? 0],
+      ),
+    ]);
+    return {
+      total: count.rows[0].n,
+      notes: page.rows.map((row) => ({
+        id: String(row.id),
+        slug: String(row.slug),
+        title: String(row.title),
+        summary: row.summary ? String(row.summary).slice(0, 300) : null,
+        updatedAt: new Date(row.updated_at).toISOString(),
+        looksLikeCredential: looksLikeCredential([row.title, row.summary, row.content].filter(Boolean).join("\n")),
+      })),
+    };
+  }
+
+  /** Move private notes into the team space. Their own citations and links stay private. */
+  async share(input: ShareInput, context?: GraphOperationContext): Promise<SpaceMoveResult> {
+    const { mine, team } = teamSpaces(context);
+    return this.moveNotes(input, context, mine, async (_client, row) => {
+      if (looksLikeCredential([row.title, row.summary, row.content].filter(Boolean).join("\n"))) {
+        return { skip: "it looks like it contains a credential; remove the secret, then share it" };
+      }
+      return { to: team, metadata: { sharedFrom: mine, sharedAt: new Date().toISOString() } };
+    });
+  }
+
+  /** Move shared notes back to the private space they came from. The sharer or a team admin may. */
+  async unshare(input: ShareInput, context?: GraphOperationContext): Promise<SpaceMoveResult> {
+    const { mine, team } = teamSpaces(context);
+    let admin: boolean | undefined;
+    return this.moveNotes(input, context, team, async (client, row) => {
+      const from = typeof row.metadata?.sharedFrom === "string" ? row.metadata.sharedFrom : null;
+      if (!from) return { skip: "it was written straight to the team, so it has no private space to go back to" };
+      admin ??= (await client.query(
+        `select 1 from space p
+         join tenant_member m on m.user_id = p.user_id and m.role = 'admin'
+         join space t on t.tenant_id = m.tenant_id
+         where p.id = $1 and t.id = $2`,
+        [mine, team],
+      )).rowCount === 1;
+      if (from !== mine && !admin) return { skip: "only the person who shared it or a team admin can take it back" };
+      return { to: from, metadata: null };
+    });
+  }
+
+  private async moveNotes(
+    input: ShareInput,
+    context: GraphOperationContext | undefined,
+    fromOwner: string,
+    decide: (
+      client: pg.PoolClient,
+      row: { id: string; slug: string; title: string; summary: string | null; content: string | null; metadata: Record<string, unknown> },
+    ) => Promise<{ skip: string } | { to: string; metadata: Record<string, unknown> | null }>,
+  ): Promise<SpaceMoveResult> {
+    const nodeIds = input.nodeIds ?? [];
+    const slugs = input.slugs ?? [];
+    const moved: SpaceMoveResult["moved"] = [];
+    const skipped: SpaceMoveResult["skipped"] = [];
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const rows = (await client.query(
+        `select n.id, n.slug, n.title, n.summary, n.metadata, r.content
+         from node n left join node_revision r on r.id = n.current_revision_id
+         where n.owner_id = $1 and n.deleted_at is null and (n.id = any($2::uuid[]) or n.slug = any($3::text[]))
+         for update of n`,
+        [fromOwner, nodeIds, slugs],
+      )).rows;
+      for (const ref of [...nodeIds, ...slugs]) {
+        if (!rows.some((row) => String(row.id) === ref || row.slug === ref)) skipped.push({ ref, reason: "not found among the notes you can move" });
+      }
+      const actor = await this.actorUuidForContext(client, context);
+      for (const row of rows) {
+        const id = String(row.id);
+        const decision = await decide(client, { ...row, id, metadata: row.metadata ?? {} });
+        if ("skip" in decision) {
+          skipped.push({ ref: row.slug, reason: decision.skip });
+          continue;
+        }
+        const clash = await client.query("select 1 from node where owner_id = $1 and slug = $2", [decision.to, row.slug]);
+        if (clash.rowCount) {
+          skipped.push({ ref: row.slug, reason: "the destination already has a note with this slug; read it and remember into it instead" });
+          continue;
+        }
+        await client.query(
+          `update node set owner_id = $2,
+             metadata = case when $3::jsonb is null then metadata - 'sharedFrom' - 'sharedAt' else metadata || $3::jsonb end
+           where id = $1`,
+          [id, decision.to, decision.metadata ? JSON.stringify(decision.metadata) : null],
+        );
+        // Vectors carry the owning space too, or semantic recall would still scope them to the old one.
+        await client.query(
+          `update embedding set tenant_id = $2
+           where (owner_table = 'node' and owner_id = $1)
+              or (owner_table = 'node_revision' and owner_id in (select id from node_revision where node_id = $1))`,
+          [id, decision.to],
+        );
+        await this.recordEvent(client, decision.metadata ? "share" : "unshare", "node", id, { ownerId: decision.to }, { ownerId: fromOwner }, context, actor);
+        moved.push({ id, slug: row.slug, title: row.title });
+      }
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+    return { moved, skipped };
+  }
+
   private async recordEvent(
     client: pg.PoolClient,
     action: string,
@@ -4085,4 +4212,13 @@ function estimateTokenCount(text: string): number {
 
 function toIso(value: unknown): string {
   return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function teamSpaces(context: GraphOperationContext | undefined): { mine: string; team: string } {
+  const mine = context?.ownerId;
+  const team = context?.sharedOwnerIds?.[0];
+  if (!mine || !team || context?.superuser) {
+    throw new TeamSpaceError("no_team", "Sharing needs an active team. Switch to a team in the dashboard first.");
+  }
+  return { mine, team };
 }

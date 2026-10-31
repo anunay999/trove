@@ -8,6 +8,8 @@ import {
   enqueueJobInputSchema,
   eventFeedInputSchema,
   forgetInputSchema,
+  shareInputSchema,
+  shareableInputSchema,
   grepInputSchema,
   ingestInputSchema,
   linkInputSchema,
@@ -156,6 +158,28 @@ export function createTroveMcpServer(
       async () => jsonToolResult(await forget(store, input, operationContext)),
     ),
   );
+
+  // ---- teams: move notes between a member's private space and the team ----
+  if (store.shareable && store.share && store.unshare) {
+    const shareable = store.shareable.bind(store);
+    const share = store.share.bind(store);
+    const unshare = store.unshare.bind(store);
+    if (canWrite) server.registerTool(
+      "shareable",
+      { title: "Shareable Notes", description: toolDescription("shareable"), inputSchema: shareableInputSchema },
+      async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await shareable(input, operationContext))),
+    );
+    if (canWrite) server.registerTool(
+      "share",
+      { title: "Share With Team", description: toolDescription("share"), inputSchema: shareInputSchema },
+      async (input) => withScopes(authContext, ["graph:write:capture"], async () => jsonToolResult(await share(input, operationContext))),
+    );
+    if (canWrite) server.registerTool(
+      "unshare",
+      { title: "Unshare From Team", description: toolDescription("unshare"), inputSchema: shareInputSchema },
+      async (input) => withScopes(authContext, ["graph:write:capture"], async () => jsonToolResult(await unshare(input, operationContext))),
+    );
+  }
 
   // ---- curator: ingestion and curation flows ------------------------------
 

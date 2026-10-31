@@ -5,6 +5,8 @@ import {
   enqueueJobInputSchema,
   eventFeedInputSchema,
   forgetInputSchema,
+  shareInputSchema,
+  shareableInputSchema,
   grepInputSchema,
   ingestInputSchema,
   linkInputSchema,
@@ -81,6 +83,10 @@ CORRECTIONS
 SESSION LOOP
 Start: load what you already know → do the work → save truths as they land → link them → fix outdated beliefs → finish with a handful of solid notes, not one mega dump.
 
+TEAMS
+- In a team, remember and ingest write to the team by default; pass space: "mine" for anything personal. Credentials are refused for the team.
+- Private notes from before the team stay private. To move some over: shareable lists them, propose a list to the person, share only what they approve, unshare to take one back.
+
 INVARIANTS
 Load before re-deriving. Pick tools by query shape. Ingest raw text, remember distilled beliefs. Write when it's true, not only when the day ends. Supersede, don't delete. Cite a source or say it's your inference. Put note names in answers so the next agent can open them.`;
 
@@ -127,6 +133,27 @@ export const troveTools = [
     description:
       "Retire a belief that is no longer true. Pass nodeIds/slugs to tombstone whole notes (they leave recall, grep, and read), edgeIds to expire links, or a query to preview first (dryRun defaults true in query mode). Nothing is hard-deleted — supersession history stays queryable via neighborhood includeExpired/asOf.",
     inputSchema: forgetInputSchema,
+  },
+  {
+    name: "shareable",
+    tier: "curator",
+    description:
+      "List your private notes (newest first, paged by limit/offset; total says how many) so you can propose which ones belong in the team space. Good candidates are about shared work: the codebase, decisions, runbooks, incidents, customers. Keep personal preferences, drafts and anything marked looksLikeCredential private. The person decides: show them the proposed list and share only what they approve.",
+    inputSchema: shareableInputSchema,
+  },
+  {
+    name: "share",
+    tier: "curator",
+    description:
+      "Move your private notes (nodeIds or slugs) into the team space, where every teammate's agents can recall and read them. Only after the person approved the list. Notes that look like they contain a credential, or whose slug the team already has, are skipped with a reason; the note's own citations and links stay private.",
+    inputSchema: shareInputSchema,
+  },
+  {
+    name: "unshare",
+    tier: "curator",
+    description:
+      "Take shared notes (nodeIds or slugs) out of the team space and back to the private space they were shared from. Only the person who shared a note or a team admin can; notes written straight to the team are skipped.",
+    inputSchema: shareInputSchema,
   },
   // ---- curator ---------------------------------------------------------------
   {
