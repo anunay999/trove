@@ -113,6 +113,22 @@ describe("cite-by-quote evidence (backlog #9)", () => {
     assert.equal(annotations[0]?.selector.match, "exact");
   });
 
+  it("exact quote treats %, _ and backslash literally", async () => {
+    const ingested = await store.ingest({
+      kind: "agent_note",
+      title: `Quote wildcard ${stamp}`,
+      contentText: ["Peak rate is 50% off_peak.", "", "Peak rate is 50X offYpeak.", "", "Logs land in C:\\trove\\"].join("\n"),
+      metadata: {},
+    }, context);
+    const sourceId = ingested.source.id;
+    const literal = await store.resolveTextQuote({ quote: "50% OFF_PEAK", sourceId }, context);
+    assert.deepEqual(literal.filter((m) => m.match === "exact").map((m) => m.unit.text), ["Peak rate is 50% off_peak."]);
+    const wildcard = await store.resolveTextQuote({ quote: "50_ off%peak", sourceId }, context);
+    assert.equal(wildcard.filter((m) => m.match === "exact").length, 0, "% and _ in a quote must not match any character");
+    const backslash = await store.resolveTextQuote({ quote: "c:\\trove\\", sourceId }, context);
+    assert.deepEqual(backslash.filter((m) => m.match === "exact").map((m) => m.unit.text), ["Logs land in C:\\trove\\"]);
+  });
+
   it("fuzzy quote (same terms, not verbatim) resolves when one span clearly matches", async () => {
     const widget = unitWithText(s1Units, "widget service");
     const result = await remember(store, {
