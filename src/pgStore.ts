@@ -1211,18 +1211,19 @@ export class PgGraphStore implements GraphStore {
   ): Promise<TextQuoteMatch[]> {
     const scope = ownerScope(context);
     const limit = Math.max(1, Math.min(25, Math.trunc(input.limit ?? 8)));
-    // Exact: verbatim containment, case-insensitive. position() sidesteps
-    // ILIKE's %/_ escaping entirely.
+    // Exact: verbatim containment, case-insensitive. The escaped ILIKE is the
+    // trigram-indexable prefilter; without it every call seq-scanned text_unit.
     const exact = await this.pool.query(
       `select id, source_id, ordinal, section_path, char_start, char_end, text, content_sha256
        from text_unit
        where ($2 or owner_id = any($3::uuid[]))
          and ($4::uuid is null or source_id = $4)
          and ($5::uuid is null or id = $5)
+         and text ilike '%' || $7 || '%' escape '\\'
          and position(lower($1) in lower(text)) > 0
        order by created_at desc, ordinal
        limit $6`,
-      [input.quote, !scope.scoped, scope.readOwnerIds, input.sourceId ?? null, input.textUnitId ?? null, limit],
+      [input.quote, !scope.scoped, scope.readOwnerIds, input.sourceId ?? null, input.textUnitId ?? null, limit, input.quote.replace(/[\\%_]/g, "\\$&")],
     );
     if (exact.rows.length > 0) {
       return exact.rows.map((row): TextQuoteMatch => ({ unit: mapTextUnit(row), match: "exact", score: 1 }));
@@ -3119,7 +3120,7 @@ export class PgGraphStore implements GraphStore {
     }
 
     const limit = Number(asRecord(job.payload).limit ?? process.env.TROVE_EMBEDDING_JOB_LIMIT ?? 256);
-    const embedded = await this.refreshMissingEmbeddings(provider, Number.isFinite(limit) ? limit : 256, ownerId);
+    const embedded = await this.refreshMissingEmbeddings(provider, Number.isFinite(limit) ? limit : 256, ownerId, missing);
     // Only once a source's chunks are all embedded do its per-line vectors go.
     const retiredTextUnitVectors = await this.retireTextUnitVectors(model, ownerId);
     const result: GraphJobResultMap["refresh_embeddings"] = {
@@ -3246,11 +3247,13 @@ export class PgGraphStore implements GraphStore {
     provider: EmbeddingProvider,
     limit: number,
     ownerId: string | null,
+    missing: { nodeRevisions: number; textChunks: number },
   ): Promise<EmbeddingCounts> {
     // Provider-sized batches, not job-sized ones: the old 100-row clamp predates
     // batched embed calls and made a 20k-row import take ~800 queue round trips.
     const boundedLimit = Math.max(1, Math.min(1000, Math.trunc(limit)));
-    const nodeRevisionRows = await this.pool.query(
+    // Each select below rescans its whole table; skip it when the count found nothing.
+    const nodeRevisionRows = missing.nodeRevisions === 0 ? { rows: [] } : await this.pool.query(
       `select nr.id, nr.content_sha256, n.owner_id as tenant_id, concat_ws(E'\n', nr.title, nr.summary, nr.content) as text
        from node n
        join node_revision nr on nr.id = n.current_revision_id
@@ -3272,7 +3275,7 @@ export class PgGraphStore implements GraphStore {
     // The context prefix is part of what gets embedded, and content_sha256 was
     // computed over exactly this concatenation — so a retitled source or a
     // moved section re-embeds through the same not-exists check.
-    const textChunkRows = remaining === 0 ? { rows: [] } : await this.pool.query(
+    const textChunkRows = remaining === 0 || missing.textChunks === 0 ? { rows: [] } : await this.pool.query(
       `select tc.id, tc.content_sha256, tc.owner_id as tenant_id, concat_ws(E'\n\n', nullif(tc.context_prefix, ''), tc.text) as text
        from text_chunk tc
        where ($3::uuid is null or tc.owner_id = $3)
@@ -3606,6 +3609,10 @@ export class PgGraphStore implements GraphStore {
     const actorHandle = context?.actorId?.trim();
     if (!actorHandle) return null;
 
+    // Plain read first: the upsert row-locks the actor, serialising every
+    // concurrent write by the same agent behind each other's transactions.
+    const existing = await client.query(`select id from actor where handle = $1`, [actorHandle]);
+    if (existing.rows[0]) return String(existing.rows[0].id);
     const result = await client.query(
       `insert into actor (handle, display_name, kind)
        values ($1, $2, 'agent')
