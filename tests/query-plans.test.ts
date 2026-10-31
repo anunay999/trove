@@ -202,11 +202,12 @@ describe("query plans", { skip: shouldRun ? false : "requires a Postgres DATABAS
   });
 
   // Parameters as semanticSearch binds them for one query vector: model, type
-  // filter, limit, unscoped, owner, max distance, %query%, query, candidates.
+  // filter, limit, unscoped, read owners, max distance, %query%, query, candidates.
+  const owners = (owner: string | null): string[] => (owner === null ? [] : [owner]);
   const nodeParams = (vector: string, owner: string | null): unknown[] =>
-    [vector, "m1", null, 10, owner === null, owner, 2.0, "%node%", "node", 100];
+    [vector, "m1", null, 10, owner === null, owners(owner), 2.0, "%node%", "node", 100];
   const unitParams = (vector: string, owner: string | null): unknown[] =>
-    [vector, "m1", owner === null, owner, 10, 2.0];
+    [vector, "m1", owner === null, owners(owner), 10, 2.0];
 
   it("semantic node search probes embedding_hnsw_idx instead of scanning", async () => {
     await setup();
