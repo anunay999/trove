@@ -25,8 +25,12 @@ export type AuthContext = {
   interfaceId: string;
   requestId: string;
   identity?: AuthIdentity;
-  /** app_user.id whose graph this credential reads/writes. */
+  /** space.id this credential writes to: the caller's private space in their active tenant. */
   ownerId?: string | undefined;
+  /** Shared spaces of the active tenant, read but never written through this context. */
+  sharedOwnerIds?: string[] | undefined;
+  /** The active tenant; unset for service tokens, local dev and impersonation. */
+  tenantId?: string | undefined;
   /** Auth disabled (local/CI): bypass owner scoping, see the whole graph. */
   superuser?: boolean | undefined;
   /** Admin "view as": the account being impersonated. `identity` stays the real admin. */
@@ -42,10 +46,12 @@ export const IMPERSONATE_HEADER = "x-trove-impersonate";
  * `resolveOAuthToken` handles Clerk `oat_*` OAuth access tokens from browser
  * MCP connectors. Any may return null to signal "not mine / not valid".
  */
+export type ResolvedSpaces = { tenantId: string | null; ownerId: string; sharedOwnerIds: string[] };
+
 export type AuthResolvers = {
-  resolveApiKey?: (secret: string) => Promise<{ actorId: string; scopes: TroveScope[]; ownerId?: string; identity?: AuthIdentity } | null>;
-  resolveClerkToken?: (token: string) => Promise<{ actorId: string; scopes: TroveScope[]; identity: AuthIdentity } | null>;
-  resolveOAuthToken?: (token: string) => Promise<{ actorId: string; scopes: TroveScope[]; identity: AuthIdentity } | null>;
+  resolveApiKey?: (secret: string) => Promise<{ actorId: string; scopes: TroveScope[]; ownerId?: string; identity?: AuthIdentity; spaces?: ResolvedSpaces } | null>;
+  resolveClerkToken?: (token: string) => Promise<{ actorId: string; scopes: TroveScope[]; identity: AuthIdentity; spaces?: ResolvedSpaces } | null>;
+  resolveOAuthToken?: (token: string) => Promise<{ actorId: string; scopes: TroveScope[]; identity: AuthIdentity; spaces?: ResolvedSpaces } | null>;
   /** app_user.id that env service tokens act as (config: TROVE_SERVICE_OWNER_EMAIL → oldest admin). */
   resolveServiceOwnerId?: () => Promise<string | undefined>;
 };
@@ -133,7 +139,7 @@ export async function requireAuthFromHeaders(
   if (bearerToken.startsWith("oat_") && resolvers.resolveOAuthToken) {
     const resolved = await resolvers.resolveOAuthToken(bearerToken);
     if (resolved) {
-      const context: AuthContext = { ...resolved, mode: "oauth", interfaceId, requestId, ownerId: resolved.identity.userId };
+      const context = withSpaces({ ...resolved, mode: "oauth", interfaceId, requestId }, resolved.identity.userId);
       assertScopes(context, requiredScopes);
       return context;
     }
@@ -143,8 +149,7 @@ export async function requireAuthFromHeaders(
   if (bearerToken.startsWith("trove_") && resolvers.resolveApiKey) {
     const resolved = await resolvers.resolveApiKey(bearerToken);
     if (resolved) {
-      const ownerId = resolved.ownerId ?? resolved.identity?.userId;
-      const context: AuthContext = { ...resolved, mode: "api_key", interfaceId, requestId, ownerId };
+      const context = withSpaces({ ...resolved, mode: "api_key", interfaceId, requestId }, resolved.ownerId ?? resolved.identity?.userId);
       assertScopes(context, requiredScopes);
       return context;
     }
@@ -159,7 +164,7 @@ export async function requireAuthFromHeaders(
     if (resolvers.resolveClerkToken) {
       const resolved = await resolvers.resolveClerkToken(bearerToken);
       if (resolved) {
-        const context: AuthContext = { ...resolved, mode: "clerk", interfaceId, requestId, ownerId: resolved.identity.userId };
+        const context = withSpaces({ ...resolved, mode: "clerk", interfaceId, requestId }, resolved.identity.userId);
         assertScopes(context, requiredScopes);
         return context;
       }
@@ -167,7 +172,7 @@ export async function requireAuthFromHeaders(
     if (resolvers.resolveOAuthToken) {
       const resolved = await resolvers.resolveOAuthToken(bearerToken);
       if (resolved) {
-        const context: AuthContext = { ...resolved, mode: "oauth", interfaceId, requestId, ownerId: resolved.identity.userId };
+        const context = withSpaces({ ...resolved, mode: "oauth", interfaceId, requestId }, resolved.identity.userId);
         assertScopes(context, requiredScopes);
         return context;
       }
@@ -175,6 +180,16 @@ export async function requireAuthFromHeaders(
   }
 
   throw new AuthError(401, "invalid_token", "Invalid Bearer token.");
+}
+
+/** Resolver output to context: the resolved spaces when there are any, else the user's own id (their personal space). */
+function withSpaces(
+  resolved: Omit<AuthContext, "ownerId"> & { ownerId?: string; spaces?: ResolvedSpaces },
+  userId: string | undefined,
+): AuthContext {
+  const { spaces, ...context } = resolved;
+  if (!spaces) return { ...context, ownerId: userId };
+  return { ...context, ownerId: spaces.ownerId, sharedOwnerIds: spaces.sharedOwnerIds, tenantId: spaces.tenantId ?? undefined };
 }
 
 /**
@@ -215,7 +230,8 @@ export async function applyImpersonation(
     throw new AuthError(403, "inactive_user", `${target} is ${impersonated.status}; only active users can be viewed as.`);
   }
 
-  return { ...context, impersonating: impersonated, ownerId: impersonated.userId, superuser: false };
+  // ponytail: view-as shows the target's personal space only; their team spaces would need their active tenant.
+  return { ...context, impersonating: impersonated, ownerId: impersonated.userId, sharedOwnerIds: undefined, tenantId: undefined, superuser: false };
 }
 
 /**
@@ -237,6 +253,7 @@ export function operationContextFromAuth(context: AuthContext) {
     interfaceId: context.interfaceId,
     requestId: context.requestId,
     ownerId: context.ownerId,
+    sharedOwnerIds: context.sharedOwnerIds,
     superuser: context.superuser,
   };
 }

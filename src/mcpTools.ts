@@ -22,7 +22,7 @@ import {
   runJobInputSchema,
 } from "./contracts.js";
 import { assertScopes, operationContextFromAuth, type AuthContext, type TroveScope } from "./auth.js";
-import { forget, readAny, remember } from "./agentOps.js";
+import { forget, ingest, readAny, remember } from "./agentOps.js";
 import type { GraphStore } from "./graphCore.js";
 import { toolDescription, TROVE_AGENT_DOCTRINE, visibleTiers } from "./toolDefinitions.js";
 import { getSkill } from "./skills.js";
@@ -170,7 +170,7 @@ export function createTroveMcpServer(
       async (input) => withScopes(
         authContext,
         ["graph:write:ingest"],
-        async () => jsonToolResult(await store.ingest(input, operationContext)),
+        async () => jsonToolResult(await ingest(store, input, operationContext)),
       ),
     );
 
