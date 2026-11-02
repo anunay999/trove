@@ -1,17 +1,18 @@
--- One-off: put every existing user into one company tenant, without moving a graph row.
+-- One-off: put a list of existing users into one company tenant, without moving a graph row.
 --
---   psql "$DATABASE_URL" -v org_id=org_... -v org_name=Fairground \
---     -v shared_email=eng@fairground.run -v admin_emails=a@x.com,b@x.com \
+--   psql -v org_id=org_... -v org_name=Fairground -v shared_email=eng@fairground.run \
+--     -v member_emails=a@x.com,b@x.com,eng@fairground.run -v admin_emails=a@x.com \
 --     -f scripts/joinEveryoneToTenant.sql
 --
 -- org_id is the Clerk organization id. Create the organization in Clerk and add
--- every user to it FIRST: credentials recheck Clerk membership and drop anyone
+-- every member to it FIRST: credentials recheck Clerk membership and drop anyone
 -- Clerk does not list.
 --
--- Each user's personal private space (id = user id) moves into the tenant, so
+-- Each member's personal private space (id = user id) moves into the tenant, so
 -- their notes come with them as private notes. The shared account's space
 -- becomes the tenant's shared space, so its notes become the team's. Space ids
--- never change, so owner_id and embedding.tenant_id stay valid. Rerun-safe.
+-- never change, so owner_id and embedding.tenant_id stay valid. Users not on the
+-- list are left alone. Rerun-safe.
 
 \set ON_ERROR_STOP on
 begin;
@@ -21,6 +22,8 @@ insert into tenant (clerk_org_id, name) values (:'org_id', :'org_name')
 on conflict (clerk_org_id) do nothing;
 
 create temp table target on commit drop as select id from tenant where clerk_org_id = :'org_id';
+create temp table listed on commit drop as select unnest(string_to_array(:'member_emails', ',')) as email;
+create temp table member on commit drop as select u.id, u.email from app_user u join listed l on l.email = u.email;
 
 -- The shared account's space becomes the team space, unless the tenant already has one.
 update space s set tenant_id = (select id from target), kind = 'shared', user_id = null
@@ -29,32 +32,36 @@ where u.email = :'shared_email' and s.id = u.id and s.kind = 'private'
   and not exists (select 1 from space x where x.tenant_id = (select id from target) and x.kind = 'shared');
 
 insert into tenant_member (tenant_id, user_id, role)
-select (select id from target), u.id,
-       case when u.email = any(string_to_array(:'admin_emails', ',')) then 'admin' else 'member' end
-from app_user u
+select (select id from target), m.id,
+       case when m.email = any(string_to_array(:'admin_emails', ',')) then 'admin' else 'member' end
+from member m
 on conflict (tenant_id, user_id) do nothing;
 
 -- Personal private spaces move in, keeping their ids.
 update space s set tenant_id = (select id from target)
-from tenant p
-where s.kind = 'private' and s.id = s.user_id
+from tenant p, member m
+where s.kind = 'private' and s.id = s.user_id and m.id = s.user_id
   and p.personal_user_id = s.user_id and s.tenant_id = p.id
   and not exists (select 1 from space x where x.tenant_id = (select id from target) and x.kind = 'private' and x.user_id = s.user_id);
 
 -- Anyone still without a private space here (the shared account) gets a fresh one.
 insert into space (tenant_id, kind, user_id)
-select (select id from target), 'private', u.id from app_user u
+select (select id from target), 'private', m.id from member m
 on conflict (tenant_id, user_id) where kind = 'private' do nothing;
 
 update app_user set active_tenant_id = (select id from target)
-where active_tenant_id is distinct from (select id from target);
+where id in (select id from member) and active_tenant_id is distinct from (select id from target);
 
 -- A session on this org before the run makes empty spaces here, and the guards above would then
--- skip the real ones. Stop rather than leave anyone's notes behind in their personal tenant.
+-- skip the real ones. Stop rather than leave anyone's notes behind, or miss a mistyped address.
 do $$
-declare stranded int;
+declare stranded int; unknown int;
 begin
-  select count(*) into stranded from space s join app_user u on u.id = s.id
+  select count(*) into unknown from listed where email not in (select email from member);
+  if unknown > 0 then
+    raise exception '% listed addresses match no user; nothing changed', unknown;
+  end if;
+  select count(*) into stranded from space s join member m on m.id = s.id
   where s.tenant_id <> (select id from target);
   if stranded > 0 then
     raise exception '% existing spaces would stay outside the tenant; nothing changed', stranded;
