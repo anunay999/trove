@@ -210,10 +210,12 @@ export const graphChatInputSchema = z.object({
   depth: z.number().int().min(0).max(2).default(1),
 });
 
-/** Which space a write lands in. Unset: the team when one is active, else private. */
-export const writeSpaceSchema = z.enum(["mine", "team"]).describe(
-  "Where this is saved. team: knowledge about shared work (a repo, service, customer, decision) that teammates' agents should know. mine: about this person (preferences, their workflow, opinions about colleagues). Default: team when a team is active, else mine. Credentials are refused for team.",
-);
+/** Where a note belongs. The tool text, the refusal and the eval all read this one sentence. */
+export const SPACE_RULES =
+  "team: true for anyone working here, about a repo, service, customer, incident, decision or process. mine: about this person: preferences, their workflow, opinions about people, drafts, unconfirmed theories. Unsure: mine, because sharing later is easy and a leak cannot be undone. Credentials never go in team.";
+
+/** Which space a write lands in. Required while a team is active; with no team the only space is mine. */
+export const writeSpaceSchema = z.enum(["mine", "team"]).describe(`Where this is saved. ${SPACE_RULES} Required when a team is active.`);
 
 export const ingestInputSchema = z.object({
   kind: sourceKindSchema,
@@ -299,6 +301,7 @@ export const forgetInputSchema = z.object({
 export const shareInputSchema = z.object({
   nodeIds: z.array(z.string().uuid()).optional(),
   slugs: z.array(z.string().min(1)).optional(),
+  keepPrivate: z.boolean().optional(),
 }).refine((value) => (value.nodeIds?.length ?? 0) + (value.slugs?.length ?? 0) > 0, {
   message: "Provide nodeIds or slugs.",
 });

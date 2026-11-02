@@ -75,6 +75,7 @@ import {
   type GraphJob,
   type GraphOperationContext,
   type ShareableResult,
+  type SimilarNote,
   type SpaceMoveResult,
   type GraphLintFinding,
   type GraphLintReport,
@@ -3630,18 +3631,19 @@ export class PgGraphStore implements GraphStore {
 
   /** The caller's private notes, newest first, for an agent deciding what to share with the team. */
   async shareable(input: ShareableInput, context?: GraphOperationContext): Promise<ShareableResult> {
-    const { mine } = teamSpaces(context);
+    const { mine, team } = teamSpaces(context);
     const [count, page] = await Promise.all([
-      this.pool.query("select count(*)::int as n from node where owner_id = $1 and deleted_at is null", [mine]),
+      this.pool.query("select count(*)::int as n from node where owner_id = $1 and deleted_at is null and metadata ->> 'keptPrivateAt' is null", [mine]),
       this.pool.query(
-        `select n.id, n.slug, n.title, n.summary, n.updated_at, r.content
+        `select n.id, n.slug, n.title, n.summary, n.updated_at, r.content, ${CITED_TEXT_SQL} as cited
          from node n left join node_revision r on r.id = n.current_revision_id
-         where n.owner_id = $1 and n.deleted_at is null
+         where n.owner_id = $1 and n.deleted_at is null and n.metadata ->> 'keptPrivateAt' is null
          order by n.updated_at desc, n.id
          limit $2 offset $3`,
         [mine, input.limit ?? 50, input.offset ?? 0],
       ),
     ]);
+    const closest = await this.closestTeamNotes(page.rows.map((row) => String(row.id)), team);
     return {
       total: count.rows[0].n,
       notes: page.rows.map((row) => ({
@@ -3650,17 +3652,100 @@ export class PgGraphStore implements GraphStore {
         title: String(row.title),
         summary: row.summary ? String(row.summary).slice(0, 300) : null,
         updatedAt: new Date(row.updated_at).toISOString(),
-        looksLikeCredential: looksLikeCredential([row.title, row.summary, row.content].filter(Boolean).join("\n")),
+        looksLikeCredential: looksLikeCredential([row.title, row.summary, row.content, row.cited].filter(Boolean).join("\n")),
+        ...(closest.has(String(row.id)) ? { closestTeamNote: closest.get(String(row.id))! } : {}),
       })),
     };
   }
 
-  /** Move private notes into the team space. Their own citations and links stay private. */
+  /** For each note, the nearest team note by meaning, when it is close enough to be the same fact. */
+  private async closestTeamNotes(nodeIds: string[], team: string): Promise<Map<string, { slug: string; title: string; distance: number }>> {
+    const provider = createEmbeddingProviderFromEnv();
+    if (!provider || nodeIds.length === 0) return new Map();
+    // ponytail: compares each listed note with every team note, a vector index if teams reach thousands of notes.
+    const result = await this.pool.query(
+      `select n.id, m.slug, m.title, m.distance
+       from node n
+       join embedding e on e.owner_table = 'node_revision' and e.owner_id = n.current_revision_id and e.model = $3
+       cross join lateral (
+         select t.slug, t.title, e2.embedding <=> e.embedding as distance
+         from node t
+         join embedding e2 on e2.owner_table = 'node_revision' and e2.owner_id = t.current_revision_id and e2.model = $3
+         where t.owner_id = $2 and t.deleted_at is null
+         order by distance limit 1
+       ) m
+       where n.id = any($1::uuid[]) and m.distance < $4`,
+      [nodeIds, team, provider.model, SAME_FACT_MAX_DISTANCE],
+    );
+    return new Map(result.rows.map((row) => [String(row.id), { slug: String(row.slug), title: String(row.title), distance: Number(row.distance) }]));
+  }
+
+  /** Notes the caller can read that may state the same fact, by title or by meaning, labelled by space. */
+  async similarAcrossSpaces(input: { title: string; summary: string }, limit: number, context?: GraphOperationContext): Promise<SimilarNote[]> {
+    const scope = ownerScope(context);
+    const titles = await this.pool.query(
+      `select id, slug, title, owner_id, similarity(title, $1) as score from node
+       where deleted_at is null and owner_id = any($2::uuid[]) and similarity(title, $1) > 0.25
+       order by score desc, updated_at desc limit $3`,
+      [input.title, scope.readOwnerIds, limit],
+    );
+    const found = new Map<string, { slug: string; title: string; score: number; match: SimilarNote["match"] }>();
+    for (const row of titles.rows) found.set(String(row.id), { slug: String(row.slug), title: String(row.title), score: Number(row.score), match: "title" });
+    const provider = createEmbeddingProviderFromEnv();
+    if (provider) {
+      try {
+        const { nodes } = await this.semanticSearch(
+          { query: `${input.title}\n${input.summary}`, limit, mode: "semantic", includeTextUnits: false, maxSemanticDistance: SAME_FACT_MAX_DISTANCE },
+          provider,
+          scope,
+        );
+        for (const node of nodes) {
+          const score = 1 - (node.distance ?? SAME_FACT_MAX_DISTANCE);
+          if (score > (found.get(node.id)?.score ?? 0)) found.set(node.id, { slug: node.slug, title: node.title, score, match: "meaning" });
+        }
+      } catch {
+        // Embedding is down: the title matches still stand, and the write should not fail over a hint.
+      }
+    }
+    const teamIds = await this.teamNoteIds([...found.keys()], context);
+    return [...found.entries()]
+      .sort((a, b) => b[1].score - a[1].score)
+      .slice(0, limit)
+      .map(([nodeId, note]) => ({ nodeId, ...note, space: teamIds.has(nodeId) ? "team" as const : "mine" as const }));
+  }
+
+  /** Which of these notes live in a team space the caller belongs to. */
+  async teamNoteIds(nodeIds: string[], context?: GraphOperationContext): Promise<Set<string>> {
+    const shared = context?.sharedOwnerIds ?? [];
+    if (nodeIds.length === 0 || shared.length === 0) return new Set();
+    const result = await this.pool.query("select id from node where id = any($1::uuid[]) and owner_id = any($2::uuid[])", [nodeIds, shared]);
+    return new Set(result.rows.map((row) => String(row.id)));
+  }
+
+  /** Mark private notes as reviewed and staying private, so shareable stops proposing them. */
+  private async keepPrivate(input: ShareInput, mine: string): Promise<SpaceMoveResult> {
+    const nodeIds = input.nodeIds ?? [];
+    const slugs = input.slugs ?? [];
+    const result = await this.pool.query(
+      `update node set metadata = metadata || jsonb_build_object('keptPrivateAt', now())
+       where owner_id = $1 and deleted_at is null and (id = any($2::uuid[]) or slug = any($3::text[]))
+       returning id, slug, title`,
+      [mine, nodeIds, slugs],
+    );
+    const keptPrivate = result.rows.map((row) => ({ id: String(row.id), slug: String(row.slug), title: String(row.title) }));
+    const skipped = [...nodeIds, ...slugs]
+      .filter((ref) => !keptPrivate.some((note) => note.id === ref || note.slug === ref))
+      .map((ref) => ({ ref, reason: "not found among your private notes" }));
+    return { moved: [], skipped, keptPrivate };
+  }
+
+  /** Move private notes into the team space, with the passages they cite. Their links stay private. */
   async share(input: ShareInput, context?: GraphOperationContext): Promise<SpaceMoveResult> {
     const { mine, team } = teamSpaces(context);
+    if (input.keepPrivate) return this.keepPrivate(input, mine);
     return this.moveNotes(input, context, mine, async (_client, row) => {
-      if (looksLikeCredential([row.title, row.summary, row.content].filter(Boolean).join("\n"))) {
-        return { skip: "it looks like it contains a credential; remove the secret, then share it" };
+      if (looksLikeCredential([row.title, row.summary, row.content, row.cited].filter(Boolean).join("\n"))) {
+        return { skip: "it, or a passage it cites, looks like it contains a credential; remove the secret, then share it" };
       }
       return { to: team, metadata: { sharedFrom: mine, sharedAt: new Date().toISOString() } };
     });
@@ -3691,7 +3776,7 @@ export class PgGraphStore implements GraphStore {
     fromOwner: string,
     decide: (
       client: pg.PoolClient,
-      row: { id: string; slug: string; title: string; summary: string | null; content: string | null; metadata: Record<string, unknown> },
+      row: { id: string; slug: string; title: string; summary: string | null; content: string | null; cited: string | null; metadata: Record<string, unknown> },
     ) => Promise<{ skip: string } | { to: string; metadata: Record<string, unknown> | null }>,
   ): Promise<SpaceMoveResult> {
     const nodeIds = input.nodeIds ?? [];
@@ -3702,7 +3787,7 @@ export class PgGraphStore implements GraphStore {
     try {
       await client.query("begin");
       const rows = (await client.query(
-        `select n.id, n.slug, n.title, n.summary, n.metadata, r.content
+        `select n.id, n.slug, n.title, n.summary, n.metadata, r.content, ${CITED_TEXT_SQL} as cited
          from node n left join node_revision r on r.id = n.current_revision_id
          where n.owner_id = $1 and n.deleted_at is null and (n.id = any($2::uuid[]) or n.slug = any($3::text[]))
          for update of n`,
@@ -3737,6 +3822,9 @@ export class PgGraphStore implements GraphStore {
               or (owner_table = 'node_revision' and owner_id in (select id from node_revision where node_id = $1))`,
           [id, decision.to],
         );
+        // Citations follow the note, or a teammate gets the claim without the passage behind it.
+        // Only the cited passages become visible: the source itself stays with its owner.
+        await client.query("update annotation set owner_id = $2 where node_id = $1", [id, decision.to]);
         await this.recordEvent(client, decision.metadata ? "share" : "unshare", "node", id, { ownerId: decision.to }, { ownerId: fromOwner }, context, actor);
         moved.push({ id, slug: row.slug, title: row.title });
       }
@@ -4017,6 +4105,12 @@ function mapTextUnit(row: Record<string, unknown>): TextUnit {
     contentSha256: String(row.content_sha256),
   };
 }
+
+/** All the text a note cites, for a credential check before it moves. */
+const CITED_TEXT_SQL = `(select string_agg(tu.text, E'\\n') from annotation a join text_unit tu on tu.id = a.text_unit_id where a.node_id = n.id)`;
+
+// ponytail: set from a 30-note sample, where 0.23-0.31 held most same-lesson pairs mixed with merely related ones. Good enough to suggest, never to merge.
+const SAME_FACT_MAX_DISTANCE = 0.35;
 
 function mapNode(row: Record<string, unknown>): GraphNode {
   return {

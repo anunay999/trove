@@ -52,17 +52,19 @@ A person in two tenants (a contractor) has two private spaces and switches tenan
    checks in the in-memory `store.ts`; each is classified read or write in the PR, with an isolation
    test per class.
 5. **Agents choose the space at write time.** `remember` and `ingest` take `space: "mine" | "team"`.
-   The tool descriptions steer: facts about shared work (a repo, a service, a customer, a decision)
-   go to `team`; facts about the person (preferences, their workflow, credentials, opinions about
-   colleagues) stay `mine`. The default when unset is decided by a sort of ~100 real memories into
-   team / personal / secret: about 70% or more team means default `team`.
-   **Promote** copies a private node, the text units it cites and their sources into the
-   workspace, recording `sharedFrom` and `sharedBy`. Promoting again revises the same copy. Links
-   are re-made against workspace nodes with the same slug; no match links to the Unfiled hub, and
-   lint flags it.
-   **Remove from team** retires the workspace copy (history kept); the sharer's private original is
-   untouched. Allowed for the sharer or an admin.
-   A weekly digest tells each member what went to the team, with one-tap remove.
+   A team member must name the space: there is no default, because a note in the wrong space cannot
+   be unseen. The refusal states the rule (`SPACE_RULES` in `contracts.ts`), and unsure means `mine`.
+   **One fact, one home.** A fact is never kept in both spaces. `remember` returns close notes from
+   both spaces, by title and by meaning, labelled by space. If the team already has the fact, the
+   agent revises that note and saves only the person's own angle in `mine`, linked to it. The link
+   belongs to the private space, so only its owner sees it. Close matches are only suggestions: no
+   merge happens without a person, since the distance cannot tell "same" from "related".
+   **Share** moves a private node to the workspace, recording `sharedFrom` and `sharedAt`. The
+   passages it cites become visible with it; their source stays with its owner, and a credential in
+   a cited passage blocks the move. Its own links stay private. `shareable` lists candidates, names
+   the closest team note, and skips notes the person declined (`share` with `keepPrivate`). A
+   private duplicate is retired with a `supersedes` link from the team note, visible only to its owner.
+   **Unshare** moves the note back. Allowed for the sharer or an admin.
 6. **recall merges** in one query over both spaces; each atom carries
    `graph: "private" | "workspace"`.
 7. **Same slug in both spaces:** private wins; `workspace:<slug>` addresses the shared one.

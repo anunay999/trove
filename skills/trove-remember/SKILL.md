@@ -29,6 +29,8 @@ Collect candidates: decisions ("we'll do X because Y"), facts (values, IDs, path
 
 ### Step 2 — remember
 
+In a team, every call names a `space`, and the refusal you get without one states the rule. If `similar` lists a team note with the same fact, revise that note instead of saving a copy; keep only the person's own angle in `mine`, linked to it.
+
 One call per atom:
 
 ```
