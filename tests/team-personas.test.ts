@@ -292,7 +292,7 @@ describe("team personas over HTTP and MCP", { skip: databaseUrl ? false : "requi
     const http = await call("bob", "/v1/remember", { title: `No space ${MARK}`, summary: "Which space?" });
     assert.equal(http.status, 400);
     assert.equal(http.json.error, "space_required");
-    assert.match(http.json.message, /Unsure: mine/);
+    assert.match(http.json.message, /Unsure whether a teammate needs it: mine/);
     const client = new Client({ name: "persona-mcp-space", version: "0.1.0" });
     const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
       requestInit: { headers: { authorization: `Bearer ${keys.bob}` } },
@@ -302,7 +302,7 @@ describe("team personas over HTTP and MCP", { skip: databaseUrl ? false : "requi
       const result = await client.request({ method: "tools/call", params: { name: "remember", arguments: { title: `No space ${MARK}`, summary: "Which space?" } } })
         .catch((error: Error) => ({ isError: true, content: [{ text: error.message }] }));
       assert.equal(result.isError, true);
-      assert.match((result.content as Array<{ text: string }>)[0]!.text, /Unsure: mine/);
+      assert.match((result.content as Array<{ text: string }>)[0]!.text, /Unsure whether a teammate needs it: mine/);
     } finally {
       await transport.close();
     }

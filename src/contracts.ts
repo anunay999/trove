@@ -212,7 +212,7 @@ export const graphChatInputSchema = z.object({
 
 /** Where a note belongs. The tool text, the refusal and the eval all read this one sentence. */
 export const SPACE_RULES =
-  "team: true for anyone working here, about a repo, service, customer, incident, decision or process. mine: about this person: preferences, their workflow, opinions about people, drafts, unconfirmed theories. Unsure: mine, because sharing later is easy and a leak cannot be undone. Credentials never go in team.";
+  "team: the company's shared work, useful to a teammate who has never met this person: a company repo, service, customer, incident, decision or process. mine: this person's own things: preferences, instructions to their assistants, their machine setup and tooling, personal projects, session handoffs, drafts, opinions about people, unconfirmed theories. Unsure whether a teammate needs it: mine, because sharing later is easy and a leak cannot be undone. Credentials never go in team.";
 
 /** Which space a write lands in. Required while a team is active; with no team the only space is mine. */
 export const writeSpaceSchema = z.enum(["mine", "team"]).describe(`Where this is saved. ${SPACE_RULES} Required when a team is active.`);
