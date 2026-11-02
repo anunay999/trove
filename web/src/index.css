@@ -207,8 +207,8 @@
   --border: #1d222b;
   --input: #1d222b;
   --ring: #4c5057;
-  --signal: #f2c46b;
-  --signal-strong: #f2c46b;
+  --signal: #10b981;
+  --signal-strong: #a7f3d0;
   --cta-bg: #ecebe5;
   --cta-fg: #08090c;
 
@@ -225,10 +225,10 @@
   z-index: 1;
 }
 
-/* The hero's hairline figure: plates match the page, the lifted card's edge is the amber signal. */
+/* The hero's hairline figure: plates match the page, the lifted card's edge is the signal colour. */
 .memory-tray {
   --hairline-plate: var(--background);
-  --hairline-highlight: var(--signal);
+  --hairline-hi: var(--signal);
 }
 /* Tab titles replace Riffle's punched card numbers (MemoryTray writes them). */
 .memory-tray circle.dot {
