@@ -19,6 +19,7 @@ import {
   recallInputSchema,
   rememberInputSchema,
   runJobInputSchema,
+  SPACE_RULES,
 } from "./contracts.js";
 import type { TroveScope } from "./auth.js";
 
@@ -84,8 +85,11 @@ SESSION LOOP
 Start: load what you already know → do the work → save truths as they land → link them → fix outdated beliefs → finish with a handful of solid notes, not one mega dump.
 
 TEAMS
-- In a team, remember and ingest write to the team by default; pass space: "mine" for anything personal. Credentials are refused for the team.
-- Private notes from before the team stay private. To move some over: shareable lists them, propose a list to the person, share only what they approve, unshare to take one back.
+- In a team, remember and ingest must name a space. ${SPACE_RULES}
+- One fact, one home. If remember's similar lists a team note with the same fact, revise that note (its slug, space: "team"). Save only this person's own angle in mine and link it to the team note. Never keep a copy in both.
+- Private notes from before the team stay private. To move some over: shareable lists them, propose a list to the person, share only what they approve, share with keepPrivate for what they decline, unshare to take one back.
+- If shareable gives a note a closestTeamNote that states the same fact, propose retiring the private note: connect from the team note to it with predicate supersedes. Only this person sees that link.
+- Recall marks each note TEAM or MINE. When they disagree, tell the person instead of picking one.
 
 INVARIANTS
 Load before re-deriving. Pick tools by query shape. Ingest raw text, remember distilled beliefs. Write when it's true, not only when the day ends. Supersede, don't delete. Cite a source or say it's your inference. Put note names in answers so the next agent can open them.`;
@@ -96,7 +100,7 @@ export const troveTools = [
     name: "remember",
     tier: "core",
     description:
-      "Save a short distilled note (a fact, decision, or how-to) — not a raw dump. Same title/slug revises; otherwise creates. Prefer several small linked notes while you work (e.g. 'refunds within 14 days', 'CS owns churn email') over one 'notes from today' blob. Always check returned `similar` (title-similarity scored) and re-call with slug if the right note almost matched. Cite evidence as { quote: \"the span's own words, copied from what you were served\" } — Trove resolves it to the right text unit (exact first, then fuzzy) and stores a W3C TextQuoteSelector, so you never echo a UUID. Raw textUnitIds from an ingest/recall/grep/read response still work, but only ids you were actually served this session; resolvable UUID citations always attach, while note-level weak support returns `evidenceUnsupported`. Check `complete`: false means requested attachments were partial; repair details are in `evidenceRejected`, `evidenceUnserved`, `evidenceUnsupported`, or `linkRejected`. No source at all? Say it's agent inference in the summary. Link each note to a project or topic hub.",
+      "Save a short distilled note (a fact, decision, or how-to) — not a raw dump. Same title/slug revises; otherwise creates. Prefer several small linked notes while you work (e.g. 'refunds within 14 days', 'CS owns churn email') over one 'notes from today' blob. Always check returned `similar` (scored by title or, in a team, meaning; in a team each says which space it is in) and re-call with slug if the right note almost matched. Cite evidence as { quote: \"the span's own words, copied from what you were served\" } — Trove resolves it to the right text unit (exact first, then fuzzy) and stores a W3C TextQuoteSelector, so you never echo a UUID. Raw textUnitIds from an ingest/recall/grep/read response still work, but only ids you were actually served this session; resolvable UUID citations always attach, while note-level weak support returns `evidenceUnsupported`. Check `complete`: false means requested attachments were partial; repair details are in `evidenceRejected`, `evidenceUnserved`, `evidenceUnsupported`, or `linkRejected`. No source at all? Say it's agent inference in the summary. Link each note to a project or topic hub.",
     inputSchema: rememberInputSchema,
   },
   {
@@ -138,14 +142,14 @@ export const troveTools = [
     name: "shareable",
     tier: "curator",
     description:
-      "List your private notes (newest first, paged by limit/offset; total says how many) so you can propose which ones belong in the team space. Good candidates are about shared work: the codebase, decisions, runbooks, incidents, customers. Keep personal preferences, drafts and anything marked looksLikeCredential private. The person decides: show them the proposed list and share only what they approve.",
+      "List your private notes (newest first, paged by limit/offset; total says how many) so you can propose which ones belong in the team space. " + SPACE_RULES + " Anything marked looksLikeCredential stays private. Notes the person already declined are not listed. closestTeamNote names a team note that may state the same fact. The person decides: show them the proposed list and share only what they approve.",
     inputSchema: shareableInputSchema,
   },
   {
     name: "share",
     tier: "curator",
     description:
-      "Move your private notes (nodeIds or slugs) into the team space, where every teammate's agents can recall and read them. Only after the person approved the list. Notes that look like they contain a credential, or whose slug the team already has, are skipped with a reason; the note's own citations and links stay private.",
+      "Move your private notes (nodeIds or slugs) into the team space, where every teammate's agents can recall and read them. Only after the person approved the list. Notes that look like they contain a credential, or whose slug the team already has, are skipped with a reason. The passages a note cites go with it so teammates can check them; its links stay private. Pass keepPrivate: true for notes the person declined, so shareable stops proposing them.",
     inputSchema: shareInputSchema,
   },
   {

@@ -111,8 +111,8 @@ describe("team personas over HTTP and MCP", { skip: databaseUrl ? false : "requi
   let teamNoteId = "";
   let teamSpaceId = "";
 
-  it("alice's default write goes to Acme's team space", async () => {
-    const result = await call("alice", "/v1/remember", { title: `Webhook retries ${MARK}`, summary: `Stripe retries reuse the event id ${MARK}.` });
+  it("alice's team write goes to Acme's team space", async () => {
+    const result = await call("alice", "/v1/remember", { title: `Webhook retries ${MARK}`, summary: `Stripe retries reuse the event id ${MARK}.`, space: "team" });
     assert.equal(result.status, 201, JSON.stringify(result.json));
     teamNoteId = result.json.node.id;
     const owner = await pool.query("select n.owner_id, s.kind from node n join space s on s.id = n.owner_id where n.id = $1", [teamNoteId]);
@@ -142,7 +142,7 @@ describe("team personas over HTTP and MCP", { skip: databaseUrl ? false : "requi
   });
 
   it("bob revising the same title updates the one team note", async () => {
-    const result = await call("bob", "/v1/remember", { title: `Webhook retries ${MARK}`, summary: `Retries reuse the event id; dedupe on it ${MARK}.` });
+    const result = await call("bob", "/v1/remember", { space: "team", title: `Webhook retries ${MARK}`, summary: `Retries reuse the event id; dedupe on it ${MARK}.` });
     assert.equal(result.json.node.id, teamNoteId);
     const read = await call("alice", "/v1/read", { nodeId: teamNoteId });
     assert.match(read.json.node.summary, /dedupe on it/);
@@ -156,7 +156,7 @@ describe("team personas over HTTP and MCP", { skip: databaseUrl ? false : "requi
   });
 
   it("an ingest goes to the team and its source text is searchable by teammates only", async () => {
-    const result = await call("alice", "/v1/ingest", { kind: "paste", title: `Incident notes ${MARK}`, contentText: `The queue stalled at 09:14; root cause was a lock held across an HTTP call ${MARK}.` });
+    const result = await call("alice", "/v1/ingest", { space: "team", kind: "paste", title: `Incident notes ${MARK}`, contentText: `The queue stalled at 09:14; root cause was a lock held across an HTTP call ${MARK}.` });
     assert.equal(result.status, 201, JSON.stringify(result.json));
     const bob = await call("bob", "/v1/grep", { pattern: `lock held across an HTTP call ${MARK}`, scope: "sources", limit: 10 });
     assert.ok(bob.json.matches.length > 0, "bob could not find the team source");
@@ -175,7 +175,7 @@ describe("team personas over HTTP and MCP", { skip: databaseUrl ? false : "requi
   });
 
   it("a credential is refused for the team and nothing is stored", async () => {
-    const result = await call("bob", "/v1/remember", { title: `Prod DB ${MARK}`, summary: "postgresql://ro.user:Zx81QWERtyuiop12AsdfGhjk@db.example.com:6432/app" });
+    const result = await call("bob", "/v1/remember", { space: "team", title: `Prod DB ${MARK}`, summary: "postgresql://ro.user:Zx81QWERtyuiop12AsdfGhjk@db.example.com:6432/app" });
     assert.equal(result.status, 400);
     assert.equal(result.json.error, "credential_in_team_write");
     const stored = await pool.query("select count(*)::int as n from node where title = $1", [`Prod DB ${MARK}`]);
@@ -204,7 +204,7 @@ describe("team personas over HTTP and MCP", { skip: databaseUrl ? false : "requi
     });
     await client.connect(transport);
     try {
-      const result = await client.request({ method: "tools/call", params: { name: "remember", arguments: { title: `Via MCP ${MARK}`, summary: `Written through the connector ${MARK}.` } } });
+      const result = await client.request({ method: "tools/call", params: { name: "remember", arguments: { space: "team", title: `Via MCP ${MARK}`, summary: `Written through the connector ${MARK}.` } } });
       const text = (result.content as Array<{ text: string }>)[0]!.text;
       const nodeId = JSON.parse(text).node.id as string;
       const owner = await pool.query("select owner_id from node where id = $1", [nodeId]);
@@ -283,5 +283,138 @@ describe("team personas over HTTP and MCP", { skip: databaseUrl ? false : "requi
     } finally {
       await transport.close();
     }
+  });
+
+  const remember = (persona: string, title: string, summary: string, space: "mine" | "team", extra: Record<string, unknown> = {}) =>
+    call(persona, "/v1/remember", { title, summary, space, ...extra });
+
+  it("a team member who names no space is refused and told the rule, over HTTP and MCP", async () => {
+    const http = await call("bob", "/v1/remember", { title: `No space ${MARK}`, summary: "Which space?" });
+    assert.equal(http.status, 400);
+    assert.equal(http.json.error, "space_required");
+    assert.match(http.json.message, /Unsure whether a teammate needs it: mine/);
+    const client = new Client({ name: "persona-mcp-space", version: "0.1.0" });
+    const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${keys.bob}` } },
+    });
+    await client.connect(transport);
+    try {
+      const result = await client.request({ method: "tools/call", params: { name: "remember", arguments: { title: `No space ${MARK}`, summary: "Which space?" } } })
+        .catch((error: Error) => ({ isError: true, content: [{ text: error.message }] }));
+      assert.equal(result.isError, true);
+      assert.match((result.content as Array<{ text: string }>)[0]!.text, /Unsure whether a teammate needs it: mine/);
+    } finally {
+      await transport.close();
+    }
+    const saved = await pool.query("select count(*)::int n from node where title = $1", [`No space ${MARK}`]);
+    assert.equal(saved.rows[0].n, 0, "a refused write still saved a note");
+  });
+
+  it("saving a personal note shows the team note with the same fact, and never a teammate's private one", async () => {
+    const summary = `Audit logs are kept for ninety days ${MARK}.`;
+    const team = await remember("alice", `Audit log retention policy ${MARK}`, summary, "team");
+    const bobs = await remember("bob", `Audit retention window ${MARK}`, summary, "mine");
+    assert.equal(bobs.json.space, "mine");
+    const hit = bobs.json.similar.find((note: { nodeId: string }) => note.nodeId === team.json.node.id);
+    assert.ok(hit, `the team note was not offered: ${JSON.stringify(bobs.json.similar)}`);
+    assert.equal(hit.space, "team");
+    const alices = await remember("alice", `Audit retention window again ${MARK}`, summary, "mine");
+    assert.ok(!alices.json.similar.some((note: { nodeId: string }) => note.nodeId === bobs.json.node.id), "bob's private note reached alice");
+    assert.ok(alices.json.similar.some((note: { nodeId: string }) => note.nodeId === team.json.node.id));
+  });
+
+  it("the fact is found by meaning when the titles share nothing", async () => {
+    const summary = `Every canary rollout pauses ten minutes before promotion ${MARK}.`;
+    const team = await remember("alice", `Zebra ${MARK}`, summary, "team");
+    for (let i = 0; i < 50 && (await store.runJob({})); i++);
+    const bobs = await remember("bob", `Quokka`, summary, "mine");
+    const hit = bobs.json.similar.find((note: { nodeId: string }) => note.nodeId === team.json.node.id);
+    assert.equal(hit?.match, "meaning", JSON.stringify(bobs.json.similar));
+  });
+
+  it("a personal note links to a team note, and only its owner sees the link", async () => {
+    const team = await remember("alice", `Canary policy ${MARK}`, `Canaries run ten minutes ${MARK}.`, "team");
+    const mine = await remember("bob", `My canary habit ${MARK}`, "I watch the first canary myself.", "mine", { links: [{ toSlug: team.json.node.slug }] });
+    assert.equal(mine.json.complete, true, JSON.stringify(mine.json));
+    const seenBy = async (persona: string) => JSON.stringify((await call(persona, "/v1/neighborhood", { nodeId: team.json.node.id })).json);
+    assert.ok((await seenBy("bob")).includes(mine.json.node.id), "bob lost his own link");
+    assert.ok(!(await seenBy("alice")).includes(mine.json.node.id), "bob's private note showed up through the link");
+  });
+
+  it("a shared note brings its cited passage along, and unsharing takes it back", async () => {
+    const passage = `The nightly export froze because the disk filled up ${MARK}`;
+    const source = await call("bob", "/v1/ingest", { kind: "paste", title: `Export postmortem ${MARK}`, contentText: `${passage}. The rest of this document is about something else entirely.`, space: "mine" });
+    assert.equal(source.status, 201, JSON.stringify(source.json));
+    const note = await remember("bob", `Export froze on a full disk ${MARK}`, `The export froze when the disk filled ${MARK}.`, "mine", { evidence: [{ quote: passage }] });
+    assert.equal(note.json.complete, true, JSON.stringify(note.json));
+    const evidenceFor = async (persona: string) => JSON.stringify((await call(persona, "/v1/read", { nodeId: note.json.node.id })).json?.node?.evidence ?? null);
+    assert.equal((await call("alice", "/v1/read", { nodeId: note.json.node.id })).status, 404);
+    const shared = await call("bob", "/v1/share", { slugs: [note.json.node.slug] });
+    assert.equal(shared.json.moved.length, 1, JSON.stringify(shared.json));
+    const seen = await evidenceFor("alice");
+    assert.ok(seen.includes(passage), `alice got the claim without its passage: ${seen}`);
+    await call("bob", "/v1/unshare", { slugs: [note.json.node.slug] });
+    assert.equal((await call("alice", "/v1/read", { nodeId: note.json.node.id })).status, 404);
+    assert.ok((await evidenceFor("bob")).includes(passage), "bob lost his own citation");
+  });
+
+  it("a credential in a cited passage blocks sharing", async () => {
+    const passage = `connect with postgresql://ro.user:Zx81QWERtyuiop12AsdfGhjk@db.example.com:6432/app ${MARK}`;
+    await call("bob", "/v1/ingest", { kind: "paste", title: `Connection notes ${MARK}`, contentText: `${passage}\nOther text here.`, space: "mine" });
+    const note = await remember("bob", `Reporting reads the replica ${MARK}`, "Reports use the read replica.", "mine", { evidence: [{ quote: passage }] });
+    assert.equal(note.json.complete, true, JSON.stringify(note.json));
+    const listed = await call("bob", "/v1/shareable", { limit: 200 });
+    assert.equal(listed.json.notes.find((n: { slug: string }) => n.slug === note.json.node.slug).looksLikeCredential, true);
+    const shared = await call("bob", "/v1/share", { slugs: [note.json.node.slug] });
+    assert.equal(shared.json.moved.length, 0);
+    assert.match(shared.json.skipped[0].reason, /credential/);
+  });
+
+  it("a declined note stops being proposed and stays with its owner", async () => {
+    const note = await remember("bob", `My standup notes ${MARK}`, "Rough thoughts for standup.", "mine");
+    const before = await call("bob", "/v1/shareable", { limit: 200 });
+    assert.ok(before.json.notes.some((n: { slug: string }) => n.slug === note.json.node.slug));
+    const kept = await call("bob", "/v1/share", { slugs: [note.json.node.slug], keepPrivate: true });
+    assert.deepEqual(kept.json.keptPrivate.map((n: { slug: string }) => n.slug), [note.json.node.slug]);
+    assert.equal(kept.json.moved.length, 0);
+    const after = await call("bob", "/v1/shareable", { limit: 200 });
+    assert.ok(!after.json.notes.some((n: { slug: string }) => n.slug === note.json.node.slug), "a declined note was proposed again");
+    assert.equal(after.json.total, before.json.total - 1);
+    assert.equal(String((await pool.query("select owner_id from node where id = $1", [note.json.node.id])).rows[0].owner_id), (await users.spacesFor(ids.bob!)).ownerId);
+  });
+
+  it("a private duplicate can be retired in favour of the team note, for its owner only", async () => {
+    const summary = `Invoices are generated on the first of the month ${MARK}.`;
+    const team = await remember("alice", `Invoice schedule ${MARK}`, summary, "team");
+    const mine = await remember("bob", `When invoices go out ${MARK}`, summary, "mine");
+    for (let i = 0; i < 50 && (await store.runJob({})); i++);
+    const listed = await call("bob", "/v1/shareable", { limit: 200 });
+    const entry = listed.json.notes.find((n: { slug: string }) => n.slug === mine.json.node.slug);
+    assert.equal(entry.closestTeamNote?.slug, team.json.node.slug, JSON.stringify(entry));
+    const link = await call("bob", "/v1/link", { fromNodeId: team.json.node.id, toNodeId: mine.json.node.id, predicate: "supersedes" });
+    assert.ok(link.status < 300, JSON.stringify(link.json));
+    const bobs = await call("bob", "/v1/recall", { query: `when do invoices go out ${MARK}`, tokenBudget: 4000 });
+    assert.match(bobs.json.context, /SUPERSEDED by Invoice schedule/);
+    const alices = await call("alice", "/v1/recall", { query: `when do invoices go out ${MARK}`, tokenBudget: 4000 });
+    assert.doesNotMatch(alices.json.context, /SUPERSEDED/);
+    assert.ok(!JSON.stringify(alices.json).includes(mine.json.node.id), "bob's private note reached alice through the link");
+  });
+
+  it("recall says which space each note is in, only while a team is active", async () => {
+    const summary = `Staging resets every Sunday night ${MARK}.`;
+    const team = await remember("alice", `Staging reset ${MARK}`, summary, "team");
+    const mine = await remember("bob", `Staging Sundays ${MARK}`, summary, "mine");
+    for (let i = 0; i < 50 && (await store.runJob({})); i++);
+    const recall = await call("bob", "/v1/recall", { query: `staging resets sunday ${MARK}`, tokenBudget: 4000 });
+    const spaceOf = (id: string) => recall.json.atoms.find((atom: { node: { id: string } }) => atom.node.id === id)?.space;
+    assert.equal(spaceOf(team.json.node.id), "team");
+    assert.equal(spaceOf(mine.json.node.id), "mine");
+    assert.match(recall.json.context, /— TEAM/);
+    assert.match(recall.json.context, /— MINE/);
+    await call("sam", "/v1/remember", { title: `Solo staging ${MARK}`, summary });
+    for (let i = 0; i < 50 && (await store.runJob({})); i++);
+    const solo = await call("sam", "/v1/recall", { query: `staging resets sunday ${MARK}`, tokenBudget: 4000 });
+    assert.ok(solo.json.atoms.length > 0);
+    assert.ok(solo.json.atoms.every((atom: { space?: string }) => atom.space === undefined), "a solo user got space labels");
   });
 });

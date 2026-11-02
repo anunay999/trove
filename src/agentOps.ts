@@ -1,3 +1,4 @@
+import { SPACE_RULES } from "./contracts.js";
 import type { CaptureInput, ForgetInput, GraphEdge, GraphNode, GraphSource, IngestInput, QuoteEvidenceRef, ReadAnyInput, RememberInput, TextUnit } from "./contracts.js";
 import type { GraphOperationContext, GraphSourceDocument, GraphStore, ReadResult, TextQuoteMatch } from "./graphCore.js";
 import { evidenceSupportScore, WEAK_EVIDENCE_FLOOR } from "./graphCore.js";
@@ -5,7 +6,7 @@ import { slugify } from "./slug.js";
 
 export class TeamSpaceError extends Error {
   constructor(
-    public readonly code: "no_team" | "credential_in_team_write",
+    public readonly code: "no_team" | "credential_in_team_write" | "space_required",
     message: string,
   ) {
     super(message);
@@ -43,9 +44,10 @@ export function looksLikeCredential(text: string): boolean {
 }
 
 /**
- * The context a write runs in. Unset space means the team when one is active.
- * A team write runs as the team's shared space, so any member revises the same
- * team note; it is refused when no team is active or the text looks like a credential.
+ * The context a write runs in. A team member must name the space, since a note in
+ * the wrong one cannot be unseen. A team write runs as the team's shared space, so any
+ * member revises the same team note; it is refused when no team is active or the text
+ * looks like a credential.
  */
 export function contextForSpace(
   space: "mine" | "team" | undefined,
@@ -53,7 +55,8 @@ export function contextForSpace(
   text: string,
 ): GraphOperationContext | undefined {
   const team = context?.sharedOwnerIds?.[0];
-  if ((space ?? (team ? "team" : "mine")) === "mine") return context;
+  if (!space && team) throw new TeamSpaceError("space_required", `Choose where this goes and call again with space. ${SPACE_RULES}`);
+  if ((space ?? "mine") === "mine") return context;
   if (!team) {
     throw new TeamSpaceError("no_team", 'No team is active, so there is no team space to write to. Switch to a team in the dashboard, or write with space: "mine".');
   }
@@ -77,7 +80,9 @@ export type RememberResult = {
   action: "created" | "updated";
   node: GraphNode;
   /** Near-matches that were NOT merged into — surfaced so the agent can retarget with `slug` if the dedupe missed. */
-  similar: Array<{ nodeId: string; slug: string; title: string; score: number }>;
+  similar: Array<{ nodeId: string; slug: string; title: string; score: number; space?: "mine" | "team"; match?: "title" | "meaning" }>;
+  /** Where the note landed, reported only while a team is active. */
+  space?: "mine" | "team";
   /**
    * Evidence refs that did not resolve (unknown source/text unit, or a quote
    * that matched nothing/too much), with the reason. They are reported here
@@ -259,6 +264,10 @@ export async function remember(
       .slice(0, 3)
       .map((match) => ({ nodeId: match.node.id, slug: match.node.slug, title: match.node.title, score: match.score }));
   }
+  // In a team, look in both spaces the caller can read, so one fact does not get a second home.
+  if (!target && callerContext?.sharedOwnerIds?.length && store.similarAcrossSpaces) {
+    similar = await store.similarAcrossSpaces({ title: input.title, summary: input.summary }, 5, callerContext);
+  }
 
   // Evidence and links are resolved read-only up front, then handed to the
   // store so they are written inside the same transaction as the node (create
@@ -397,6 +406,7 @@ export async function remember(
     result: Omit<RememberResult, "complete" | "evidenceRejected" | "evidenceUnserved" | "evidenceUnsupported" | "linkRejected">,
   ): RememberResult => ({
     ...result,
+    ...(callerContext?.sharedOwnerIds?.length && input.space ? { space: input.space } : {}),
     complete: evidenceRejected.length === 0 && evidenceUnserved.length === 0 && evidenceUnsupported.length === 0 && linkRejected.length === 0,
     ...(evidenceRejected.length > 0 ? { evidenceRejected } : {}),
     ...(evidenceUnserved.length > 0 ? { evidenceUnserved } : {}),

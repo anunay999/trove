@@ -5,7 +5,7 @@ import { createGraphStore } from "../src/createStore.js";
 import { UserStore } from "../src/users.js";
 import type { GraphStore } from "../src/graphCore.js";
 import { TeamSpaceError, contextForSpace, ingest, looksLikeCredential, remember } from "../src/agentOps.js";
-import type { RememberInput } from "../src/contracts.js";
+import { SPACE_RULES, type RememberInput } from "../src/contracts.js";
 import { closeStore, isolateDatabase } from "./helpers.js";
 
 await isolateDatabase("team-writes");
@@ -38,8 +38,14 @@ describe("choosing the space for a write", () => {
   const base = { actorId: "a", interfaceId: "t", requestId: "r", ownerId: "private-1" };
   const inTeam = { ...base, sharedOwnerIds: ["team-1"] };
 
-  it("defaults to the team when one is active", () => {
-    assert.equal(contextForSpace(undefined, inTeam, "fact")?.ownerId, "team-1");
+  it("makes a team member choose, and the refusal states the rule", () => {
+    assert.throws(
+      () => contextForSpace(undefined, inTeam, "fact"),
+      (error: unknown) => error instanceof TeamSpaceError && error.code === "space_required" && error.message.includes(SPACE_RULES),
+    );
+  });
+  it("writes to the team when asked", () => {
+    assert.equal(contextForSpace("team", inTeam, "fact")?.ownerId, "team-1");
   });
   it("defaults to the private space without a team", () => {
     assert.equal(contextForSpace(undefined, base, "fact")?.ownerId, "private-1");
@@ -54,7 +60,7 @@ describe("choosing the space for a write", () => {
   });
   it("refuses a credential on the way into the team, but not into the private space", () => {
     const secret = "password = Zx81QWERtyuiop12AsdfGhjk";
-    assert.throws(() => contextForSpace(undefined, inTeam, secret), (error: unknown) => error instanceof TeamSpaceError && error.code === "credential_in_team_write");
+    assert.throws(() => contextForSpace("team", inTeam, secret), (error: unknown) => error instanceof TeamSpaceError && error.code === "credential_in_team_write");
     assert.equal(contextForSpace("mine", inTeam, secret)?.ownerId, "private-1");
   });
 });
@@ -93,8 +99,8 @@ describe("team writes through remember and ingest", { skip: databaseUrl ? false 
 
   const ownerOf = async (nodeId: string) => String((await pool.query("select owner_id from node where id = $1", [nodeId])).rows[0].owner_id);
 
-  it("a default write lands in the team, and a teammate recalls it", async () => {
-    const result = await remember(store, { title: `Webhook retries ${MARK}`, summary: `Stripe retries carry the same event id ${MARK}.` } as RememberInput, alice);
+  it("a team write lands in the team, and a teammate recalls it", async () => {
+    const result = await remember(store, { title: `Webhook retries ${MARK}`, summary: `Stripe retries carry the same event id ${MARK}.`, space: "team" } as RememberInput, alice);
     assert.equal(await ownerOf(result.node.id), teamId);
     const recall = await store.recall({ query: `stripe retries event id ${MARK}`, tokenBudget: 2000 }, bob);
     assert.ok(recall.atoms.some((atom) => atom.node.id === result.node.id), "teammate did not recall the team note");
@@ -102,8 +108,8 @@ describe("team writes through remember and ingest", { skip: databaseUrl ? false 
 
   it("a teammate's remember with the same title revises the team note", async () => {
     const title = `Deploy freeze ${MARK}`;
-    const first = await remember(store, { title, summary: "No deploys after Friday noon." } as RememberInput, alice);
-    const second = await remember(store, { title, summary: "No deploys after Friday 2pm." } as RememberInput, bob);
+    const first = await remember(store, { title, summary: "No deploys after Friday noon.", space: "team" } as RememberInput, alice);
+    const second = await remember(store, { title, summary: "No deploys after Friday 2pm.", space: "team" } as RememberInput, bob);
     assert.equal(second.node.id, first.node.id, "a teammate made a second team note instead of revising");
   });
 
@@ -116,8 +122,8 @@ describe("team writes through remember and ingest", { skip: databaseUrl ? false 
 
   it("a credential never reaches the team, through remember or ingest", async () => {
     const secret = `connect with postgresql://ro.user:Zx81QWERtyuiop12AsdfGhjk@db.example.com:6432/app ${MARK}`;
-    await assert.rejects(remember(store, { title: `Prod DB ${MARK}`, summary: secret } as RememberInput, alice), TeamSpaceError);
-    await assert.rejects(ingest(store, { kind: "paste", title: `Creds ${MARK}`, contentText: secret, metadata: {} }, alice), TeamSpaceError);
+    await assert.rejects(remember(store, { title: `Prod DB ${MARK}`, summary: secret, space: "team" } as RememberInput, alice), TeamSpaceError);
+    await assert.rejects(ingest(store, { kind: "paste", title: `Creds ${MARK}`, contentText: secret, metadata: {}, space: "team" }, alice), TeamSpaceError);
     const leaked = await pool.query("select count(*)::int as n from node where owner_id = $1 and title like $2", [teamId, `Prod DB ${MARK}%`]);
     assert.equal(leaked.rows[0].n, 0);
   });

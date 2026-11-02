@@ -703,6 +703,8 @@ export type RecallAtom = {
   tokens: number;
   /** True when atom.node.content is a packed slice of the note body, not the full body. */
   contentTruncated: boolean;
+  /** Which space the note lives in, reported only while a team is active. */
+  space?: "mine" | "team";
 };
 
 export type RecallCitation = {
@@ -773,16 +775,21 @@ export type ProjectResult =
 export type SpaceMoveResult = {
   moved: Array<{ id: string; slug: string; title: string }>;
   skipped: Array<{ ref: string; reason: string }>;
+  keptPrivate?: Array<{ id: string; slug: string; title: string }>;
 };
+
+export type SimilarNote = { nodeId: string; slug: string; title: string; score: number; space: "mine" | "team"; match: "title" | "meaning" };
 
 export type ShareableResult = {
   total: number;
-  notes: Array<{ id: string; slug: string; title: string; summary: string | null; updatedAt: string; looksLikeCredential: boolean }>;
+  notes: Array<{ id: string; slug: string; title: string; summary: string | null; updatedAt: string; looksLikeCredential: boolean; closestTeamNote?: { slug: string; title: string; distance: number } }>;
 };
 
 export type GraphStore = {
   /** Teams live in Postgres only; the memory store leaves these out. */
   shareable?(input: ShareableInput, context?: GraphOperationContext): Promise<ShareableResult>;
+  similarAcrossSpaces?(input: { title: string; summary: string }, limit: number, context?: GraphOperationContext): Promise<SimilarNote[]>;
+  teamNoteIds?(nodeIds: string[], context?: GraphOperationContext): Promise<Set<string>>;
   share?(input: ShareInput, context?: GraphOperationContext): Promise<SpaceMoveResult>;
   unshare?(input: ShareInput, context?: GraphOperationContext): Promise<SpaceMoveResult>;
   ingest(input: IngestInput, context?: GraphOperationContext): MaybePromise<{ source: GraphSource; textUnits: TextUnit[] }>;
@@ -1123,16 +1130,17 @@ function renderRecallAtom(
   node: GraphNode,
   hops: number,
   remainingTokens: number,
-  options: { primaryMatch?: boolean; maxContentChars?: number; supersededByTitle?: string; agentInference?: boolean } = {},
+  options: { primaryMatch?: boolean; maxContentChars?: number; supersededByTitle?: string; agentInference?: boolean; space?: "mine" | "team" | undefined } = {},
 ): { block: string; body: string; contentTruncated: boolean } {
   const origin = hops === 0 ? "match" : "linked";
   const supersedeMark = options.supersededByTitle ? ` — SUPERSEDED by ${options.supersededByTitle}` : "";
   const inferenceMark = options.agentInference ? " — AGENT INFERENCE" : "";
+  const spaceMark = options.space ? ` — ${options.space.toUpperCase()}` : "";
   const headerLines = [
     // The updated date anchors each atom in time: temporal questions ("what did
     // I buy 10 days ago?") are unanswerable from a dateless pack (bench finding —
     // the compare run's atoms carried no dates and temporal-reasoning scored 0%).
-    `## ${node.title} [${node.type}/${origin}] (${node.slug}) — updated ${node.updatedAt.slice(0, 10)}${supersedeMark}${inferenceMark}`,
+    `## ${node.title} [${node.type}/${origin}] (${node.slug}) — updated ${node.updatedAt.slice(0, 10)}${spaceMark}${supersedeMark}${inferenceMark}`,
     node.summary ?? "",
   ].filter(Boolean);
   const header = headerLines.join("\n") + "\n";
@@ -1487,6 +1495,10 @@ async function performRecallInner(
   // A node a newer fact supersedes is marked in its header, so the reader
   // prefers the successor instead of weighing two co-equal "truths".
   const superseded = await store.supersededBy(ordered.map((candidate) => candidate.node.id), context);
+  const teamIds = context?.sharedOwnerIds?.length && store.teamNoteIds
+    ? await store.teamNoteIds(ordered.map((candidate) => candidate.node.id), context)
+    : null;
+  const spaceOf = (nodeId: string): "mine" | "team" | undefined => (teamIds ? (teamIds.has(nodeId) ? "team" : "mine") : undefined);
   // Supersession is annotation-first, not a ranking signal. Preserve `ordered`
   // exactly, but transfer body fidelity toward an in-pack successor: a stale
   // atom gets at most a linked-note teaser, while its successor is eligible
@@ -1548,6 +1560,7 @@ async function performRecallInner(
         maxContentChars,
         ...(supersededByTitle ? { supersededByTitle } : {}),
         ...(provenance === "agent_inference" ? { agentInference: true } : {}),
+        space: spaceOf(candidate.node.id),
       });
       const atom: RecallAtom = {
         // The wire atom carries the packed slice the budgeter chose, never the
@@ -1558,6 +1571,7 @@ async function performRecallInner(
         hops: candidate.hops,
         tokens: estimateTokens(rendered.block),
         contentTruncated: rendered.contentTruncated,
+        ...(spaceOf(candidate.node.id) ? { space: spaceOf(candidate.node.id)! } : {}),
       };
       const blockCost = estimateTokens(rendered.block);
       const extra = estimateTokens(JSON.stringify(atom)) + edgeTokens;
@@ -1614,6 +1628,7 @@ async function performRecallInner(
         maxContentChars,
         supersededByTitle: successor.byTitle,
         ...(oldAtom.provenance === "agent_inference" ? { agentInference: true } : {}),
+        space: oldAtom.space,
       });
       const replacement: RecallAtom = {
         ...oldAtom,
