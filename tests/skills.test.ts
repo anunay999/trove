@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getSkill, listSkills, llmsTxt, resetSkillsCache, skillsIndexMarkdown } from "../src/skills.js";
@@ -32,6 +32,14 @@ describe("skills: the repo's own skills directory", () => {
     const llms = llmsTxt("https://mytrove.in");
     assert.match(llms, /^# Trove/);
     assert.match(llms, /https:\/\/mytrove\.in\/mcp/);
+  });
+
+  it("keeps the repo's llms.txt identical to what mytrove.in serves", () => {
+    assert.equal(
+      readFileSync("llms.txt", "utf8"),
+      llmsTxt("https://mytrove.in"),
+      "Regenerate: node --import tsx -e \"import('./src/skills.ts').then(m => require('fs').writeFileSync('llms.txt', m.llmsTxt('https://mytrove.in')))\"",
+    );
   });
 
   it("rejects names that could walk the filesystem", () => {

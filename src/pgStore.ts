@@ -26,6 +26,8 @@ import type {
   RecallInput,
   RunJobInput,
   SearchInput,
+  ShareableInput,
+  ShareInput,
   TextUnit,
   UpdateInput,
 } from "./contracts.js";
@@ -72,6 +74,8 @@ import {
   WRITE_ACTIONS,
   type GraphJob,
   type GraphOperationContext,
+  type ShareableResult,
+  type SpaceMoveResult,
   type GraphLintFinding,
   type GraphLintReport,
   type GraphSnapshot,
@@ -98,6 +102,7 @@ import { runRecallSelfTest } from "./recallSelfTest.js";
 import { observe, withTraceAttributes } from "./tracing.js";
 import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
+import { looksLikeCredential, TeamSpaceError } from "./agentOps.js";
 
 const { Pool } = pg;
 
@@ -236,7 +241,7 @@ export function grepNodeSql(operator: GrepOperator, prefilter: boolean): string 
         from hits
         join node n on n.id = hits.id
         left join node_revision nr on nr.id = n.current_revision_id
-        where n.deleted_at is null and ($3 or n.owner_id = $4)
+        where n.deleted_at is null and ($3 or n.owner_id = any($4::uuid[]))
           and (n.title ${operator} $1 or coalesce(n.summary, '') ${operator} $1 or coalesce(nr.content, '') ${operator} $1)
         order by n.updated_at desc
         limit $2`;
@@ -248,7 +253,7 @@ export function grepUnitSql(operator: GrepOperator, prefilter: boolean): string 
         select tu.id, tu.source_id, tu.ordinal, tu.text, s.title
         from text_unit tu
         join source s on s.id = tu.source_id
-        where ($3 or tu.owner_id = $4) and tu.text ${operator} $1${guard}
+        where ($3 or tu.owner_id = any($4::uuid[])) and tu.text ${operator} $1${guard}
         order by tu.created_at desc, tu.ordinal
         limit $2`;
 }
@@ -295,7 +300,7 @@ export const LEXICAL_NODE_SEARCH_SQL = `with q as (select $7::tsquery as query),
        left join node_revision nr on nr.id = n.current_revision_id
        cross join q
        where n.deleted_at is null
-         and ($5 or n.owner_id = $6)
+         and ($5 or n.owner_id = any($6::uuid[]))
          and ($2::node_type[] is null or n.type = any($2::node_type[]))
          and (
            -- Giant catalog/log pages starve recall packs; only a title or slug
@@ -323,7 +328,7 @@ export const LEXICAL_UNIT_SEARCH_SQL = `with q as (select $5::tsquery as query)
               ) as rank
        from text_unit
        cross join q
-       where ($3 or owner_id = $4) and (
+       where ($3 or owner_id = any($4::uuid[])) and (
          to_tsvector('english', text) @@ q.query
           or text ilike $2
        )
@@ -395,13 +400,13 @@ export function semanticNodeSearchSql(vectorCount: number, layout: EmbeddingLayo
   const scoped = layout.tenantReady
     ? {
         joins: "",
-        filter: `and (${p(4)} or e.tenant_id = coalesce(${p(5)}, '${UNOWNED_TENANT}'::uuid))`,
+        filter: `and (${p(4)} or e.tenant_id = any(${p(5)}::uuid[]))`,
       }
     : {
         joins: `
            join node_revision nr on nr.id = e.owner_id
            join node n on n.id = nr.node_id`,
-        filter: `and (${p(4)} or n.owner_id = ${p(5)})`,
+        filter: `and (${p(4)} or n.owner_id = any(${p(5)}::uuid[]))`,
       };
   const branches = Array.from({ length: vectorCount }, (_, index) => `(
            select e.owner_id, e.embedding <=> $${index + 1}::${vt} as distance
@@ -419,7 +424,7 @@ export function semanticNodeSearchSql(vectorCount: number, layout: EmbeddingLayo
        join node_revision nr on nr.id = best.owner_id
        join node n on n.id = nr.node_id and n.deleted_at is null and nr.id = n.current_revision_id
        where best.distance < ${p(6)}
-         and (${p(4)} or n.owner_id = ${p(5)})
+         and (${p(4)} or n.owner_id = any(${p(5)}::uuid[]))
          and (${p(2)}::node_type[] is null or n.type = any(${p(2)}::node_type[]))
          and (
            coalesce(length(nr.content), 0) <= 12000
@@ -459,8 +464,8 @@ export function semanticUnitSearchSql(layout: EmbeddingLayout = LEGACY_EMBEDDING
   // chunk join becomes a pure pkey lookup on rows the limit has already chosen
   // rather than a filter the probe has to walk past.
   const filter = layout.tenantReady
-    ? `and ($3 or e.tenant_id = coalesce($4, '${UNOWNED_TENANT}'::uuid))`
-    : "and ($3 or tc.owner_id = $4)";
+    ? `and ($3 or e.tenant_id = any($4::uuid[]))`
+    : "and ($3 or tc.owner_id = any($4::uuid[]))";
   return `select tu.id, tu.source_id, tu.ordinal, tu.section_path, tu.char_start, tu.char_end, tu.text, tu.content_sha256, chunk.distance
        from (
          select tc.source_id, tc.first_ordinal, tc.last_ordinal,
@@ -721,8 +726,8 @@ export class PgGraphStore implements GraphStore {
     const result = await this.pool.query(
       `select id, kind, title, uri, content_sha256, metadata, content_text, created_at
        from source
-       where id = $1 and ($2 or owner_id = $3)`,
-      [input.sourceId, !scope.scoped, scope.ownerId],
+       where id = $1 and ($2 or owner_id = any($3::uuid[]))`,
+      [input.sourceId, !scope.scoped, scope.readOwnerIds],
     );
     if (result.rowCount === 0) return null;
     const row = result.rows[0];
@@ -738,9 +743,9 @@ export class PgGraphStore implements GraphStore {
     const episodes = await this.pool.query(
       `select title, content_text
        from source
-       where metadata->>'episodeOf' = $1 and ($2 or owner_id = $3)
+       where metadata->>'episodeOf' = $1 and ($2 or owner_id = any($3::uuid[]))
        order by (metadata->>'episodeOrdinal')::int asc nulls last, created_at asc`,
-      [input.uri, !scope.scoped, scope.ownerId],
+      [input.uri, !scope.scoped, scope.readOwnerIds],
     );
     if (episodes.rowCount && episodes.rowCount > 0) {
       return {
@@ -753,10 +758,10 @@ export class PgGraphStore implements GraphStore {
     const whole = await this.pool.query(
       `select title, content_text
        from source
-       where uri = $1 and ($2 or owner_id = $3)
+       where uri = $1 and ($2 or owner_id = any($3::uuid[]))
        order by created_at desc
        limit 1`,
-      [input.uri, !scope.scoped, scope.ownerId],
+      [input.uri, !scope.scoped, scope.readOwnerIds],
     );
     if (whole.rowCount === 0) return null;
     return {
@@ -770,7 +775,7 @@ export class PgGraphStore implements GraphStore {
   async grep(input: GrepInput, context?: GraphOperationContext): Promise<GrepResult> {
     const scope = input.scope ?? "all";
     const owner = ownerScope(context);
-    const ownerParams = [!owner.scoped, owner.ownerId];
+    const ownerParams = [!owner.scoped, owner.readOwnerIds];
     const limit = input.limit ?? 20;
     const caseSensitive = input.caseSensitive ?? false;
     const operator = caseSensitive ? "~" : "~*";
@@ -917,7 +922,7 @@ export class PgGraphStore implements GraphStore {
     const typeFilter = input.types && input.types.length > 0 ? input.types : null;
     const runNodeSearch = (effectiveTsquery: string) =>
       this.pool.query(LEXICAL_NODE_SEARCH_SQL, [
-        input.query, typeFilter, input.limit, `%${input.query}%`, !scope.scoped, scope.ownerId, effectiveTsquery,
+        input.query, typeFilter, input.limit, `%${input.query}%`, !scope.scoped, scope.readOwnerIds, effectiveTsquery,
       ]);
     // Strict AND first so precision is preserved whenever every term co-occurs;
     // the looser OR form only runs when AND found nothing at all.
@@ -929,7 +934,7 @@ export class PgGraphStore implements GraphStore {
 
     const runUnitSearch = (effectiveTsquery: string) =>
       this.pool.query(LEXICAL_UNIT_SEARCH_SQL, [
-        input.limit, `%${input.query}%`, !scope.scoped, scope.ownerId, effectiveTsquery,
+        input.limit, `%${input.query}%`, !scope.scoped, scope.readOwnerIds, effectiveTsquery,
       ]);
     const textUnitResult = input.includeTextUnits
       ? await withOrFallback(runUnitSearch)
@@ -971,7 +976,7 @@ export class PgGraphStore implements GraphStore {
       typeFilter,
       input.limit,
       !scope.scoped,
-      scope.ownerId,
+      scope.readOwnerIds,
       maxDistance,
       `%${input.query}%`,
       input.query,
@@ -1019,7 +1024,7 @@ export class PgGraphStore implements GraphStore {
       if (input.includeTextUnits) {
         for (const vector of vectors) {
           unitRowsByVector.push(
-            await client.query(semanticUnitSearchSql(layout), [vector, provider.model, !scope.scoped, scope.ownerId, input.limit, maxDistance]),
+            await client.query(semanticUnitSearchSql(layout), [vector, provider.model, !scope.scoped, scope.readOwnerIds, input.limit, maxDistance]),
           );
         }
       }
@@ -1074,9 +1079,11 @@ export class PgGraphStore implements GraphStore {
               n.access_count, n.last_accessed_at
        from node n
        ${revisionJoin}
-       where n.deleted_at is null and ${predicate} and ($2 or n.owner_id = $3)
+       where n.deleted_at is null and ${predicate} and ($2 or n.owner_id = any($3::uuid[]))
+       -- A slug can name a node in the caller's own space and in a shared one: own wins.
+       order by n.owner_id is not distinct from ($3::uuid[])[1] desc
        limit 1`,
-      [input.nodeId ?? input.slug, !scope.scoped, scope.ownerId, input.asOf ?? null],
+      [input.nodeId ?? input.slug, !scope.scoped, scope.readOwnerIds, input.asOf ?? null],
     );
     if (nodeResult.rowCount === 0) return null;
 
@@ -1160,13 +1167,13 @@ export class PgGraphStore implements GraphStore {
            from annotation a
            join text_unit tu on tu.id = a.text_unit_id
            cross join q
-           where a.node_id = any($1::uuid[]) and ($3 or a.owner_id = $4)
+           where a.node_id = any($1::uuid[]) and ($3 or a.owner_id = any($4::uuid[]))
          )
          select node_id, id, source_id, ordinal, section_path, char_start, char_end, text, content_sha256
          from ranked
          where per_node_rank <= $5
          order by node_id, per_node_rank`,
-        [nodeIds, normalizeRetrievalQuery(opts.query), !scope.scoped, scope.ownerId, perNodeLimit],
+        [nodeIds, normalizeRetrievalQuery(opts.query), !scope.scoped, scope.readOwnerIds, perNodeLimit],
       );
       for (const row of ranked.rows) {
         evidence.get(String(row.node_id))?.push(mapTextUnit(row));
@@ -1178,9 +1185,9 @@ export class PgGraphStore implements GraphStore {
       `select a.node_id, tu.id, tu.source_id, tu.ordinal, tu.section_path, tu.char_start, tu.char_end, tu.text, tu.content_sha256
        from annotation a
        join text_unit tu on tu.id = a.text_unit_id
-       where a.node_id = any($1::uuid[]) and ($2 or a.owner_id = $3)
+       where a.node_id = any($1::uuid[]) and ($2 or a.owner_id = any($3::uuid[]))
        order by a.node_id, a.created_at, tu.ordinal`,
-      [nodeIds, !scope.scoped, scope.ownerId],
+      [nodeIds, !scope.scoped, scope.readOwnerIds],
     );
     for (const row of result.rows) {
       evidence.get(String(row.node_id))?.push(mapTextUnit(row));
@@ -1197,8 +1204,8 @@ export class PgGraphStore implements GraphStore {
        join node n on n.id = a.node_id
        where a.node_id = any($1::uuid[])
          and n.deleted_at is null
-         and ($2 or n.owner_id = $3)`,
-      [nodeIds, !scope.scoped, scope.ownerId],
+         and ($2 or n.owner_id = any($3::uuid[]))`,
+      [nodeIds, !scope.scoped, scope.readOwnerIds],
     );
     return new Set(result.rows.map((row) => String(row.node_id)));
   }
@@ -1214,14 +1221,14 @@ export class PgGraphStore implements GraphStore {
     const exact = await this.pool.query(
       `select id, source_id, ordinal, section_path, char_start, char_end, text, content_sha256
        from text_unit
-       where ($2 or owner_id = $3)
+       where ($2 or owner_id = any($3::uuid[]))
          and ($4::uuid is null or source_id = $4)
          and ($5::uuid is null or id = $5)
          and text ilike '%' || $7 || '%' escape '\\'
          and position(lower($1) in lower(text)) > 0
        order by created_at desc, ordinal
        limit $6`,
-      [input.quote, !scope.scoped, scope.ownerId, input.sourceId ?? null, input.textUnitId ?? null, limit, input.quote.replace(/[\\%_]/g, "\\$&")],
+      [input.quote, !scope.scoped, scope.readOwnerIds, input.sourceId ?? null, input.textUnitId ?? null, limit, input.quote.replace(/[\\%_]/g, "\\$&")],
     );
     if (exact.rows.length > 0) {
       return exact.rows.map((row): TextQuoteMatch => ({ unit: mapTextUnit(row), match: "exact", score: 1 }));
@@ -1243,13 +1250,13 @@ export class PgGraphStore implements GraphStore {
               ts_rank_cd(to_tsvector('english', text), q.query) as rank
        from text_unit
        cross join q
-       where ($2 or owner_id = $3)
+       where ($2 or owner_id = any($3::uuid[]))
          and ($4::uuid is null or source_id = $4)
          and ($5::uuid is null or id = $5)
          and to_tsvector('english', text) @@ q.query
        order by rank desc
        limit 25`,
-      [input.quote, !scope.scoped, scope.ownerId, input.sourceId ?? null, input.textUnitId ?? null],
+      [input.quote, !scope.scoped, scope.readOwnerIds, input.sourceId ?? null, input.textUnitId ?? null],
     );
     return fuzzy.rows
       .map((row): TextQuoteMatch => ({
@@ -1268,8 +1275,8 @@ export class PgGraphStore implements GraphStore {
   ): Promise<string | null> {
     const scope = ownerScope(context);
     const result = await this.pool.query(
-      `select text from text_unit where id = $1 and ($2 or owner_id = $3)`,
-      [input.textUnitId, !scope.scoped, scope.ownerId],
+      `select text from text_unit where id = $1 and ($2 or owner_id = any($3::uuid[]))`,
+      [input.textUnitId, !scope.scoped, scope.readOwnerIds],
     );
     return result.rowCount === 1 ? String(result.rows[0].text) : null;
   }
@@ -1295,8 +1302,8 @@ export class PgGraphStore implements GraphStore {
        where e.predicate = 'supersedes'
          and e.to_node_id = any($1::uuid[])
          and e.deleted_at is null and e.expired_at is null
-         and ($2 or e.owner_id = $3)`,
-      [nodeIds, !scope.scoped, scope.ownerId],
+         and ($2 or e.owner_id = any($3::uuid[]))`,
+      [nodeIds, !scope.scoped, scope.readOwnerIds],
     );
     for (const row of result.rows) {
       map.set(String(row.to_node_id), { byNodeId: String(row.from_node_id), byTitle: String(row.title) });
@@ -1312,20 +1319,20 @@ export class PgGraphStore implements GraphStore {
       `with recursive walk as (
          select n.id as node_id, 0 as depth, array[n.id] as path
          from node n
-         where n.id = $1 and n.deleted_at is null and ($6 or n.owner_id = $7)
+         where n.id = $1 and n.deleted_at is null and ($6 or n.owner_id = any($7::uuid[]))
          union all
          select next_node.id as node_id, walk.depth + 1 as depth, walk.path || next_node.id as path
          from walk
          join edge e
            on e.deleted_at is null
-          and ($6 or e.owner_id = $7)
+          and ($6 or e.owner_id = any($7::uuid[]))
           and (e.from_node_id = walk.node_id or e.to_node_id = walk.node_id)
           and ($8::timestamptz is null
             or (e.valid_from <= $8::timestamptz
               and (e.valid_until is null or e.valid_until > $8::timestamptz)))
          join node next_node
            on next_node.deleted_at is null
-          and ($6 or next_node.owner_id = $7)
+          and ($6 or next_node.owner_id = any($7::uuid[]))
           and next_node.id = case
             when e.from_node_id = walk.node_id then e.to_node_id
             else e.from_node_id
@@ -1347,7 +1354,7 @@ export class PgGraphStore implements GraphStore {
        group by n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id, n.updated_at, n.access_count, n.last_accessed_at
        order by level, n.id
        limit $9`,
-      [input.nodeId, input.depth ?? 1, input.predicates ?? null, input.asOf ?? null, input.includeExpired ?? false, !scope.scoped, scope.ownerId, validAt, maxNodes],
+      [input.nodeId, input.depth ?? 1, input.predicates ?? null, input.asOf ?? null, input.includeExpired ?? false, !scope.scoped, scope.readOwnerIds, validAt, maxNodes],
     );
     const nodes = nodeResult.rows.map((row) => ({ ...mapNode(row), level: Number(row.level) }));
     const nodeIds = nodes.map((node) => node.id);
@@ -1360,7 +1367,7 @@ export class PgGraphStore implements GraphStore {
       `select id, from_node_id, to_node_id, predicate, weight, created_at, valid_from, valid_until, expired_at, invalidated_by, invalidation_reason
        from edge
        where deleted_at is null
-         and ($5 or owner_id = $6)
+         and ($5 or owner_id = any($6::uuid[]))
          and from_node_id = any($1::uuid[])
          and to_node_id = any($1::uuid[])
          and ($4::timestamptz is null
@@ -1371,7 +1378,7 @@ export class PgGraphStore implements GraphStore {
            or ($2::timestamptz is not null
              and created_at <= $2::timestamptz
              and (expired_at is null or expired_at > $2::timestamptz)))`,
-      [nodeIds, input.asOf ?? null, input.includeExpired ?? false, validAt, !scope.scoped, scope.ownerId],
+      [nodeIds, input.asOf ?? null, input.includeExpired ?? false, validAt, !scope.scoped, scope.readOwnerIds],
     );
 
     return { nodes, edges: edgeResult.rows.map(mapEdge) };
@@ -3621,6 +3628,128 @@ export class PgGraphStore implements GraphStore {
     return String(result.rows[0].id);
   }
 
+  /** The caller's private notes, newest first, for an agent deciding what to share with the team. */
+  async shareable(input: ShareableInput, context?: GraphOperationContext): Promise<ShareableResult> {
+    const { mine } = teamSpaces(context);
+    const [count, page] = await Promise.all([
+      this.pool.query("select count(*)::int as n from node where owner_id = $1 and deleted_at is null", [mine]),
+      this.pool.query(
+        `select n.id, n.slug, n.title, n.summary, n.updated_at, r.content
+         from node n left join node_revision r on r.id = n.current_revision_id
+         where n.owner_id = $1 and n.deleted_at is null
+         order by n.updated_at desc, n.id
+         limit $2 offset $3`,
+        [mine, input.limit ?? 50, input.offset ?? 0],
+      ),
+    ]);
+    return {
+      total: count.rows[0].n,
+      notes: page.rows.map((row) => ({
+        id: String(row.id),
+        slug: String(row.slug),
+        title: String(row.title),
+        summary: row.summary ? String(row.summary).slice(0, 300) : null,
+        updatedAt: new Date(row.updated_at).toISOString(),
+        looksLikeCredential: looksLikeCredential([row.title, row.summary, row.content].filter(Boolean).join("\n")),
+      })),
+    };
+  }
+
+  /** Move private notes into the team space. Their own citations and links stay private. */
+  async share(input: ShareInput, context?: GraphOperationContext): Promise<SpaceMoveResult> {
+    const { mine, team } = teamSpaces(context);
+    return this.moveNotes(input, context, mine, async (_client, row) => {
+      if (looksLikeCredential([row.title, row.summary, row.content].filter(Boolean).join("\n"))) {
+        return { skip: "it looks like it contains a credential; remove the secret, then share it" };
+      }
+      return { to: team, metadata: { sharedFrom: mine, sharedAt: new Date().toISOString() } };
+    });
+  }
+
+  /** Move shared notes back to the private space they came from. The sharer or a team admin may. */
+  async unshare(input: ShareInput, context?: GraphOperationContext): Promise<SpaceMoveResult> {
+    const { mine, team } = teamSpaces(context);
+    let admin: boolean | undefined;
+    return this.moveNotes(input, context, team, async (client, row) => {
+      const from = typeof row.metadata?.sharedFrom === "string" ? row.metadata.sharedFrom : null;
+      if (!from) return { skip: "it was written straight to the team, so it has no private space to go back to" };
+      admin ??= (await client.query(
+        `select 1 from space p
+         join tenant_member m on m.user_id = p.user_id and m.role = 'admin'
+         join space t on t.tenant_id = m.tenant_id
+         where p.id = $1 and t.id = $2`,
+        [mine, team],
+      )).rowCount === 1;
+      if (from !== mine && !admin) return { skip: "only the person who shared it or a team admin can take it back" };
+      return { to: from, metadata: null };
+    });
+  }
+
+  private async moveNotes(
+    input: ShareInput,
+    context: GraphOperationContext | undefined,
+    fromOwner: string,
+    decide: (
+      client: pg.PoolClient,
+      row: { id: string; slug: string; title: string; summary: string | null; content: string | null; metadata: Record<string, unknown> },
+    ) => Promise<{ skip: string } | { to: string; metadata: Record<string, unknown> | null }>,
+  ): Promise<SpaceMoveResult> {
+    const nodeIds = input.nodeIds ?? [];
+    const slugs = input.slugs ?? [];
+    const moved: SpaceMoveResult["moved"] = [];
+    const skipped: SpaceMoveResult["skipped"] = [];
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const rows = (await client.query(
+        `select n.id, n.slug, n.title, n.summary, n.metadata, r.content
+         from node n left join node_revision r on r.id = n.current_revision_id
+         where n.owner_id = $1 and n.deleted_at is null and (n.id = any($2::uuid[]) or n.slug = any($3::text[]))
+         for update of n`,
+        [fromOwner, nodeIds, slugs],
+      )).rows;
+      for (const ref of [...nodeIds, ...slugs]) {
+        if (!rows.some((row) => String(row.id) === ref || row.slug === ref)) skipped.push({ ref, reason: "not found among the notes you can move" });
+      }
+      const actor = await this.actorUuidForContext(client, context);
+      for (const row of rows) {
+        const id = String(row.id);
+        const decision = await decide(client, { ...row, id, metadata: row.metadata ?? {} });
+        if ("skip" in decision) {
+          skipped.push({ ref: row.slug, reason: decision.skip });
+          continue;
+        }
+        const clash = await client.query("select 1 from node where owner_id = $1 and slug = $2", [decision.to, row.slug]);
+        if (clash.rowCount) {
+          skipped.push({ ref: row.slug, reason: "the destination already has a note with this slug; read it and remember into it instead" });
+          continue;
+        }
+        await client.query(
+          `update node set owner_id = $2,
+             metadata = case when $3::jsonb is null then metadata - 'sharedFrom' - 'sharedAt' else metadata || $3::jsonb end
+           where id = $1`,
+          [id, decision.to, decision.metadata ? JSON.stringify(decision.metadata) : null],
+        );
+        // Vectors carry the owning space too, or semantic recall would still scope them to the old one.
+        await client.query(
+          `update embedding set tenant_id = $2
+           where (owner_table = 'node' and owner_id = $1)
+              or (owner_table = 'node_revision' and owner_id in (select id from node_revision where node_id = $1))`,
+          [id, decision.to],
+        );
+        await this.recordEvent(client, decision.metadata ? "share" : "unshare", "node", id, { ownerId: decision.to }, { ownerId: fromOwner }, context, actor);
+        moved.push({ id, slug: row.slug, title: row.title });
+      }
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+    return { moved, skipped };
+  }
+
   private async recordEvent(
     client: pg.PoolClient,
     action: string,
@@ -3811,8 +3940,8 @@ export class PgGraphStore implements GraphStore {
     if (ids.length === 0) return new Set();
     const live = table === "node" || table === "edge" ? " and deleted_at is null" : "";
     const result = await client.query(
-      `select id from ${table} where id = any($1::uuid[]) and ($2 or owner_id = $3)${live}`,
-      [ids, !scope.scoped, scope.ownerId],
+      `select id from ${table} where id = any($1::uuid[]) and ($2 or owner_id = any($3::uuid[]))${live}`,
+      [ids, !scope.scoped, scope.readOwnerIds],
     );
     return new Set(result.rows.map((row) => String(row.id)));
   }
@@ -3821,8 +3950,8 @@ export class PgGraphStore implements GraphStore {
     if (!slug) return null;
     const queryable = client ?? this.pool;
     const result = await queryable.query(
-      "select id from node where slug = $1 and deleted_at is null and ($2 or owner_id = $3)",
-      [slug, !scope.scoped, scope.ownerId],
+      "select id from node where slug = $1 and deleted_at is null and ($2 or owner_id = any($3::uuid[])) order by owner_id is not distinct from ($3::uuid[])[1] desc limit 1",
+      [slug, !scope.scoped, scope.readOwnerIds],
     );
     return result.rowCount === 0 ? null : String(result.rows[0].id);
   }
@@ -3846,9 +3975,9 @@ export class PgGraphStore implements GraphStore {
     const result = await this.pool.query(
       `select id, motivation, source_id, text_unit_id, node_id, body, selector, created_at
        from annotation
-       where node_id = $1 and ($2 or owner_id = $3)
+       where node_id = $1 and ($2 or owner_id = any($3::uuid[]))
        order by created_at`,
-      [nodeId, !scope.scoped, scope.ownerId],
+      [nodeId, !scope.scoped, scope.readOwnerIds],
     );
     return result.rows.map(mapAnnotation);
   }
@@ -3858,8 +3987,8 @@ export class PgGraphStore implements GraphStore {
     const result = await this.pool.query(
       `select id, kind, title, uri, content_sha256, created_at
        from source
-       where id = any($1::uuid[]) and ($2 or owner_id = $3)`,
-      [ids, !scope.scoped, scope.ownerId],
+       where id = any($1::uuid[]) and ($2 or owner_id = any($3::uuid[]))`,
+      [ids, !scope.scoped, scope.readOwnerIds],
     );
     return new Map(result.rows.map((row) => [String(row.id), mapSource(row)]));
   }
@@ -4083,4 +4212,13 @@ function estimateTokenCount(text: string): number {
 
 function toIso(value: unknown): string {
   return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function teamSpaces(context: GraphOperationContext | undefined): { mine: string; team: string } {
+  const mine = context?.ownerId;
+  const team = context?.sharedOwnerIds?.[0];
+  if (!mine || !team || context?.superuser) {
+    throw new TeamSpaceError("no_team", "Sharing needs an active team. Switch to a team in the dashboard first.");
+  }
+  return { mine, team };
 }

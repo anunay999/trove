@@ -8,6 +8,8 @@ import {
   enqueueJobInputSchema,
   eventFeedInputSchema,
   forgetInputSchema,
+  shareInputSchema,
+  shareableInputSchema,
   grepInputSchema,
   ingestInputSchema,
   linkInputSchema,
@@ -22,7 +24,7 @@ import {
   runJobInputSchema,
 } from "./contracts.js";
 import { assertScopes, operationContextFromAuth, type AuthContext, type TroveScope } from "./auth.js";
-import { forget, readAny, remember } from "./agentOps.js";
+import { forget, ingest, readAny, remember } from "./agentOps.js";
 import type { GraphStore } from "./graphCore.js";
 import { toolDescription, TROVE_AGENT_DOCTRINE, visibleTiers } from "./toolDefinitions.js";
 import { getSkill } from "./skills.js";
@@ -157,6 +159,28 @@ export function createTroveMcpServer(
     ),
   );
 
+  // ---- teams: move notes between a member's private space and the team ----
+  if (store.shareable && store.share && store.unshare) {
+    const shareable = store.shareable.bind(store);
+    const share = store.share.bind(store);
+    const unshare = store.unshare.bind(store);
+    if (canWrite) server.registerTool(
+      "shareable",
+      { title: "Shareable Notes", description: toolDescription("shareable"), inputSchema: shareableInputSchema },
+      async (input) => withScopes(authContext, ["graph:read"], async () => jsonToolResult(await shareable(input, operationContext))),
+    );
+    if (canWrite) server.registerTool(
+      "share",
+      { title: "Share With Team", description: toolDescription("share"), inputSchema: shareInputSchema },
+      async (input) => withScopes(authContext, ["graph:write:capture"], async () => jsonToolResult(await share(input, operationContext))),
+    );
+    if (canWrite) server.registerTool(
+      "unshare",
+      { title: "Unshare From Team", description: toolDescription("unshare"), inputSchema: shareInputSchema },
+      async (input) => withScopes(authContext, ["graph:write:capture"], async () => jsonToolResult(await unshare(input, operationContext))),
+    );
+  }
+
   // ---- curator: ingestion and curation flows ------------------------------
 
   if (tiers.has("curator")) {
@@ -170,7 +194,7 @@ export function createTroveMcpServer(
       async (input) => withScopes(
         authContext,
         ["graph:write:ingest"],
-        async () => jsonToolResult(await store.ingest(input, operationContext)),
+        async () => jsonToolResult(await ingest(store, input, operationContext)),
       ),
     );
 

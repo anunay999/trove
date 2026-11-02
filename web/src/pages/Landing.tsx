@@ -1,12 +1,8 @@
-import { useRef } from "react";
-import { motion, useReducedMotion, useScroll, useTransform, type MotionValue } from "motion/react";
+import { motion, useReducedMotion } from "motion/react";
 import { AgentLogos } from "@/components/AgentLogos";
-import { DashboardProof } from "@/components/DashboardProof";
-import { FaqSection } from "@/components/FaqSection";
-import { EvidenceModel } from "@/components/EvidenceModel";
-import { HeroStream } from "@/components/hero/HeroStream";
-import { HowItWorks } from "@/components/HowItWorks";
 import { WaitlistForm } from "@/components/WaitlistForm";
+import { FeatureCards } from "@/components/landing/FeatureCards";
+import { MemoryTray } from "@/components/landing/MemoryTray";
 
 type LandingProps = {
   onJoin: (email?: string) => void;
@@ -14,133 +10,72 @@ type LandingProps = {
   onConnectKey: () => void;
 };
 
-const LAYER_STEPS: Array<[string, string, string]> = [
-  ["01", "Capture discoveries", "Turn useful observations into durable nodes with the source, scope, and moment attached."],
-  ["02", "Retrieve the right context", "Search by meaning or keyword, then expand through relationships when the answer needs a wider frame."],
-  ["03", "Show your work", "Citations, access boundaries, and historical changes stay close to the memory they explain."],
-];
-
-/** One word of a scroll-driven reveal: opacity tied to its slice of the scroll range. */
-function RevealWord({ progress, range, children }: { progress: MotionValue<number>; range: [number, number]; children: string }) {
-  const opacity = useTransform(progress, range, [0.13, 1]);
-  return (
-    <motion.span style={{ opacity }} className="mr-[0.26em] inline-block">
-      {children}
-    </motion.span>
-  );
-}
-
-/**
- * A statement that materialises as you scroll through it — the reader assembles
- * the sentence, which lands harder than a fade-in ever does.
- */
-function RevealText({ text, className }: { text: string; className?: string }) {
-  const reduceMotion = useReducedMotion();
-  const ref = useRef<HTMLSpanElement>(null);
-  const { scrollYProgress } = useScroll({ target: ref, offset: ["start 0.88", "end 0.42"] });
-  const words = text.split(" ");
-
-  if (reduceMotion) return <span className={className}>{text}</span>;
-
-  return (
-    <span ref={ref} className={className}>
-      {words.map((word, index) => (
-        <RevealWord
-          key={`${word}-${index}`}
-          progress={scrollYProgress}
-          range={[index / words.length, (index + 1) / words.length]}
-        >
-          {word}
-        </RevealWord>
-      ))}
-    </span>
-  );
-}
+const EASE = [0.22, 1, 0.36, 1] as const;
 
 export function Landing({ onJoin, onLogin, onConnectKey }: LandingProps) {
   const reduceMotion = useReducedMotion();
+  const enter = (i: number) => ({
+    initial: reduceMotion ? false : { opacity: 0, y: 10, filter: "blur(4px)" },
+    animate: { opacity: 1, y: 0, filter: "blur(0px)" },
+    transition: { duration: 0.6, delay: 0.08 * i, ease: EASE },
+  });
 
   return (
     <main className="landing-shell relative flex-1 overflow-hidden">
-      <div className="grain-overlay" aria-hidden="true" />
-
-      <HeroStream onJoin={onJoin} onLogin={onLogin} onConnectKey={onConnectKey} />
-
-      <AgentLogos />
-
-      {/* The thesis, assembled by the reader's own scroll. */}
-      <section className="mx-auto w-full max-w-7xl px-6 py-28 md:py-40 lg:px-10 2xl:max-w-[88rem]">
-        <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--signal)]">The layer</p>
-        <h2 className="mt-8 max-w-5xl text-[clamp(2.4rem,5.6vw,4.75rem)] font-medium leading-[1.04] tracking-[-0.045em]">
-          <RevealText text="Remember the reasoning," className="text-muted-foreground" />
-          <br />
-          <RevealText text="not just the answer." />
-        </h2>
-        <motion.p
-          initial={reduceMotion ? false : { opacity: 0, y: 18 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true, amount: 0.5 }}
-          transition={{ duration: 0.65, ease: [0.16, 1, 0.3, 1] }}
-          className="mt-10 max-w-[38rem] text-base leading-relaxed text-muted-foreground md:text-lg"
+      <section className="mx-auto flex w-full max-w-3xl flex-col items-center px-6 pt-20 text-center md:pt-28">
+        <motion.span
+          {...enter(0)}
+          className="flex items-center gap-2.5 rounded-full border border-border px-3 py-1.5 text-[13px] text-muted-foreground"
         >
-          A model can produce a convincing answer and still lose the path that led there. Trove keeps
-          the path: what was learned, where it came from, and what it connects to now.
+          <AgentLogos />
+          Works with your agents
+        </motion.span>
+        <motion.h1
+          {...enter(1)}
+          className="mt-7 text-balance text-[clamp(2.5rem,6vw,4.5rem)] font-medium leading-[1.02] tracking-[-0.04em]"
+        >
+          Context that keeps
+          <br />
+          getting better.
+        </motion.h1>
+        <motion.p {...enter(2)} className="mt-5 max-w-md text-pretty text-base text-muted-foreground md:text-lg">
+          Use Claude alone or every agent you have. Trove keeps what they learn, shows where it came from, and replaces what goes stale.
         </motion.p>
-
-        <p className="mt-16 font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Three moves</p>
-        <div className="mt-6 border-t">
-          {LAYER_STEPS.map(([index, title, body], i) => (
-            <motion.div
-              key={index}
-              initial={reduceMotion ? false : { opacity: 0, y: 18 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, amount: 0.5 }}
-              transition={{ duration: 0.55, delay: i * 0.08, ease: [0.16, 1, 0.3, 1] }}
-              className="grid gap-2 border-b py-8 md:grid-cols-[4.5rem_0.8fr_1.2fr] md:items-baseline md:gap-8 md:py-10"
-            >
-              <span className="tnum font-mono text-sm text-[var(--signal)]">{index}</span>
-              <h3 className="text-xl font-medium tracking-tight md:text-2xl">{title}</h3>
-              <p className="max-w-md text-sm leading-relaxed text-muted-foreground md:justify-self-end">{body}</p>
-            </motion.div>
-          ))}
-        </div>
+        <motion.div {...enter(3)} className="mt-8 w-full max-w-md">
+          <WaitlistForm onJoin={onJoin} idPrefix="hero" />
+        </motion.div>
       </section>
 
-      <EvidenceModel />
+      <motion.section {...enter(4)} className="mx-auto mt-10 w-full max-w-3xl px-6">
+        <MemoryTray />
+      </motion.section>
 
-      <HowItWorks />
+      <section className="mx-auto w-full max-w-5xl px-6 pb-24 pt-20 md:pb-32">
+        <FeatureCards />
+      </section>
 
-      <DashboardProof />
-
-      <FaqSection />
-
-      {/* Closer: one claim, one action, nothing else. */}
-      <section className="border-t border-border px-6 py-28 md:py-40 lg:px-10">
-        <div className="mx-auto flex max-w-5xl flex-col items-center text-center">
-          <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--signal)]">Keep your memory close</p>
-          <h2 className="mt-6 text-[clamp(2.5rem,5.2vw,4.75rem)] font-medium leading-[1.0] tracking-[-0.05em]">
-            The next session should
-            <br />
-            start <span className="font-serif italic">further ahead.</span>
-          </h2>
-          <p className="mt-6 max-w-lg text-sm leading-relaxed text-muted-foreground md:text-base">
-            An open, self-hostable memory foundation for agents that need continuity without giving up
-            control of their data. Join early access — your private graph will be ready when your account opens.
-          </p>
-          <div className="mt-10 w-full max-w-md">
+      <section className="border-t border-border px-6 py-24 md:py-32">
+        <div className="mx-auto flex max-w-md flex-col items-center text-center">
+          <h2 className="text-balance text-3xl font-medium tracking-[-0.035em] md:text-4xl">One memory. Every agent.</h2>
+          <div className="mt-8 w-full">
             <WaitlistForm onJoin={onJoin} idPrefix="footer" />
           </div>
-          <p className="mt-6 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-            Open source (AGPL-3.0) · Self-host anytime · Export to Obsidian
-          </p>
         </div>
       </section>
 
-      <footer className="mx-auto flex w-full max-w-7xl flex-col gap-3 px-6 py-8 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between lg:px-10 2xl:max-w-[88rem]">
-        <span>Trove. Memory infrastructure for agents.</span>
-        <a href="https://github.com/anunay999/trove" target="_blank" rel="noreferrer noopener" className="font-medium text-foreground transition-colors hover:text-[var(--signal)]">
-          View source on GitHub
-        </a>
+      <footer className="mx-auto flex w-full max-w-5xl flex-col gap-3 px-6 py-8 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+        <span>Trove &middot; open source</span>
+        <span className="flex items-center gap-5">
+          <button type="button" onClick={onLogin} className="transition-colors hover:text-foreground">
+            Log in
+          </button>
+          <button type="button" onClick={onConnectKey} className="transition-colors hover:text-foreground">
+            Use an API key
+          </button>
+          <a href="https://github.com/anunay999/trove" target="_blank" rel="noreferrer noopener" className="transition-colors hover:text-foreground">
+            GitHub
+          </a>
+        </span>
       </footer>
     </main>
   );

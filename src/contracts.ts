@@ -210,12 +210,18 @@ export const graphChatInputSchema = z.object({
   depth: z.number().int().min(0).max(2).default(1),
 });
 
+/** Which space a write lands in. Unset: the team when one is active, else private. */
+export const writeSpaceSchema = z.enum(["mine", "team"]).describe(
+  "Where this is saved. team: knowledge about shared work (a repo, service, customer, decision) that teammates' agents should know. mine: about this person (preferences, their workflow, opinions about colleagues). Default: team when a team is active, else mine. Credentials are refused for team.",
+);
+
 export const ingestInputSchema = z.object({
   kind: sourceKindSchema,
   title: z.string().min(1),
   uri: z.string().optional(),
   contentText: z.string().min(1),
   metadata: z.record(z.string(), z.unknown()).default({}),
+  space: writeSpaceSchema.optional(),
 });
 
 export const evidenceRefSchema = z.object({
@@ -269,6 +275,7 @@ export const rememberInputSchema = z.object({
   })).default([]),
   nodeId: z.string().uuid().optional(),
   slug: z.string().min(1).optional(),
+  space: writeSpaceSchema.optional(),
 });
 
 export const forgetInputSchema = z.object({
@@ -288,6 +295,18 @@ export const forgetInputSchema = z.object({
     message: "Provide edgeIds, nodeIds, slugs, or a query.",
   },
 );
+
+export const shareInputSchema = z.object({
+  nodeIds: z.array(z.string().uuid()).optional(),
+  slugs: z.array(z.string().min(1)).optional(),
+}).refine((value) => (value.nodeIds?.length ?? 0) + (value.slugs?.length ?? 0) > 0, {
+  message: "Provide nodeIds or slugs.",
+});
+
+export const shareableInputSchema = z.object({
+  limit: z.number().int().min(1).max(200).optional(),
+  offset: z.number().int().min(0).optional(),
+});
 
 export const readAnyInputSchema = z.object({
   id: z.string().uuid().optional(),
@@ -455,4 +474,6 @@ export type GrepInput = z.input<typeof grepInputSchema>;
 export type QuoteEvidenceRef = z.input<typeof quoteEvidenceRefSchema>;
 export type RememberInput = z.input<typeof rememberInputSchema>;
 export type ForgetInput = z.infer<typeof forgetInputSchema>;
+export type ShareInput = z.infer<typeof shareInputSchema>;
+export type ShareableInput = z.infer<typeof shareableInputSchema>;
 export type ReadAnyInput = z.infer<typeof readAnyInputSchema>;

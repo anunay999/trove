@@ -21,6 +21,8 @@ import {
   enqueueJobInputSchema,
   eventFeedInputSchema,
   forgetInputSchema,
+  shareInputSchema,
+  shareableInputSchema,
   graphChatInputSchema,
   grepInputSchema,
   ingestInputSchema,
@@ -40,7 +42,7 @@ import {
   searchInputSchema,
   updateInputSchema,
 } from "./contracts.js";
-import { forget, remember } from "./agentOps.js";
+import { forget, ingest, remember, TeamSpaceError } from "./agentOps.js";
 import {
   AuthError,
   applyImpersonation,
@@ -359,6 +361,7 @@ app.all("/mcp", async (context) => {
 // through to Hono's default handler as a bare 500 and the caller never saw
 // which field was wrong. Auth errors keep their own status codes above.
 app.onError((error, context) => {
+  if (error instanceof TeamSpaceError) return context.json({ error: error.code, message: error.message }, 400);
   if (error instanceof z.ZodError) {
     return context.json({
       error: "invalid_input",
@@ -609,7 +612,7 @@ app.post("/v1/ingest", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:ingest"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), ingestInputSchema);
-  return context.json(await store.ingest(input, operationContextFromAuth(auth)), 201);
+  return context.json(await ingest(store, input, operationContextFromAuth(auth)), 201);
 });
 
 app.post("/v1/capture", async (context) => {
@@ -639,6 +642,25 @@ app.post("/v1/forget", async (context) => {
   const input = await parseJsonOrThrow(context.req.json(), forgetInputSchema);
   return context.json(await forget(store, input, operationContextFromAuth(auth)));
 });
+
+app.post("/v1/shareable", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  if (auth instanceof Response) return auth;
+  if (!store.shareable) return context.json({ error: "teams_need_postgres" }, 501);
+  const input = await parseJsonOrThrow(context.req.json(), shareableInputSchema);
+  return context.json(await store.shareable(input, operationContextFromAuth(auth)));
+});
+
+for (const action of ["share", "unshare"] as const) {
+  app.post(`/v1/${action}`, async (context) => {
+    const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:capture"]);
+    if (auth instanceof Response) return auth;
+    const move = store[action];
+    if (!move) return context.json({ error: "teams_need_postgres" }, 501);
+    const input = await parseJsonOrThrow(context.req.json(), shareInputSchema);
+    return context.json(await move.call(store, input, operationContextFromAuth(auth)));
+  });
+}
 
 app.post("/v1/annotate", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:write:update"]);
@@ -815,6 +837,8 @@ app.get("/v1/me", async (context) => {
     mode: auth.mode,
     scopes: auth.scopes,
     identity: auth.identity ?? null,
+    // The tenant this caller's credentials act in (the dashboard's active Clerk org, else personal).
+    tenantId: auth.tenantId ?? null,
     // Set while an admin is viewing Trove as someone else; the dashboard shows
     // this account's graph and keys, and offers the way back.
     impersonating: auth.impersonating ?? null,

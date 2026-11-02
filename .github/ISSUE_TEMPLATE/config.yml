@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/anunay999/trove/security/advisories/new
+    about: Please report these privately, not as a public issue.
