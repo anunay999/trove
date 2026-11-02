@@ -129,8 +129,8 @@
     --sidebar-ring: #c3c2b7;
     --signal: #e3a15f;
     --signal-strong: #9a5d27;
-    --cta-bg: #171716;
-    --cta-fg: #f7f6f3;
+    --cta-bg: #10b981;
+    --cta-fg: #08090c;
 }
 
 .dark {
@@ -167,8 +167,6 @@
     --sidebar-ring: #52514e;
     --signal: #dda064;
     --signal-strong: #e5b27e;
-    --cta-bg: #dda064;
-    --cta-fg: #19130f;
 }
 
 @layer base {
@@ -209,8 +207,6 @@
   --ring: #4c5057;
   --signal: #10b981;
   --signal-strong: #a7f3d0;
-  --cta-bg: #ecebe5;
-  --cta-fg: #08090c;
 
   color: var(--foreground);
 }
