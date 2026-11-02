@@ -4,7 +4,7 @@
 
 <h1 align="center">Trove</h1>
 
-<p align="center"><strong>A memory that your AI agents keep, so you don't have to.</strong></p>
+<p align="center"><strong>Context that keeps getting better.</strong><br />Open-source MCP memory server: one shared, sourced memory for Claude Code, Codex, Cursor and any MCP client.</p>
 
 <p align="center">
   <a href="https://github.com/anunay999/trove/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/anunay999/trove/actions/workflows/ci.yml/badge.svg" /></a>
@@ -25,7 +25,7 @@
 
 ---
 
-Trove is a hosted knowledge graph for agent memory. Claude, Codex, and any MCP-capable agent can write what they learn into it and recall it in later sessions — with every fact traceable back to the source text that justifies it. Your notes stay inspectable, contradictions are superseded instead of overwritten, and the whole graph is browsable in a built-in dashboard.
+Trove is an open-source MCP server that gives your AI agents long-term memory in a shared knowledge graph. Use it hosted at [mytrove.in](https://mytrove.in) or self-host it. Claude, Codex, Cursor and any other MCP-capable agent can write what they learn into it and recall it in later sessions — with every fact traceable back to the source text that justifies it. Your notes stay inspectable, contradictions are superseded instead of overwritten, and the whole graph is browsable in a built-in dashboard.
 
 ## Connect your agent
 
@@ -39,7 +39,7 @@ claude mcp add trove --transport http https://mytrove.in/mcp \
 
 Running your own instance? Use `http://localhost:8787/mcp` (no key needed when auth is disabled). For the claude.ai / Claude Desktop **Connectors** panel, add `https://mytrove.in/mcp` and sign in with Clerk — see [docs/oauth.md](docs/oauth.md).
 
-Your agent gets a small verb-per-job toolset: `remember`, `recall`, `grep`, `read`, `connect`, `forget` (plus `ingest` and curation tools for write-scoped keys). Nothing else to pass — each credential is scoped to its own private graph automatically.
+Your agent gets a small verb-per-job toolset: `remember`, `recall`, `grep`, `read`, `connect`, `forget` (plus `ingest` and curation tools for write-scoped keys). Nothing else to pass — your key already points at your own graph, so all your agents share it.
 
 **How agents should use it** — not as an end-of-day diary, but as working memory: load before re-deriving, capture mid-session, many small linked atoms. See **[docs/agent-usage.md](docs/agent-usage.md)**. The same doctrine is also on the MCP server (`instructions`, resource `trove://doctrine`, tool descriptions).
 
@@ -50,9 +50,6 @@ npx skills add anunay999/trove -g
 ```
 
 Every skill is also served by the API, so any agent can be told to read one and follow it: the index is at [mytrove.in/skills.md](https://mytrove.in/skills.md) (and `/llms.txt`), each file at `/skills/<name>.md`. The same procedures are exposed as MCP prompts, e.g. `/mcp__trove__trove-curate` in Claude Code cleans up your graph from inside the session.
-
-```
-```
 
 Full setup — keys, scopes, stdio, importing a vault — is in [docs/quickstart.md](docs/quickstart.md).
 
@@ -67,7 +64,7 @@ Full setup — keys, scopes, stdio, importing a vault — is in [docs/quickstart
 ## How it works
 
 Trove is an **evidence graph**: sourced facts trace back to cited text, while evidence-free conclusions stay visibly marked as agent inference.
-<img width="550" height="409" alt="image" src="https://github.com/user-attachments/assets/d19b60e1-086a-48ff-9522-31e518ec0f06" />
+<img width="550" height="409" alt="A Trove memory graph in the dashboard: coloured notes joined by links" src="https://github.com/user-attachments/assets/d19b60e1-086a-48ff-9522-31e518ec0f06" />
 
 
 
@@ -123,6 +120,6 @@ Trove ships a production Dockerfile (API + dashboard in one image) and a `railwa
 
 ## Contributing & license
 
-Pull requests are welcome — CI runs typecheck, the store test suites, and the web build, and `main` requires a reviewed PR. Please don't include secrets or real connection strings in a diff. Security issues: see [SECURITY.md](SECURITY.md).
+Pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). CI runs typecheck, the store test suites, and the web build, and `main` requires a reviewed PR. Please don't include secrets or real connection strings in a diff. Security issues: see [SECURITY.md](SECURITY.md).
 
 Licensed under the [GNU AGPL-3.0](LICENSE). You're free to use, modify, and self-host Trove; if you run a modified version as a network service, you must make your source available under the same license.

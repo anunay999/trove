@@ -2,6 +2,25 @@
   "name": "trove",
   "version": "0.1.0",
   "private": true,
+  "description": "Open-source MCP memory server: one shared, sourced memory for Claude Code, Codex, Cursor and any MCP client.",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "ai-memory",
+    "agent-memory",
+    "knowledge-graph",
+    "claude-code",
+    "codex",
+    "cursor"
+  ],
+  "homepage": "https://mytrove.in",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anunay999/trove.git"
+  },
+  "bugs": "https://github.com/anunay999/trove/issues",
+  "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
     "postinstall": "node -e \"if(require('fs').existsSync('web/package.json'))require('child_process').execSync('npm --prefix web install --no-audit --no-fund',{stdio:'inherit'})\"",
