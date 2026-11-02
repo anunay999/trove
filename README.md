@@ -20,7 +20,8 @@
   <a href="docs/quickstart.md">Quickstart</a> ·
   <a href="docs/agent-usage.md">Agent usage</a> ·
   <a href="docs/mcp.md">MCP tools</a> ·
-  <a href="docs/oauth.md">OAuth connector</a>
+  <a href="docs/oauth.md">OAuth connector</a> ·
+  <a href="llms.txt">llms.txt</a>
 </p>
 
 ---

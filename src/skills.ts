@@ -118,24 +118,29 @@ export function skillsIndexMarkdown(baseUrl: string): string {
   return lines.join("\n");
 }
 
-/** `GET /llms.txt`: the llms.txt convention, pointing at the skills and the MCP endpoint. */
+// llms.txt links should be markdown, so these are raw files rather than GitHub's HTML pages.
+const DOCS = "https://raw.githubusercontent.com/anunay999/trove/main/docs";
+
+/** `GET /llms.txt`: the llms.txt convention, pointing at the MCP endpoint, docs and skills. */
 export function llmsTxt(baseUrl: string): string {
   const base = baseUrl.replace(/\/+$/, "");
   const lines = [
     "# Trove",
     "",
-    "> Trove is an open-source memory graph for AI agents: typed notes with evidence citations,",
-    "> bitemporal edges, and budgeted recall, exposed over the Model Context Protocol.",
+    "> Trove is an open-source MCP memory server: one shared memory for Claude Code, Codex, Cursor and any other MCP client. Every fact shows its source, and stale facts get replaced. Hosted at https://mytrove.in, or self-host it (AGPL-3.0).",
+    "",
+    "Agents load what is known with `recall`, `grep` and `read`, and save or correct it with `remember`, `ingest`, `connect` and `forget`.",
     "",
     "## Connect",
     "",
-    `- [MCP endpoint](${base}/mcp): Streamable HTTP, Bearer auth with a trove_* API key.`,
+    `- [MCP endpoint](${base}/mcp): Streamable HTTP. Send a trove_* API key as a Bearer token, or sign in with OAuth where the server has it enabled.`,
     "",
     "## Docs",
     "",
-    "- [Source code](https://github.com/anunay999/trove): AGPL-3.0, self-hostable.",
-    "- [Quickstart](https://github.com/anunay999/trove/blob/main/docs/quickstart.md): keys, connecting agents, local setup.",
-    "- [MCP tools](https://github.com/anunay999/trove/blob/main/docs/mcp.md): full tool and resource reference.",
+    `- [Quickstart](${DOCS}/quickstart.md): keys, connecting agents, local setup, importing notes.`,
+    `- [Agent usage](${DOCS}/agent-usage.md): how agents should use Trove as working memory.`,
+    `- [MCP tools](${DOCS}/mcp.md): full tool and resource reference.`,
+    `- [OAuth connector](${DOCS}/oauth.md): connecting claude.ai and Claude Desktop.`,
     "",
     "## Skills",
     "",
@@ -143,6 +148,18 @@ export function llmsTxt(baseUrl: string): string {
   for (const skill of listSkills()) {
     lines.push(`- [${skill.name}](${base}/skills/${skill.name}.md): ${skill.description}`);
   }
-  lines.push("", `- [All skills](${base}/skills.md)`, "");
+  lines.push(
+    "",
+    `- [All skills](${base}/skills.md)`,
+    "",
+    "## Optional",
+    "",
+    "- [Source code](https://github.com/anunay999/trove): the GitHub repository.",
+    `- [HTTP API](${DOCS}/agent-api.md): the HTTP API contract.`,
+    `- [CLI](${DOCS}/cli.md): the reference CLI.`,
+    `- [Deployment](${DOCS}/deployment.md): self-hosting with Docker, Railway and Postgres.`,
+    `- [Architecture](${DOCS}/architecture.md): how the system fits together.`,
+    "",
+  );
   return lines.join("\n");
 }

@@ -1,0 +1,35 @@
+# Trove
+
+> Trove is an open-source MCP memory server: one shared memory for Claude Code, Codex, Cursor and any other MCP client. Every fact shows its source, and stale facts get replaced. Hosted at https://mytrove.in, or self-host it (AGPL-3.0).
+
+Agents load what is known with `recall`, `grep` and `read`, and save or correct it with `remember`, `ingest`, `connect` and `forget`.
+
+## Connect
+
+- [MCP endpoint](https://mytrove.in/mcp): Streamable HTTP. Send a trove_* API key as a Bearer token, or sign in with OAuth where the server has it enabled.
+
+## Docs
+
+- [Quickstart](https://raw.githubusercontent.com/anunay999/trove/main/docs/quickstart.md): keys, connecting agents, local setup, importing notes.
+- [Agent usage](https://raw.githubusercontent.com/anunay999/trove/main/docs/agent-usage.md): how agents should use Trove as working memory.
+- [MCP tools](https://raw.githubusercontent.com/anunay999/trove/main/docs/mcp.md): full tool and resource reference.
+- [OAuth connector](https://raw.githubusercontent.com/anunay999/trove/main/docs/oauth.md): connecting claude.ai and Claude Desktop.
+
+## Skills
+
+- [trove](https://mytrove.in/skills/trove.md): Use the Trove hosted memory graph (MCP server "trove") to recall prior work, decisions, preferences, and system knowledge before re-deriving them, and to save durable new facts back. Trigger whenever a question touches past projects, "how does my setup work", preferences, decision history, or when a session produces a decision or fact worth remembering. Routes to the trove-recall, trove-remember, trove-ingest, and trove-lint skills; the mcp__trove__* tools (remember, recall, grep, read, connect, forget) are the interface.
+- [trove-curate](https://mytrove.in/skills/trove-curate.md): Use to clean up and maintain a Trove memory graph from inside an agent session - merge duplicates, record supersession, retire stale beliefs, tighten summaries - using the session's own model as the judge. Bounded passes, reversible actions only, proposals for anything destructive. Trigger on "clean up my trove", "make my graph healthy", after a burst of captures, or weekly.
+- [trove-ingest](https://mytrove.in/skills/trove-ingest.md): Use when the user shares a source (URL, file path, paste, transcript) that should be indexed into the Trove memory graph. Stores the raw evidence first via ingest, then remembers semantic atoms citing exact text units.
+- [trove-lint](https://mytrove.in/skills/trove-lint.md): Use to health-check the Trove memory graph - orphan nodes, missing evidence, duplicate titles, dangling edges, judged duplicates and contradictions. Interprets lint findings, separates real issues from noise, and proposes fixes (linking passes, evidence backfill, merges) without auto-applying them.
+- [trove-recall](https://mytrove.in/skills/trove-recall.md): Use when a question should be answered from the Trove memory graph rather than re-derived - prior projects, decisions, system knowledge, preferences, "what was I working on". Routes grep → read → recall by query shape (exact string, known slug, open question), synthesizes with citations, and remembers non-trivial answers back so exploration compounds.
+- [trove-remember](https://mytrove.in/skills/trove-remember.md): Save durable knowledge into the Trove memory graph — new facts, decisions, gotchas, AND corrections to known facts. Replaces the old trove-capture and trove-update skills; the remember tool handles create-vs-revise itself. Trigger after a session produced insight worth keeping, when the user states a fact or preference to remember, or when a known fact changed (PR merged, port moved, X replaced Y).
+
+- [All skills](https://mytrove.in/skills.md)
+
+## Optional
+
+- [Source code](https://github.com/anunay999/trove): the GitHub repository.
+- [HTTP API](https://raw.githubusercontent.com/anunay999/trove/main/docs/agent-api.md): the HTTP API contract.
+- [CLI](https://raw.githubusercontent.com/anunay999/trove/main/docs/cli.md): the reference CLI.
+- [Deployment](https://raw.githubusercontent.com/anunay999/trove/main/docs/deployment.md): self-hosting with Docker, Railway and Postgres.
+- [Architecture](https://raw.githubusercontent.com/anunay999/trove/main/docs/architecture.md): how the system fits together.
