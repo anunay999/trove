@@ -49,6 +49,18 @@ on conflict (tenant_id, user_id) where kind = 'private' do nothing;
 update app_user set active_tenant_id = (select id from target)
 where active_tenant_id is distinct from (select id from target);
 
+-- A session on this org before the run makes empty spaces here, and the guards above would then
+-- skip the real ones. Stop rather than leave anyone's notes behind in their personal tenant.
+do $$
+declare stranded int;
+begin
+  select count(*) into stranded from space s join app_user u on u.id = s.id
+  where s.tenant_id <> (select id from target);
+  if stranded > 0 then
+    raise exception '% existing spaces would stay outside the tenant; nothing changed', stranded;
+  end if;
+end $$;
+
 select (select count(*) from tenant_member where tenant_id = (select id from target)) as members,
        (select count(*) from space where tenant_id = (select id from target) and kind = 'private') as private_spaces,
        (select count(*) from space where tenant_id = (select id from target) and kind = 'shared') as shared_spaces,
