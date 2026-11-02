@@ -28,6 +28,10 @@
 
 Trove is an open-source MCP server that gives your AI agents long-term memory in a shared knowledge graph. Use it hosted at [mytrove.in](https://mytrove.in) or self-host it. Claude, Codex, Cursor and any other MCP-capable agent can write what they learn into it and recall it in later sessions — with every fact traceable back to the source text that justifies it. Your notes stay inspectable, contradictions are superseded instead of overwritten, and the whole graph is browsable in a built-in dashboard.
 
+<p align="center">
+  <img src=".github/demo.gif" width="800" alt="The Trove dashboard, shown with sample notes: clicking the note 'Refunds within 14 days' in the memory graph opens its summary and links" />
+</p>
+
 ## Connect your agent
 
 Point any MCP-capable agent at Trove and it reads and writes your graph across sessions. Create an API key on the dashboard at **[mytrove.in](https://mytrove.in)**, then:
