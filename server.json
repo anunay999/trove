@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.anunay999/trove",
+  "title": "Trove",
+  "description": "Shared memory for your AI agents. Every fact shows its source, and stale facts get replaced.",
+  "websiteUrl": "https://mytrove.in",
+  "repository": {
+    "url": "https://github.com/anunay999/trove",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mytrove.in/mcp"
+    }
+  ]
+}

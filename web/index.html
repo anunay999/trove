@@ -4,52 +4,46 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Trove is an open-source, self-hostable memory layer for persistent AI agents — built to preserve context, connect the dots, and make every remembered fact inspectable." />
+    <meta name="description" content="Open-source MCP memory server for Claude Code, Codex and Cursor. One shared memory: every fact shows its source, and stale facts get replaced." />
     <meta name="theme-color" content="#08090c" />
-    <meta property="og:title" content="Trove — evidence-backed memory for AI agents" />
-    <meta property="og:description" content="Your agent remembers. Its sources come with it. An open-source memory layer for AI agents — every remembered fact inspectable, every change on the record." />
+    <link rel="canonical" href="https://mytrove.in/" />
+    <link rel="describedby" href="/llms.txt" />
+    <meta property="og:site_name" content="Trove" />
+    <meta property="og:title" content="Trove: context that keeps getting better" />
+    <meta property="og:description" content="Open-source MCP memory server. Your AI agents share one memory: every fact shows its source, and stale facts get replaced." />
     <meta property="og:type" content="website" />
-    <title>Trove | Memory infrastructure for AI agents</title>
+    <meta property="og:url" content="https://mytrove.in/" />
+    <meta property="og:image" content="https://mytrove.in/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Trove: context that keeps getting better" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <title>Trove: shared memory for your AI agents | Open-source MCP server</title>
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
-        "@type": "FAQPage",
-        "mainEntity": [
-          {
-            "@type": "Question",
-            "name": "What exactly is an evidence graph?",
-            "acceptedAnswer": { "@type": "Answer", "text": "Each memory in Trove cites the exact source text that justifies it; conclusions without a source stay marked as agent inference, and a linter flags evidence-free nodes." }
-          },
-          {
-            "@type": "Question",
-            "name": "Which agents can use Trove?",
-            "acceptedAnswer": { "@type": "Answer", "text": "Anything that speaks MCP: Claude Code, Codex, Cursor, or claude.ai via the OAuth connector. Tools are remember, recall, grep, read, connect, forget." }
-          },
-          {
-            "@type": "Question",
-            "name": "What happens when a fact changes?",
-            "acceptedAnswer": { "@type": "Answer", "text": "Old beliefs are superseded, never overwritten. Edges expire with recorded history, so you can ask what the graph believed at any point in time." }
-          },
-          {
-            "@type": "Question",
-            "name": "Do I have to trust the hosted service?",
-            "acceptedAnswer": { "@type": "Answer", "text": "No. Trove is AGPL-3.0 open source with a production Dockerfile; self-host on Railway plus Supabase Postgres and export your graph to Obsidian anytime." }
-          },
-          {
-            "@type": "Question",
-            "name": "Can several agents share one graph safely?",
-            "acceptedAnswer": { "@type": "Answer", "text": "Every credential is scoped to its own private graph automatically, keys are tiered read-only/write/admin, and every call is scope-checked server-side." }
-          },
-          {
-            "@type": "Question",
-            "name": "How does recall stay within my token budget?",
-            "acceptedAnswer": { "@type": "Answer", "text": "Hybrid lexical and semantic search seeds a one-hop graph expansion; candidates ranked by relevance plus recency and frequency fill the budget you set." }
-          }
-        ]
+        "@type": "SoftwareApplication",
+        "name": "Trove",
+        "description": "Open-source MCP memory server. AI agents share one memory: every fact shows its source, and stale facts get replaced.",
+        "url": "https://mytrove.in/",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Any",
+        "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+        "sameAs": ["https://github.com/anunay999/trove"]
       }
     </script>
   </head>
   <body>
+    <noscript>
+      <h1>Trove: context that keeps getting better</h1>
+      <p>Trove is an open-source MCP memory server. Claude Code, Codex, Cursor and any other MCP client share one memory: every fact shows its source, and stale facts get replaced.</p>
+      <ul>
+        <li><a href="https://github.com/anunay999/trove">Source code on GitHub</a></li>
+        <li><a href="https://github.com/anunay999/trove/blob/main/docs/quickstart.md">Quickstart</a></li>
+        <li><a href="https://github.com/anunay999/trove/blob/main/docs/mcp.md">MCP tools</a></li>
+        <li><a href="/llms.txt">llms.txt</a></li>
+      </ul>
+    </noscript>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
