@@ -34,6 +34,15 @@ export type ResolvedApiKey = {
   status: AppUser["status"];
 };
 
+export type Spaces = {
+  /** Null only if the user has no personal tenant row. */
+  tenantId: string | null;
+  /** Null for the personal tenant. */
+  clerkOrgId: string | null;
+  ownerId: string;
+  sharedOwnerIds: string[];
+};
+
 export function generateApiKey(): { secret: string; prefix: string; hash: string } {
   const secret = `trove_${randomBytes(20).toString("hex")}`;
   return { secret, prefix: secret.slice(0, 12), hash: sha256(secret) };
@@ -121,6 +130,90 @@ export class UserStore {
       "select id from app_user where role = 'admin' order by created_at asc limit 1",
     );
     return admin.rowCount ? String(admin.rows[0].id) : undefined;
+  }
+
+  /**
+   * The spaces a user's credentials act in: their private space in the active
+   * tenant (writes) plus that tenant's shared space (reads). No active tenant,
+   * or no longer a member of it, means the personal tenant.
+   */
+  async spacesFor(userId: string): Promise<Spaces> {
+    const result = await this.pool.query(
+      `select t.id as tenant_id, t.clerk_org_id, p.id as private_id, s.id as shared_id
+       from app_user u
+       join tenant t on t.id = u.active_tenant_id
+       join tenant_member m on m.tenant_id = t.id and m.user_id = u.id
+       join space p on p.tenant_id = t.id and p.kind = 'private' and p.user_id = u.id
+       left join space s on s.tenant_id = t.id and s.kind = 'shared'
+       where u.id = $1`,
+      [userId],
+    );
+    const row = result.rows[0];
+    if (!row) {
+      const personal = await this.pool.query("select id from tenant where personal_user_id = $1", [userId]);
+      return { tenantId: personal.rows[0] ? String(personal.rows[0].id) : null, clerkOrgId: null, ownerId: userId, sharedOwnerIds: [] };
+    }
+    return {
+      tenantId: String(row.tenant_id),
+      clerkOrgId: String(row.clerk_org_id),
+      ownerId: String(row.private_id),
+      sharedOwnerIds: row.shared_id ? [String(row.shared_id)] : [],
+    };
+  }
+
+  /** Make a Clerk organization the user's active tenant, provisioning its rows on first sight. */
+  async joinOrg(userId: string, org: { clerkOrgId: string; name: string; role: "admin" | "member" }): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const tenant = await client.query(
+        `insert into tenant (clerk_org_id, name) values ($1, $2)
+         on conflict (clerk_org_id) do update set name = excluded.name
+         returning id`,
+        [org.clerkOrgId, org.name],
+      );
+      const tenantId = tenant.rows[0].id;
+      await client.query(
+        `insert into tenant_member (tenant_id, user_id, role) values ($1, $2, $3)
+         on conflict (tenant_id, user_id) do update set role = excluded.role`,
+        [tenantId, userId, org.role],
+      );
+      await client.query(
+        `insert into space (tenant_id, kind, user_id) values ($1, 'private', $2)
+         on conflict (tenant_id, user_id) where kind = 'private' do nothing`,
+        [tenantId, userId],
+      );
+      await client.query(
+        `insert into space (tenant_id, kind) values ($1, 'shared')
+         on conflict (tenant_id) where kind = 'shared' do nothing`,
+        [tenantId],
+      );
+      await client.query("update app_user set active_tenant_id = $2 where id = $1", [userId, tenantId]);
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async usePersonalSpace(userId: string): Promise<void> {
+    await this.pool.query("update app_user set active_tenant_id = null where id = $1", [userId]);
+  }
+
+  /** The user left (or was removed from) a Clerk organization. Their private space stays with the tenant. */
+  async removeMembership(userId: string, clerkOrgId: string): Promise<void> {
+    await this.pool.query(
+      `delete from tenant_member m using tenant t
+       where m.tenant_id = t.id and t.clerk_org_id = $2 and m.user_id = $1`,
+      [userId, clerkOrgId],
+    );
+    await this.pool.query(
+      `update app_user u set active_tenant_id = null
+       from tenant t where t.id = u.active_tenant_id and t.clerk_org_id = $2 and u.id = $1`,
+      [userId, clerkOrgId],
+    );
   }
 
   async approveUser(clerkUserId: string, approvedById: string): Promise<AppUser | null> {
