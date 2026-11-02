@@ -141,9 +141,10 @@ export function createClerkResolver(users: UserStore): NonNullable<AuthResolvers
       role: user.role,
       status: user.status,
     };
-    // The dashboard's active org is the tenant every credential of this user acts in.
+    // The dashboard's active org is the tenant every credential of this user acts in. A session
+    // with no org keeps the stored tenant, since Clerk can leave the active org unset at sign-in.
+    // ponytail: no way back to personal until the team switcher calls usePersonalSpace.
     if (org) await users.joinOrg(user.id, { clerkOrgId: org.clerkOrgId, name: org.slug ?? org.clerkOrgId, role: org.role });
-    else await users.usePersonalSpace(user.id);
     const spaces = toResolvedSpaces(await users.spacesFor(user.id));
     cacheIdentity(cache, cacheKey, { identity, spaces }, CACHE_TTL_MS);
     return { actorId: sub, scopes: scopesFor(identity), identity, spaces };

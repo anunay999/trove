@@ -12,6 +12,7 @@ import {
   RERANK_MAX_CANDIDATES,
   type Reranker,
 } from "./rerank.js";
+import type { ShareInput, ShareableInput } from "./contracts.js";
 import type {
   AnnotateInput,
   CaptureInput,
@@ -768,7 +769,22 @@ export type ProjectResult =
   | { format: "mind_map"; nodes: GraphNode[]; edges: GraphEdge[] }
   | { format: "agent_context"; context: string; evidence: TextUnit[] };
 
+/** Notes moved between a member's private space and the team space. */
+export type SpaceMoveResult = {
+  moved: Array<{ id: string; slug: string; title: string }>;
+  skipped: Array<{ ref: string; reason: string }>;
+};
+
+export type ShareableResult = {
+  total: number;
+  notes: Array<{ id: string; slug: string; title: string; summary: string | null; updatedAt: string; looksLikeCredential: boolean }>;
+};
+
 export type GraphStore = {
+  /** Teams live in Postgres only; the memory store leaves these out. */
+  shareable?(input: ShareableInput, context?: GraphOperationContext): Promise<ShareableResult>;
+  share?(input: ShareInput, context?: GraphOperationContext): Promise<SpaceMoveResult>;
+  unshare?(input: ShareInput, context?: GraphOperationContext): Promise<SpaceMoveResult>;
   ingest(input: IngestInput, context?: GraphOperationContext): MaybePromise<{ source: GraphSource; textUnits: TextUnit[] }>;
   sources(input?: { limit?: number }, context?: GraphOperationContext): MaybePromise<GraphSourceOverview[]>;
   readSource(input: { sourceId: string }, context?: GraphOperationContext): MaybePromise<GraphSourceDocument | null>;

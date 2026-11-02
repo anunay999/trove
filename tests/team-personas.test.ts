@@ -215,4 +215,73 @@ describe("team personas over HTTP and MCP", { skip: databaseUrl ? false : "requi
       await transport.close();
     }
   });
+
+  let sharedSlug = "";
+
+  it("a member shares an old private note, and only then do teammates see it, vectors included", async () => {
+    const note = await call("bob", "/v1/remember", { title: `Release checklist ${MARK}`, summary: `Tag, wait for CI, then promote ${MARK}.`, space: "mine" });
+    sharedSlug = note.json.node.slug;
+    for (let i = 0; i < 50 && (await store.runJob({})); i++);
+    assert.ok(!(await recallIds("alice", `release checklist ${MARK}`)).includes(note.json.node.id), "alice saw it before it was shared");
+    const listed = await call("bob", "/v1/shareable", { limit: 200 });
+    assert.ok(listed.json.notes.some((n: { slug: string }) => n.slug === sharedSlug), "shareable did not list bob's private note");
+    const shared = await call("bob", "/v1/share", { slugs: [sharedSlug] });
+    assert.equal(shared.status, 200, JSON.stringify(shared.json));
+    assert.deepEqual(shared.json.moved.map((m: { slug: string }) => m.slug), [sharedSlug]);
+    assert.ok((await recallIds("alice", `Tag, wait for CI, then promote ${MARK}.`)).includes(note.json.node.id), "alice cannot recall the shared note");
+    assert.ok(!(await recallIds("carol", `Tag, wait for CI, then promote ${MARK}.`)).includes(note.json.node.id), "another team saw the shared note");
+    const vectors = await pool.query(
+      `select count(*)::int n, count(*) filter (where tenant_id = $2)::int team from embedding
+       where (owner_table = 'node' and owner_id = $1) or (owner_table = 'node_revision' and owner_id in (select id from node_revision where node_id = $1))`,
+      [note.json.node.id, teamSpaceId],
+    );
+    assert.ok(vectors.rows[0].n > 0 && vectors.rows[0].n === vectors.rows[0].team, "the note's vectors did not move to the team");
+  });
+
+  it("a note that looks like a credential is not shared", async () => {
+    const note = await call("bob", "/v1/remember", { title: `Staging DB ${MARK}`, summary: "postgresql://ro.user:Zx81QWERtyuiop12AsdfGhjk@db.example.com:6432/app", space: "mine" });
+    const listed = await call("bob", "/v1/shareable", { limit: 200 });
+    assert.equal(listed.json.notes.find((n: { slug: string }) => n.slug === note.json.node.slug)?.looksLikeCredential, true);
+    const shared = await call("bob", "/v1/share", { slugs: [note.json.node.slug] });
+    assert.equal(shared.json.moved.length, 0);
+    assert.match(shared.json.skipped[0].reason, /credential/);
+    const owner = await pool.query("select owner_id from node where id = $1", [note.json.node.id]);
+    assert.equal(String(owner.rows[0].owner_id), (await users.spacesFor(ids.bob!)).ownerId);
+  });
+
+  it("only the sharer or an admin takes a note back; written-to-team notes have nowhere to go", async () => {
+    const byEve = await call("eve", "/v1/unshare", { slugs: [sharedSlug] });
+    assert.equal(byEve.json.moved.length, 0);
+    assert.match(byEve.json.skipped[0].reason, /only the person who shared it/);
+    const teamNative = await call("alice", "/v1/unshare", { nodeIds: [teamNoteId] });
+    assert.match(teamNative.json.skipped[0].reason, /written straight to the team/);
+    const byBob = await call("bob", "/v1/unshare", { slugs: [sharedSlug] });
+    assert.equal(byBob.json.moved.length, 1, JSON.stringify(byBob.json));
+    assert.ok(!(await recallIds("alice", `Tag, wait for CI, then promote ${MARK}.`)).includes(byBob.json.moved[0].id), "alice still sees the unshared note");
+    const owner = await pool.query("select owner_id, metadata from node where id = $1", [byBob.json.moved[0].id]);
+    assert.equal(String(owner.rows[0].owner_id), (await users.spacesFor(ids.bob!)).ownerId);
+    assert.equal(owner.rows[0].metadata.sharedFrom, undefined);
+  });
+
+  it("sharing without a team says why", async () => {
+    const result = await call("sam", "/v1/share", { slugs: ["anything"] });
+    assert.equal(result.status, 400);
+    assert.equal(result.json.error, "no_team");
+  });
+
+  it("an MCP client gets the share tools", async () => {
+    const client = new Client({ name: "persona-mcp-share", version: "0.1.0" });
+    const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${keys.bob}` } },
+    });
+    await client.connect(transport);
+    try {
+      const tools = (await client.request({ method: "tools/list", params: {} })).tools as Array<{ name: string }>;
+      for (const name of ["shareable", "share", "unshare"]) assert.ok(tools.some((tool) => tool.name === name), `missing ${name}`);
+      const result = await client.request({ method: "tools/call", params: { name: "shareable", arguments: { limit: 5 } } });
+      assert.ok(JSON.parse((result.content as Array<{ text: string }>)[0]!.text).total > 0);
+    } finally {
+      await transport.close();
+    }
+  });
 });
