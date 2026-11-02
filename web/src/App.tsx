@@ -322,7 +322,10 @@ export default function App() {
             showLanding ? "mx-auto max-w-7xl 2xl:max-w-[88rem]" : ""
           }`}
         >
-          <span className="shrink-0 font-serif text-xl tracking-tight sm:flex-1">Trove</span>
+          <span className="flex shrink-0 items-center gap-2 font-serif text-xl tracking-tight sm:flex-1">
+            <img src="/favicon.svg?v=2" alt="" className="size-5" />
+            Trove
+          </span>
           {dashboardReady && (
             <nav className="order-last -mx-6 flex w-[calc(100%+3rem)] items-center gap-1 overflow-x-auto px-6 py-1 [scrollbar-width:none] sm:order-none sm:mx-0 sm:w-auto sm:min-w-0 sm:shrink sm:justify-center sm:px-0 [&::-webkit-scrollbar]:hidden">
               {tabs.map((candidate) => (
@@ -393,7 +396,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={openLogin}
-                className="h-8 rounded-md bg-primary px-3.5 text-[13px] font-medium text-primary-foreground transition-transform active:scale-[0.98]"
+                className="h-8 rounded-md bg-[var(--cta-bg)] px-3.5 text-[13px] font-medium text-[var(--cta-fg)] transition-transform active:scale-[0.98]"
               >
                 Log in
               </button>
@@ -439,7 +442,7 @@ export default function App() {
           <button
             type="button"
             onClick={openLogin}
-            className="mt-5 h-9 w-full rounded-md bg-primary text-sm font-medium text-primary-foreground transition-transform active:scale-[0.98]"
+            className="mt-5 h-9 w-full rounded-md bg-[var(--cta-bg)] text-sm font-medium text-[var(--cta-fg)] transition-transform active:scale-[0.98]"
           >
             Log in
           </button>

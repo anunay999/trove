@@ -38,7 +38,10 @@ export function LoginDrawer({ open, mode, onClose, dark, prefillEmail }: {
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-background/20 via-background/55 to-background/85" />
 
         <div className="relative z-10 flex items-center justify-between px-6 pt-5">
-          <span className="font-serif text-lg tracking-tight">Trove</span>
+          <span className="flex items-center gap-2 font-serif text-lg tracking-tight">
+            <img src="/favicon.svg?v=2" alt="" className="size-5" />
+            Trove
+          </span>
           <button
             type="button"
             onClick={onClose}

@@ -29,7 +29,7 @@ export function AuthControls({ onOpenLogin, onSessionChange, dark }: {
         <button
           type="button"
           onClick={onOpenLogin}
-          className="h-8 rounded-md bg-primary px-3.5 text-[13px] font-medium text-primary-foreground transition-transform active:scale-[0.98]"
+          className="h-8 rounded-md bg-[var(--cta-bg)] px-3.5 text-[13px] font-medium text-[var(--cta-fg)] transition-transform active:scale-[0.98]"
         >
           Log in
         </button>
