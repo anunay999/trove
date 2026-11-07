@@ -60,25 +60,25 @@ is in `results-*.md`.
 |---|---|---|---|---|
 | notes (Trove today) | 49.0% | 11.2% | 33.9% (29.0%) | 276 |
 | + transcripts (cited) | 49.0% | 11.2% | 33.9% | 267 |
-| + dreaming | 58.9% | 5.0% | 31.5% | 249 |
-| + injected index | **77.1%** | 6.1% | 11.0% (8.5%) | 371 |
+| + dreaming | 59.4% | 5.0% | 31.5% | 249 |
+| + injected index | **76.3%** | 6.1% | 11.0% (8.5%) | 371 |
 | + entity pages (+search) | **80.2%** | 4.4% | 12.4% | 440 |
 | *index only, no dreaming* | 61.5% | **14.1%** | 16.6% | 394 |
 
 **Transcripts alone buy nothing** at answer time. They are the substrate that
 dreaming reads, which matches the article. **The index alone raises staleness**
 (11% → 14%): an agent that reads more also reads more dirty notes. **Dreaming
-cleans what the index exposes.** Separately they add +12.5 and +10 points;
-together they add **+28**.
+cleans what the index exposes.** Separately they add about +12.5 and +10 points;
+together they add about **+27**.
 
 ### S1c · A real bug, and what fixing it is worth
 
 | agent · stack | Trove today | with fix |
 |---|---|---|
 | strong · notes | 77.8% | 80.8% |
-| strong · full stack | 82.1% | **91.2%** |
-| mid · full stack | 69.8% | **76.2%** |
-| weak · full stack | 53.6% | 54.1% |
+| strong · full stack | 81.6% | **91.3%** |
+| mid · full stack | 70.5% | **76.4%** |
+| weak · full stack | 52.8% | 54.1% |
 
 The richer the stack, the more the bug costs, because dreaming creates both
 supersede edges and revisions. See §4.1.
@@ -87,9 +87,9 @@ supersede edges and revisions. See §4.1.
 
 | agent | notes | + index | + dream | full | biggest single lever |
 |---|---|---|---|---|---|
-| weak (reads 40%) | 19.7% | 37.8% | 29.7% | **53.8%** | index (+18) |
-| mid (reads 70%) | 49.0% | 61.5% | 59.0% | **77.1%** | index (+12.5) |
-| strong (reads 90%) | 80.8% | 87.0% | 84.8% | **91.6%** | index (+6); dream cuts stale 5.4% → 2.2% |
+| weak (reads 40%) | 19.7% | 37.8% | 29.8% | **53.7%** | index (+18) |
+| mid (reads 70%) | 49.0% | 61.5% | 58.8% | **76.9%** | index (+12.5) |
+| strong (reads 90%) | 80.8% | 87.0% | 84.7% | **91.3%** | index (+6); dream cuts stale 5.4% → 2.2% |
 
 This is the same shape as the article's CL-Bench progression. Weaker models
 mostly fail by **not reading**, so the always-loaded sticky note matters most.
@@ -102,11 +102,11 @@ matters most.
 |---|---|---|
 | nothing | 49.0% | — |
 | verify notes vs transcripts | 55.1% | +6.1 |
-| + merge duplicate titles (supersedes) | 56.3% | +1.2 |
-| + gap fill (transcript facts with no note) | 59.4% | +3.1 |
-| + retire never-read noise | 58.8% | ±0 accuracy, **−17% notes** (−58% at heavy clutter, S5) |
+| + merge duplicate titles (supersedes) | 56.9% | +1.8 |
+| + gap fill (transcript facts with no note) | 59.4% | +2.5 |
+| + retire never-read noise | 59.0% | ±0 accuracy, **−17% notes** (−58% at heavy clutter, S5) |
 
-Without the fix, *merging made things worse* (54.0 → 51.0, unknowns 34% → 40%):
+Without the fix, *merging made things worse* (54.0 → 52.0, unknowns up about 6 points):
 merge writes supersedes edges, later revisions hit the bug, and the fresh note is
 hidden. **Ship the fix before shipping any automated supersession.**
 
@@ -117,7 +117,7 @@ hidden. **Ship the fix before shipping any automated supersession.**
 | verify 5 notes/dream (best priority: recent-reads) | 51.5% | 40 |
 | verify 20 notes/dream (best: recent-reads) | 55.5% | 160 |
 | verify everything | 60.4% | 698 |
-| dream every 1 / 5 / 20 sessions | 63.8 / 58.8 / 53.6% | 2204 / 477 / 143 |
+| dream every 1 / 5 / 20 sessions | 63.1 / 58.9 / 53.6% | 2204 / 477 / 143 |
 
 **Budget dominates; priority barely matters** (about 1.5 points between the best
 and random at a small budget, inside one sd). The practical consequence: make the
@@ -130,9 +130,9 @@ LLM judge.
 
 | writers | one page per entity (rewritten whole) | one atom per fact (Trove) |
 |---|---|---|
-| 1 | 56.0% (lost facts 8.9) | 48.1% (7.5) |
-| 2 | 46.2% (18.9) | 48.1% (7.5) |
-| 4 | **37.1% (27.0)** | **48.1% (7.5)** |
+| 1 | 56.0% (lost facts 8.9) | 49.7% (7.5) |
+| 2 | 46.2% (18.9) | 49.7% (7.5) |
+| 4 | **37.1% (27.0)** | **49.7% (7.5)** |
 
 Trove's atom design is already immune: this is the article's 41/57 → 57/57
 result, and Trove gets it by construction. The residual risk is an agent packing
@@ -143,8 +143,8 @@ note for everyone.
 
 | dream every | search only | pages only | pages + search |
 |---|---|---|---|
-| 5 sessions | 54.3% · 248 tok | 60.8% · **58 tok** | **63.6%** · 310 tok |
-| 15 sessions | 52.8% | 54.0% (stale 11.7%) | **57.4%** |
+| 5 sessions | 58.8% · 248 tok | 61.0% · **58 tok** | **63.1%** · 310 tok |
+| 15 sessions | 55.1% | 54.3% (stale 11.7%) | **58.7%** |
 
 This matches the article's direction (wiki + search 61% > search 53% > wiki
 only 48%). Pages are **about 4× cheaper per read**, but they go stale between
@@ -273,5 +273,10 @@ Experiments: `ladder`, `dream-parts`, `revive-fix`, `profiles`, `dream-priority`
 - Recall is lexical over a small corpus, where ranking is easy. Per the backlog,
   small fixtures can change which system wins; the ladder needs a rerun at scale
   with embeddings.
+- **Not fully deterministic.** Notes written within the same millisecond tie on
+  `updatedAt`, so the same configuration can land 1–1.5 points apart between
+  experiments (mid full stack: 75.6% in S1c vs 76.9% in S2). Read gaps under
+  about 2 points as ties. The tables above quote `results-today.md` (S1c) and
+  `results-fixed.md` (everything else).
 - The S6 shared-page arm models the worst case (each writer rewrites the whole
   page from its own stale view).
