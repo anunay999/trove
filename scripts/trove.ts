@@ -37,6 +37,9 @@ try {
     case "lint":
       printJson(await client.lint());
       break;
+    case "index":
+      process.stdout.write((await client.memoryIndex()).text);
+      break;
     case "events":
       await events(parsed);
       break;
@@ -316,6 +319,7 @@ function printHelp(): void {
     "  query <text> [--limit 10] [--text-units false] [--mode hybrid]",
     "  capture --title <title> --summary <summary> [--type claim] [--content <text>]",
     "  lint",
+    "  index                      session-start memory index (markdown)",
     "  events [--after-cursor cursor] [--limit 25]",
     "  views [--query text] [--limit 25]",
     "  create-view --title <title> [--root-slug slug | --query text] [--depth 1]",

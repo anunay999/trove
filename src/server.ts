@@ -62,6 +62,7 @@ import {
 } from "./oauthMetadata.js";
 import { createGraphStore } from "./createStore.js";
 import { EdgeValidityConflictError, isSmokeEvent } from "./graphCore.js";
+import { buildMemoryIndex } from "./memoryIndex.js";
 import { sourceDaySeries } from "./sourceStats.js";
 import { jobResultAs } from "./jobResults.js";
 import { flushTracing, startTracing, tracingEnabled } from "./tracing.js";
@@ -702,6 +703,18 @@ app.get("/v1/events", async (context) => {
     limit: context.req.query("limit") ? Number(context.req.query("limit")) : undefined,
   });
   return context.json(await store.events(input, operationContextFromAuth(auth)));
+});
+
+// Session-start memory index. `?format=text` returns the markdown alone, so a
+// SessionStart hook can print it straight into the agent's context.
+app.get("/v1/index", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  if (auth instanceof Response) return auth;
+  const index = await buildMemoryIndex(store, operationContextFromAuth(auth));
+  if (context.req.query("format") === "text") {
+    return context.body(index.text, 200, { "content-type": "text/markdown; charset=utf-8" });
+  }
+  return context.json(index);
 });
 
 app.get("/v1/lint", async (context) => {
