@@ -1,5 +1,6 @@
 import type { GraphNode } from "./contracts.js";
 import type { GraphOperationContext, GraphSnapshot, GraphStore } from "./graphCore.js";
+import { isDreamPage } from "./dream.js";
 
 /**
  * The session-start memory index: a small, deterministic page an agent sees
@@ -61,7 +62,8 @@ export function renderMemoryIndex(snapshot: GraphSnapshot, options: MemoryIndexO
     const target = byId.get(edge.toNodeId);
     if (target && Date.parse(edge.recordedAt) >= Date.parse(target.updatedAt)) superseded.add(target.id);
   }
-  const current = nodes.filter((node) => !superseded.has(node.id));
+  const pages = nodes.filter(isDreamPage).sort((left, right) => left.title.localeCompare(right.title));
+  const current = nodes.filter((node) => !superseded.has(node.id) && !isDreamPage(node));
 
   const used = new Set<string>();
   const take = (candidates: GraphNode[], limit: number): GraphNode[] => {
@@ -105,6 +107,7 @@ export function renderMemoryIndex(snapshot: GraphSnapshot, options: MemoryIndexO
     lines.push("", `## ${title}`, ...rows);
   };
   const oneLine = (text: string | null) => (text ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
+  section("Entity pages (one read covers the hub)", pages.slice(0, 15).map((node) => `- ${node.title} (${node.slug}) · ${oneLine(node.summary)}`));
   section("Hubs", hubs.map((node) => `- ${node.title} (${node.slug}) · ${node.type}, ${degree.get(node.id)} links`));
   section("Most used", mostUsed.map((node) => `- ${node.title} (${node.slug}) · read ${node.accessCount}×${node.summary ? ` — ${oneLine(node.summary)}` : ""}`));
   section("Recently changed", recent.map((node) => `- ${node.title} (${node.slug}) · ${node.updatedAt.slice(0, 10)}${node.summary ? ` — ${oneLine(node.summary)}` : ""}`));

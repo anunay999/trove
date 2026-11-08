@@ -64,6 +64,13 @@ describe("memory index (renderer)", () => {
     assert.match(index.text, /look it up/);
   });
 
+  it("lists dream pages in their own section", () => {
+    const page = node({ type: "community", title: "Billing page", slug: "billing-page", content: "Page kept by Trove dreaming for Billing (billing).", summary: "Current notes about Billing, as of 2026-11-01." });
+    const index = renderMemoryIndex({ nodes: [page], edges: [] });
+    assert.match(index.text, /## Entity pages \(one read covers the hub\)\n- Billing page \(billing-page\)/);
+    assert.doesNotMatch(index.text, /## Recently changed/);
+  });
+
   it("stays inside the injected-context budget", () => {
     const nodes = Array.from({ length: 400 }, (_, i) => node({ accessCount: i + 1, summary: "x".repeat(300) }));
     const index = renderMemoryIndex({ nodes, edges: [] }, { mostUsed: 400, recent: 400 });

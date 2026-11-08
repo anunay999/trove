@@ -59,11 +59,13 @@ const TEST_SEAMS = new Set([
  * somebody makes on purpose — with this line in the diff — rather than the path
  * of least resistance it was for the first forty-four.
  */
-const MAX_DOCUMENTED = 27;
+const MAX_DOCUMENTED = 28;
 // 24 -> 27 on 2026-09-05 for the three LANGFUSE_* credentials. Recorded rather
 // than nudged: they are secrets for an external service, which is exactly what
 // this file is for, and the raise is the decision the ratchet exists to force
 // somebody to make in a diff.
+// 27 -> 28 for TROVE_DREAM: a feature switch (src/dream.ts writes on its own,
+// so it is opt-in until it has mileage). Its budget and interval are constants.
 
 async function sourceFiles(dir: URL): Promise<URL[]> {
   const entries = await readdir(dir, { withFileTypes: true });

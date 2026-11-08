@@ -115,6 +115,7 @@ import {
 } from "./graphCore.js";
 import { performReconcileNode, type ReconcileJudge } from "./reconcile.js";
 import { runRecallSelfTest } from "./recallSelfTest.js";
+import { dreamOptionsFromPayload, performDream } from "./dream.js";
 import { observe, withTraceAttributes } from "./tracing.js";
 import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
@@ -1536,6 +1537,12 @@ export class InMemoryGraphStore implements GraphStore {
         sampleSize === undefined ? {} : { sampleSize },
         ownerId ? { ownerId } : undefined,
       );
+      return result;
+    }
+
+    if (job.kind === "dream") {
+      const payload = job.payload as Record<string, unknown>;
+      const result: GraphJobResultMap["dream"] = await performDream(this, { ...dreamOptionsFromPayload(payload), ownerId: typeof payload.ownerId === "string" ? payload.ownerId : null });
       return result;
     }
 

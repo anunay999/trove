@@ -101,6 +101,7 @@ import {
   type ReconcileJudge,
 } from "./reconcile.js";
 import { runRecallSelfTest } from "./recallSelfTest.js";
+import { dreamMinIntervalSeconds, dreamOptionsFromPayload, performDream } from "./dream.js";
 import { observe, withTraceAttributes } from "./tracing.js";
 import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
@@ -2640,6 +2641,32 @@ export class PgGraphStore implements GraphStore {
       }, context, actorUuid);
     }
     await this.enqueueRecallSelfTest(client, scope, context, actorUuid);
+    await this.enqueueDream(client, scope, context, actorUuid);
+  }
+
+  /**
+   * Scheduled dreaming (src/dream.ts), opt-in with TROVE_DREAM=1 because it
+   * writes: it re-points supersedes edges and keeps entity pages. Per owner
+   * only (a global run is an operator's explicit enqueue), throttled by
+   * TROVE_DREAM_MIN_INTERVAL_SECONDS (default 6h), lowest priority. Its own
+   * page writes land here too; the dedupe key joins the running row.
+   */
+  private async enqueueDream(
+    client: pg.PoolClient,
+    scope: ReturnType<typeof ownerScope>,
+    context: GraphOperationContext | undefined,
+    actorUuid: string | null,
+  ): Promise<void> {
+    const interval = dreamMinIntervalSeconds();
+    if (interval <= 0 || !scope.scoped || scope.ownerId === null) return;
+    const dedupeKey = `maintenance:dream:${scope.ownerId}`;
+    if (await this.maintenanceSucceededRecently(client, "dream", dedupeKey, interval)) return;
+    await this.enqueueJobWithClient(client, {
+      kind: "dream",
+      payload: { reason: "graph_mutation", ownerId: scope.ownerId },
+      priority: 90,
+      dedupeKey,
+    }, context, actorUuid);
   }
 
   /**
@@ -3057,6 +3084,12 @@ export class PgGraphStore implements GraphStore {
         sampleSize === undefined ? {} : { sampleSize },
         ownerId ? { ownerId } : undefined,
       );
+      return result;
+    }
+
+    if (job.kind === "dream") {
+      const payload = asRecord(job.payload);
+      const result: GraphJobResultMap["dream"] = await performDream(this, { ...dreamOptionsFromPayload(payload), ownerId: typeof payload.ownerId === "string" ? payload.ownerId : null });
       return result;
     }
 
