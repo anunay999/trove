@@ -1,8 +1,8 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import pg from "pg";
-import { suiteStore, closeStore, hasPostgres, sleep, isolateDatabase } from "./helpers.js";
-import type { GraphJob, GraphOperationContext } from "../src/graphCore.js";
+import { suiteStore, closeStore, hasPostgres, sleep, isolateDatabase, storeWithJobRunner } from "./helpers.js";
+import type { GraphJob, GraphOperationContext, GraphStore } from "../src/graphCore.js";
 import type { SearchInput } from "../src/contracts.js";
 import { FakeEmbeddingProvider, cosineSimilarity } from "../src/embeddings.js";
 import { normalizeRetrievalQuery } from "../src/queryNormalize.js";
@@ -37,7 +37,7 @@ async function drainJobs(limit = 200): Promise<void> {
   await store.flushActivation();
 }
 /** Push a job's last-update past any retry backoff. */
-async function ageJob(jobId: string): Promise<void> {
+async function ageJob(jobId: string, target: GraphStore = store): Promise<void> {
   if (driver === "postgres") {
     const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
     await client.connect();
@@ -48,7 +48,7 @@ async function ageJob(jobId: string): Promise<void> {
     }
     return;
   }
-  const jobs = (store as unknown as { graphJobs: Map<string, GraphJob> }).graphJobs;
+  const jobs = (target as unknown as { graphJobs: Map<string, GraphJob> }).graphJobs;
   const job = jobs.get(jobId);
   if (job) jobs.set(jobId, { ...job, updatedAt: new Date(Date.now() - 172_800_000).toISOString() });
 }
@@ -521,19 +521,14 @@ describe("retrieval fixes", () => {
     const listed = await store.jobs({ limit: 500 });
     const kinds = new Set(listed.filter((job) => enqueuedIds.has(job.id)).map((job) => job.kind));
     assert.ok(kinds.has("lint_graph"), "capture should still enqueue lint_graph");
-    assert.ok(!kinds.has("refresh_obsidian_projection"), "projection must not be auto-enqueued");
     await drainJobs();
   });
   it("F12c: failed jobs retry with backoff and dead-letter at five attempts", async (t) => {
-    const patched = store as unknown as { performJob: (job: GraphJob) => unknown };
-    const original = patched.performJob;
-    patched.performJob = () => {
+    const jobStore = storeWithJobRunner(() => {
       throw new Error("boom");
-    };
-    t.after(() => {
-      patched.performJob = original;
     });
-    const job = await store.enqueueJob({
+    t.after(() => closeStore(jobStore));
+    const job = await jobStore.enqueueJob({
       kind: "lint_graph",
       payload: {},
       // Priority 0: a sibling suite's worker always prefers other jobs, so it
@@ -542,8 +537,8 @@ describe("retrieval fixes", () => {
       dedupeKey: `retrieval-fixes:dead:${stamp}`,
     }, context);
     for (let attempt = 1; attempt <= 5; attempt += 1) {
-      await ageJob(job.id);
-      const result = await store.runJob({ jobId: job.id }, context);
+      await ageJob(job.id, jobStore);
+      const result = await jobStore.runJob({ jobId: job.id }, context);
       assert.equal(result?.attempts, attempt, `attempt ${attempt} should have run`);
       if (attempt < 5) {
         assert.equal(result?.status, "failed", `attempt ${attempt} should fail but stay retryable`);
@@ -551,7 +546,7 @@ describe("retrieval fixes", () => {
         assert.equal(result?.status as string, "dead", "the fifth failure must dead-letter");
       }
     }
-    const again = await store.runJob({ jobId: job.id }, context);
+    const again = await jobStore.runJob({ jobId: job.id }, context);
     assert.equal(again?.attempts, 5, "a dead job must never be reclaimed");
     assert.equal(again?.status as string, "dead");
   });

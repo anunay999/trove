@@ -611,26 +611,9 @@ await section("R12", async () => {
   }, ctx);
   const counts = await probe.query(`select kind, count(*)::int as c from graph_job group by kind order by kind`);
   const countOf = (kind: string) => Number(counts.rows.find((row) => row.kind === kind)?.c ?? 0);
-  const autoGone = countOf("refresh_obsidian_projection") === 0 && countOf("lint_graph") >= 1 && countOf("refresh_embeddings") >= 1;
+  const queued = countOf("lint_graph") >= 1 && countOf("refresh_embeddings") >= 1;
   console.log(`  jobs after one capture: ${JSON.stringify(Object.fromEntries(counts.rows.map((row) => [row.kind, row.c])))}`);
-
-  const job = await store.enqueueJob(
-    { kind: "refresh_obsidian_projection", payload: { reason: "repro" }, priority: 90, dedupeKey: `repro:proj:${stamp}` },
-    ctx,
-  );
-  let done: Awaited<ReturnType<typeof store.runJob>> = null;
-  for (let i = 0; i < 100 && !done; i++) {
-    const ran = await store.runJob({}, ctx);
-    if (!ran) break;
-    if (ran.id === job.id && (ran.status === "succeeded" || ran.status === "failed")) done = ran;
-  }
-  const result = (done?.result ?? {}) as Record<string, any>;
-  const manualWorks = done?.status === "succeeded" && Number(result.fileCount) > 0 && "manifest" in result;
-  report(
-    "R12",
-    autoGone && manualWorks,
-    `after a capture: refresh_obsidian_projection jobs enqueued=${countOf("refresh_obsidian_projection")} (lint=${countOf("lint_graph")}, embeddings=${countOf("refresh_embeddings")} as control) — no longer auto-enqueued on mutation; manual enqueue still runs: status=${done?.status} fileCount=${result.fileCount}.`,
-  );
+  report("R12", queued, `after a capture: lint=${countOf("lint_graph")}, embeddings=${countOf("refresh_embeddings")} queued.`);
 });
 
 // ---------------------------------------------------------------- R13 (truthful BFS hops)

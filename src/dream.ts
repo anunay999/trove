@@ -2,7 +2,6 @@ import { contentTerms } from "./queryNormalize.js";
 import type { GraphNode } from "./contracts.js";
 import type { GraphOperationContext, GraphStore } from "./graphCore.js";
 import { remember } from "./agentOps.js";
-import { optedIn } from "./flags.js";
 
 /**
  * Dreaming: the offline consolidation pass over one owner's memory.
@@ -261,19 +260,8 @@ export function renderEntityPage(hub: Pick<GraphNode, "title" | "slug">, notes: 
   return lines.join("\n");
 }
 
-/** Seconds between scheduled dreams for one owner. */
-export const DREAM_MIN_INTERVAL_SECONDS = 6 * 3600;
 /** Notes a scheduled dream checks against newer sources. */
 export const DREAM_DEFAULT_BUDGET = 200;
-
-/**
- * Scheduled dreaming is opt-in (TROVE_DREAM=1): it writes on its own (edges,
- * entity pages) and has no production mileage yet. See src/flags.ts for why
- * opt-in is a debt to repay once it has. Returns 0 when scheduling is off.
- */
-export function dreamMinIntervalSeconds(): number {
-  return optedIn(process.env.TROVE_DREAM) ? DREAM_MIN_INTERVAL_SECONDS : 0;
-}
 
 /**
  * Options for one run, from the job payload (budget, pages, retireAfterDays).

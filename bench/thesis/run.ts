@@ -46,7 +46,6 @@ import { performRecall } from "../../src/recall.js";
 import type { GraphOperationContext, TextUnit } from "../../src/graphCore.js";
 import { cosineSimilarity, createEmbeddingProviderFromEnv } from "../../src/embeddings.js";
 import { createReconcileJudgeFromEnv } from "../../src/reconcile.js";
-import { enqueueEmbeddingDrainFollowUp } from "../../src/jobWorker.js";
 import { THESIS_ITEMS, validateDataset, type ThesisItem, type ThesisShape } from "./dataset.js";
 
 const DATABASE_URL = process.env.TROVE_THESIS_DATABASE_URL ?? process.env.DATABASE_URL ?? "";
@@ -291,7 +290,6 @@ async function drainJobs(
         // A refresh job embeds at most one batch; the follow-up is queued by the
         // job WORKER in production, never by performJob — a direct runJob loop
         // like this one must queue it or the drain silently stops after batch 1.
-        if (kind === "refresh_embeddings") await enqueueEmbeddingDrainFollowUp(store, done, ctx);
         drained += 1;
       } else {
         skipped += 1; // a reconcile that exhausted retries; embeddings would have thrown

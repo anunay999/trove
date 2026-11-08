@@ -62,6 +62,7 @@ import {
   type NeighborhoodResult,
   type ProjectResult,
   type ReadResult,
+  type RefreshEmbeddingsResult,
   type RecallResult,
   type RecallTrace,
   type SearchResult,
@@ -69,9 +70,14 @@ import {
 } from "./graphCore.js";
 import {
   JOB_MAX_ATTEMPTS,
+  followUpRequest,
+  maintenanceRequests,
+  reconcileRequest,
+  runJobKind,
   TERMINAL_JOB_RETENTION_DAYS,
-  lintMinIntervalSeconds,
-  selfTestMinIntervalSeconds,
+  type JobHost,
+  type JobRequest,
+  type JobRunner,
 } from "./jobs.js";
 import {
   capEventPayload,
@@ -91,16 +97,8 @@ import { RECONCILE_FINDING_LIMIT, revisedAfterSupersededFinding, reconcileLintFi
 import { ActivationBuffer, type ActivationBump } from "./activation.js";
 import { createEmbeddingProviderFromEnv, vectorLiteral, type EmbeddingProvider } from "./embeddings.js";
 import { createRecallRerankerFromEnv, type Reranker } from "./rerank.js";
-import { buildObsidianVaultExport } from "./obsidianExport.js";
-import {
-  createReconcileJudgeFromEnv,
-  performReconcileNode,
-  type ReconcileJudge,
-} from "./reconcile.js";
-import { runRecallSelfTest } from "./recallSelfTest.js";
-import { dreamMinIntervalSeconds, dreamOptionsFromPayload, performDream } from "./dream.js";
-import { observe, withTraceAttributes } from "./tracing.js";
-import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
+import { createReconcileJudgeFromEnv, type ReconcileJudge } from "./reconcile.js";
+import type { GraphJobResult } from "./jobResults.js";
 import { slugify } from "./slug.js";
 import { looksLikeCredential, TeamSpaceError } from "./spaces.js";
 
@@ -501,6 +499,7 @@ type PgStoreOptions = {
   reranker?: Reranker | null;
   /** Embedding provider; defaults to the environment's. */
   embeddings?: EmbeddingProvider | null;
+  jobRunner?: JobRunner;
 };
 
 export class PgGraphStore implements GraphStore {
@@ -508,6 +507,7 @@ export class PgGraphStore implements GraphStore {
   private reconcileJudge: ReconcileJudge | null;
   private reranker: Reranker | null;
   private embeddings: EmbeddingProvider | null;
+  private jobRunner: JobRunner;
   /**
    * Session-served provenance log (backlog #9b). In-process by design — the
    * server is one process, and this backs a warning, not a security boundary.
@@ -533,6 +533,7 @@ export class PgGraphStore implements GraphStore {
     this.reconcileJudge = options.reconcileJudge === undefined ? createReconcileJudgeFromEnv() : options.reconcileJudge;
     this.reranker = options.reranker === undefined ? createRecallRerankerFromEnv() : options.reranker;
     this.embeddings = options.embeddings === undefined ? createEmbeddingProviderFromEnv() : options.embeddings;
+    this.jobRunner = options.jobRunner ?? runJobKind;
     // Idle clients dropped by the pooler (e.g. Supabase) emit 'error'; without
     // a listener that unhandled event kills the whole process.
     this.pool.on("error", (error) => {
@@ -699,10 +700,7 @@ export class PgGraphStore implements GraphStore {
         context,
         actorUuid,
       );
-      await this.enqueueMaintenanceJobs(client, context, actorUuid, [
-        "lint_graph",
-        "refresh_embeddings",
-      ]);
+      await this.enqueueRequests(client, maintenanceRequests({ lint: true, embeddings: true }, ownerScope(context)), context, actorUuid);
       await client.query("commit");
 
       const textUnits = await this.textUnitsForSource(source.id);
@@ -1504,7 +1502,7 @@ export class PgGraphStore implements GraphStore {
         }
       }
 
-      await this.enqueueMaintenanceJobs(client, context, actorUuid, ["lint_graph"]);
+      await this.enqueueRequests(client, maintenanceRequests({ lint: true }, ownerScope(context)), context, actorUuid);
       await client.query("commit");
       return edge;
     } catch (error) {
@@ -1568,7 +1566,7 @@ export class PgGraphStore implements GraphStore {
         context,
         actorUuid,
       );
-      await this.enqueueMaintenanceJobs(client, context, actorUuid, ["lint_graph"]);
+      await this.enqueueRequests(client, maintenanceRequests({ lint: true }, ownerScope(context)), context, actorUuid);
       await client.query("commit");
       return edge;
     } catch (error) {
@@ -1636,7 +1634,7 @@ export class PgGraphStore implements GraphStore {
           context,
           actorUuid,
         );
-        await this.enqueueMaintenanceJobs(client, context, actorUuid, ["lint_graph", "refresh_embeddings"]);
+        await this.enqueueRequests(client, maintenanceRequests({ lint: true, embeddings: true }, ownerScope(context)), context, actorUuid);
         await client.query("commit");
         tombstoned.push(id);
       } catch (error) {
@@ -1728,11 +1726,8 @@ export class PgGraphStore implements GraphStore {
         context,
         actorUuid,
       );
-      await this.enqueueMaintenanceJobs(client, context, actorUuid, [
-        "lint_graph",
-        "refresh_embeddings",
-      ]);
-      await this.enqueueReconcileJob(client, context, actorUuid, id);
+      await this.enqueueRequests(client, maintenanceRequests({ lint: true, embeddings: true }, ownerScope(context)), context, actorUuid);
+      await this.enqueueRequests(client, [reconcileRequest(id, ownerScope(context))], context, actorUuid);
       await client.query("commit");
 
       const node = await this.read({ nodeId: id }, undefined, { trackAccess: false });
@@ -1867,14 +1862,11 @@ export class PgGraphStore implements GraphStore {
         context,
         actorUuid,
       );
-      await this.enqueueMaintenanceJobs(client, context, actorUuid, [
-        "lint_graph",
-        "refresh_embeddings",
-      ]);
+      await this.enqueueRequests(client, maintenanceRequests({ lint: true, embeddings: true }, ownerScope(context)), context, actorUuid);
       // Preserve reconcile cadence: title/summary revisions refresh search,
       // but only body changes introduce claims for the reconcile judge.
       if (contentChanged) {
-        await this.enqueueReconcileJob(client, context, actorUuid, input.nodeId);
+        await this.enqueueRequests(client, [reconcileRequest(input.nodeId, ownerScope(context))], context, actorUuid);
       }
       await client.query("commit");
 
@@ -2515,7 +2507,7 @@ export class PgGraphStore implements GraphStore {
     const heartbeat = this.startLeaseHeartbeat(claimed.job.id, claimed.claimant);
     let outcome: { status: "succeeded"; result: GraphJobResult } | { status: "failed"; error: string };
     try {
-      outcome = { status: "succeeded", result: await this.performJobTraced(claimed.job) };
+      outcome = { status: "succeeded", result: await this.jobRunner(this.jobHost(), claimed.job) };
     } catch (error) {
       outcome = { status: "failed", error: error instanceof Error ? error.message : "Unknown job error" };
     } finally {
@@ -2523,9 +2515,14 @@ export class PgGraphStore implements GraphStore {
       // report a lease we gave up on purpose.
       heartbeat.stop();
     }
-    return outcome.status === "succeeded"
-      ? await this.finishJob(claimed.job, claimed.claimant, "succeeded", outcome.result, null, context)
-      : await this.finishJob(claimed.job, claimed.claimant, "failed", null, outcome.error, context);
+    if (outcome.status === "failed") return this.finishJob(claimed.job, claimed.claimant, "failed", null, outcome.error, context);
+    const finished = await this.finishJob(claimed.job, claimed.claimant, "succeeded", outcome.result, null, context);
+    const next = followUpRequest(finished);
+    if (next) {
+      const { throttleSeconds: _throttle, ...input } = next;
+      await this.enqueueJob(input, context);
+    }
+    return finished;
   }
 
   private startLeaseHeartbeat(jobId: string, claimant: string): { stop(): void } {
@@ -2627,103 +2624,21 @@ export class PgGraphStore implements GraphStore {
    * dedupe key the job would take, so operator-triggered lints with their own
    * keys never count.
    */
-  private async enqueueMaintenanceJobs(
+  private async enqueueRequests(
     client: pg.PoolClient,
+    requests: JobRequest[],
     context: GraphOperationContext | undefined,
     actorUuid: string | null,
-    kinds: Array<GraphJob["kind"]>,
   ): Promise<void> {
-    const scope = ownerScope(context);
-    for (const kind of kinds) {
-      const scoped = kind === "lint_graph" && scope.scoped && scope.ownerId !== null;
-      const dedupeKey = scoped ? `maintenance:${kind}:${scope.ownerId}` : `maintenance:${kind}`;
-      if (kind === "lint_graph" && await this.lintSucceededRecently(client, dedupeKey)) continue;
-      await this.enqueueJobWithClient(client, {
-        kind,
-        payload: scoped ? { reason: "graph_mutation", ownerId: scope.ownerId } : { reason: "graph_mutation" },
-        priority: kind === "refresh_embeddings" ? 40 : 60,
-        dedupeKey,
-      }, context, actorUuid);
+    for (const request of requests) {
+      if (request.throttleSeconds > 0 && await this.succeededWithin(client, request.kind, request.dedupeKey, request.throttleSeconds)) continue;
+      const { throttleSeconds: _throttle, ...input } = request;
+      await this.enqueueJobWithClient(client, input, context, actorUuid);
     }
-    await this.enqueueRecallSelfTest(client, scope, context, actorUuid);
-    await this.enqueueDream(client, scope, context, actorUuid);
   }
 
-  /**
-   * Scheduled dreaming (src/dream.ts), opt-in with TROVE_DREAM=1 because it
-   * writes: it re-points supersedes edges and keeps entity pages. Per owner
-   * only (a global run is an operator's explicit enqueue), throttled by
-   * TROVE_DREAM_MIN_INTERVAL_SECONDS (default 6h), lowest priority. Its own
-   * page writes land here too; the dedupe key joins the running row.
-   */
-  private async enqueueDream(
-    client: pg.PoolClient,
-    scope: ReturnType<typeof ownerScope>,
-    context: GraphOperationContext | undefined,
-    actorUuid: string | null,
-  ): Promise<void> {
-    const interval = dreamMinIntervalSeconds();
-    if (interval <= 0 || !scope.scoped || scope.ownerId === null) return;
-    const dedupeKey = `maintenance:dream:${scope.ownerId}`;
-    if (await this.maintenanceSucceededRecently(client, "dream", dedupeKey, interval)) return;
-    await this.enqueueJobWithClient(client, {
-      kind: "dream",
-      payload: { reason: "graph_mutation", ownerId: scope.ownerId },
-      priority: 90,
-      dedupeKey,
-    }, context, actorUuid);
-  }
-
-  /**
-   * The daily "can the graph still find its own notes" check.
-   *
-   * It rides the same mutation path as lint rather than a scheduler, because
-   * this codebase has no scheduler and a health check nobody remembers to run
-   * is not a feature. Its own throttle is a day, not lint's ten minutes: a
-   * self-test is twenty recalls, and what it measures — whether a new note is
-   * shadowed by the cluster it landed in — changes over weeks.
-   *
-   * Lowest priority in the queue. Nothing waits on this, and it must never
-   * delay an embedding refresh a live recall is about to want.
-   */
-  private async enqueueRecallSelfTest(
-    client: pg.PoolClient,
-    scope: ReturnType<typeof ownerScope>,
-    context: GraphOperationContext | undefined,
-    actorUuid: string | null,
-  ): Promise<void> {
-    const interval = selfTestMinIntervalSeconds();
-    if (interval <= 0) return;
-    // Owner-scoped like lint: a self-test must ask the graph the way its owner
-    // would, or it probes a pool they cannot see and reports blind spots that
-    // are not theirs.
-    const scoped = scope.scoped && scope.ownerId !== null;
-    const dedupeKey = scoped
-      ? `maintenance:recall_self_test:${scope.ownerId}`
-      : "maintenance:recall_self_test";
-    if (await this.maintenanceSucceededRecently(client, "recall_self_test", dedupeKey, interval)) return;
-    await this.enqueueJobWithClient(client, {
-      kind: "recall_self_test",
-      payload: scoped
-        ? { reason: "graph_mutation", ownerId: scope.ownerId }
-        : { reason: "graph_mutation" },
-      priority: 80,
-      dedupeKey,
-    }, context, actorUuid);
-  }
-
-  private async lintSucceededRecently(client: pg.PoolClient, dedupeKey: string): Promise<boolean> {
-    return this.maintenanceSucceededRecently(client, "lint_graph", dedupeKey, lintMinIntervalSeconds());
-  }
-
-  /** Has this exact maintenance job succeeded inside its own throttle window? */
-  private async maintenanceSucceededRecently(
-    client: pg.PoolClient,
-    kind: GraphJob["kind"],
-    dedupeKey: string,
-    interval: number,
-  ): Promise<boolean> {
-    if (interval <= 0) return false;
+  /** Has a job of this kind and key succeeded within the window? */
+  private async succeededWithin(client: pg.PoolClient, kind: GraphJob["kind"], dedupeKey: string, seconds: number): Promise<boolean> {
     const recent = await client.query(
       `select 1
        from graph_job
@@ -2732,7 +2647,7 @@ export class PgGraphStore implements GraphStore {
          and status = 'succeeded'
          and finished_at > now() - make_interval(secs => $2::numeric)
        limit 1`,
-      [dedupeKey, interval, kind],
+      [dedupeKey, seconds, kind],
     );
     return (recent.rowCount ?? 0) > 0;
   }
@@ -2806,20 +2721,6 @@ export class PgGraphStore implements GraphStore {
    * absorb across nodes. The `dedupeJoined` return marker lets a caller
    * observe either absorption.
    */
-  private async enqueueReconcileJob(
-    client: pg.PoolClient,
-    context: GraphOperationContext | undefined,
-    actorUuid: string | null,
-    nodeId: string,
-  ): Promise<void> {
-    await this.enqueueJobWithClient(client, {
-      kind: "reconcile_node",
-      payload: { reason: "graph_mutation", nodeId, ownerId: ownerScope(context).ownerId },
-      priority: 30,
-      dedupeKey: `reconcile:${nodeId}`,
-    }, context, actorUuid);
-  }
-
   private async enqueueJobWithClient(
     client: pg.PoolClient,
     input: EnqueueJobInput,
@@ -3043,92 +2944,24 @@ export class PgGraphStore implements GraphStore {
    * rides along so a cost view can be read per account, and the kind becomes
    * the trace name so one job type can be compared with itself over time.
    */
-  private async performJobTraced(job: GraphJob): Promise<GraphJobResult> {
-    const ownerId = typeof job.payload.ownerId === "string" ? job.payload.ownerId : undefined;
-    return withTraceAttributes(
-      { ...(ownerId ? { userId: ownerId } : {}), tags: ["job", job.kind] },
-      () => observe(`job:${job.kind}`, {
-        asType: "span",
-        input: { kind: job.kind, jobId: job.id, payload: job.payload },
-      }, async (span) => {
-        const result = await this.performJob(job);
-        span.update({ output: result });
-        return result;
-      }),
-    );
+  private jobHost(): JobHost {
+    return {
+      store: this,
+      reconcileJudge: this.reconcileJudge,
+      prune: async () => ({ jobs: await this.pruneTerminalJobs(), events: await this.pruneEvents() }),
+      refreshEmbeddings: (owner, limit) => this.refreshEmbeddings(owner, limit),
+    };
   }
 
-  private async performJob(job: GraphJob): Promise<GraphJobResult> {
-    if (job.kind === "lint_graph") {
-      // payload.ownerId scopes the lint to one tenant, the same contract as
-      // refresh_embeddings below. Absent means the whole graph, which only an
-      // operator-triggered enqueue produces; a mutation always carries its owner.
-      const payloadOwner = asRecord(job.payload).ownerId;
-      const ownerId = typeof payloadOwner === "string" ? payloadOwner : null;
-      const report = await this.lint(ownerId ? { ownerId } : undefined);
-      const prunedJobs = await this.pruneTerminalJobs();
-      const prunedEvents = await this.pruneEvents();
-      // Carry the findings themselves (capped) — counts alone are not actionable.
-      const result: GraphJobResultMap["lint_graph"] = {
-        ownerId,
-        lint: { ...report.summary, findings: report.findings.slice(0, 200) },
-        prunedJobs,
-        prunedEvents,
-      };
-      return result;
-    }
-
-    if (job.kind === "recall_self_test") {
-      const payload = asRecord(job.payload);
-      const ownerId = typeof payload.ownerId === "string" ? payload.ownerId : null;
-      const sampleSize = typeof payload.sampleSize === "number" ? payload.sampleSize : undefined;
-      // Owner-scoped like every other read: a self-test must ask the graph the
-      // way its owner would, or it measures a pool they cannot see.
-      const result: GraphJobResultMap["recall_self_test"] = await runRecallSelfTest(
-        this,
-        sampleSize === undefined ? {} : { sampleSize },
-        ownerId ? { ownerId } : undefined,
-      );
-      return result;
-    }
-
-    if (job.kind === "dream") {
-      const payload = asRecord(job.payload);
-      const result: GraphJobResultMap["dream"] = await performDream(this, { ...dreamOptionsFromPayload(payload), ownerId: typeof payload.ownerId === "string" ? payload.ownerId : null });
-      return result;
-    }
-
-    if (job.kind === "reconcile_node") {
-      const payload = asRecord(job.payload);
-      const nodeId = typeof payload.nodeId === "string" ? payload.nodeId : null;
-      if (!nodeId) throw new Error("reconcile_node: payload.nodeId is required");
-      const ownerId = typeof payload.ownerId === "string" ? payload.ownerId : null;
-      const result: GraphJobResultMap["reconcile_node"] = await performReconcileNode(this, { nodeId, ownerId }, this.reconcileJudge);
-      return result;
-    }
-
-    if (job.kind === "refresh_obsidian_projection") {
-      const projection = buildObsidianVaultExport(
-        await this.exportMarkdown(),
-        await this.timeline(),
-        await this.exportGraph(),
-      );
-      const result: GraphJobResultMap["refresh_obsidian_projection"] = {
-        manifest: projection.manifest,
-        fileCount: Object.keys(projection.files).length,
-      };
-      return result;
-    }
-
+  /**
+   * One bounded embedding batch. `ownerId` scopes the whole run to one tenant:
+   * a bulk importer can ask "is MY data indexed yet?" and drain just its own
+   * slice; null is global (the background worker's mode). The count and the
+   * backfill take the same filter or the drain math lies.
+   */
+  private async refreshEmbeddings(ownerId: string | null, limit: number): Promise<RefreshEmbeddingsResult> {
     const provider = this.embeddings;
     const model = provider?.model ?? process.env.TROVE_EMBEDDING_MODEL ?? "unconfigured";
-    // payload.ownerId scopes the whole job to one tenant: a bulk importer can
-    // ask "is MY data indexed yet?" and drain just its own slice instead of
-    // waiting for the entire corpus. Absent means global (the background
-    // worker's mode). The count and the backfill must take the same filter or
-    // the drain math lies.
-    const payloadOwner = asRecord(job.payload).ownerId;
-    const ownerId = typeof payloadOwner === "string" ? payloadOwner : null;
 
     // Chunk whatever is still unchunked BEFORE counting, so the count sees the
     // rows this run is about to be asked to embed. Sources ingested before
@@ -3177,22 +3010,20 @@ export class PgGraphStore implements GraphStore {
     };
 
     if (!provider) {
-      const result: GraphJobResultMap["refresh_embeddings"] = {
-        provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "none",
+      return {
+        provider: "none",
         model,
         status: "skipped_no_embedding_provider",
         ownerId,
         chunkedSources,
         missing,
       };
-      return result;
     }
 
-    const limit = Number(asRecord(job.payload).limit ?? process.env.TROVE_EMBEDDING_JOB_LIMIT ?? 256);
-    const embedded = await this.refreshMissingEmbeddings(provider, Number.isFinite(limit) ? limit : 256, ownerId, missing);
+    const embedded = await this.refreshMissingEmbeddings(provider, limit, ownerId, missing);
     // Only once a source's chunks are all embedded do its per-line vectors go.
     const retiredTextUnitVectors = await this.retireTextUnitVectors(model, ownerId);
-    const result: GraphJobResultMap["refresh_embeddings"] = {
+    return {
       provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "openai",
       model,
       status: "refreshed",
@@ -3202,7 +3033,6 @@ export class PgGraphStore implements GraphStore {
       missingBefore: missing,
       embedded,
     };
-    return result;
   }
 
   /**

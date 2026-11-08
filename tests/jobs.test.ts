@@ -2,8 +2,8 @@ import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
-import { suiteStore, closeStore, isolateDatabase, hasPostgres, sleep } from "./helpers.js";
-import { enqueueEmbeddingDrainFollowUp } from "../src/jobWorker.js";
+import { suiteStore, closeStore, isolateDatabase, hasPostgres, sleep, storeWithJobRunner } from "./helpers.js";
+import { followUpRequest } from "../src/jobs.js";
 import { UserStore } from "../src/users.js";
 import { JOB_MAX_ATTEMPTS } from "../src/jobs.js";
 import type { GraphJob, GraphOperationContext } from "../src/graphCore.js";
@@ -39,16 +39,6 @@ async function sql<T extends Record<string, unknown>>(text: string, params: unkn
   }
 }
 
-/** Swap the store's job body for the duration of a test (the F12c pattern). */
-function patchPerformJob(store: unknown, body: (job: GraphJob) => unknown): () => void {
-  const patched = store as { performJob: (job: GraphJob) => unknown };
-  const original = patched.performJob;
-  patched.performJob = body;
-  return () => {
-    patched.performJob = original;
-  };
-}
-
 /** Push a job's last update past any lease or retry backoff. */
 async function ageJob(store: unknown, jobId: string): Promise<void> {
   if (hasPostgres()) {
@@ -73,25 +63,25 @@ describe("jobs", () => {
     // finish then overwrites a job another worker is running.
     const previousLease = process.env.TROVE_JOB_LEASE_SECONDS;
     process.env.TROVE_JOB_LEASE_SECONDS = "1";
-    const restore = patchPerformJob(store, async () => {
+    const jobStore = storeWithJobRunner(async () => {
       await sleep(2_000);
       return { ownerId: null, lint: { nodes: 0, edges: 0, findings: [], errors: 0, warnings: 0 } };
     });
-    t.after(() => {
-      restore();
+    t.after(async () => {
+      await closeStore(jobStore);
       if (previousLease === undefined) delete process.env.TROVE_JOB_LEASE_SECONDS;
       else process.env.TROVE_JOB_LEASE_SECONDS = previousLease;
     });
 
-    const job = await store.enqueueJob({
+    const job = await jobStore.enqueueJob({
       kind: "lint_graph",
       payload: { smoke: "heartbeat" },
       priority: 0,
       dedupeKey: `smoke:heartbeat:${stamp}`,
     }, context);
-    const first = store.runJob({ jobId: job.id }, context);
+    const first = jobStore.runJob({ jobId: job.id }, context);
     await sleep(1_300);
-    const contender = await store.runJob({ jobId: job.id }, context);
+    const contender = await jobStore.runJob({ jobId: job.id }, context);
     assert.equal(contender?.status, "running", "the contender sees the job still running");
     assert.equal(contender?.attempts, 1, "a heartbeating job is not reclaimed after the lease window");
 
@@ -121,13 +111,13 @@ describe("jobs", () => {
 
     // The claim must succeed rather than raise 23505, and must run the live
     // job, not the shadowed retry.
-    const restore = patchPerformJob(store, async () => ({ ownerId: null, lint: { nodes: 0, edges: 0, findings: [], errors: 0, warnings: 0 } }));
+    const jobStore = storeWithJobRunner(async () => ({ ownerId: null, lint: { nodes: 0, edges: 0, findings: [], errors: 0, warnings: 0 } }));
     try {
-      const ran = await store.runJob({ jobId: pending.id }, context);
+      const ran = await jobStore.runJob({ jobId: pending.id }, context);
       assert.equal(ran?.id, pending.id);
       assert.equal(ran?.status, "succeeded");
     } finally {
-      restore();
+      await closeStore(jobStore);
     }
     const [retired] = await sql<{ status: string; error: string }>("select status, error from graph_job where id = $1", [failed.id]);
     assert.equal(retired?.status, "dead", "the shadowed failed row must be retired, not left to wedge the queue");
@@ -136,19 +126,19 @@ describe("jobs", () => {
   });
 
   it("a stale claimant cannot finish a job another worker has reclaimed", { skip: hasPostgres() ? false : "postgres only" }, async (t) => {
-    const restore = patchPerformJob(store, async () => {
+    const jobStore = storeWithJobRunner(async () => {
       await sleep(600);
       return { ownerId: null, lint: { nodes: 0, edges: 0, findings: [], errors: 0, warnings: 0 } };
     });
-    t.after(restore);
+    t.after(() => closeStore(jobStore));
 
-    const job = await store.enqueueJob({
+    const job = await jobStore.enqueueJob({
       kind: "lint_graph",
       payload: { smoke: "stale-claimant" },
       priority: 0,
       dedupeKey: `smoke:stale-claimant:${stamp}`,
     }, context);
-    const stale = store.runJob({ jobId: job.id }, context);
+    const stale = jobStore.runJob({ jobId: job.id }, context);
     await sleep(200);
     // Simulate a lease reclaim by another worker while the first is mid-job.
     await sql(
@@ -252,12 +242,12 @@ describe("jobs", () => {
   });
 
   it("the retry budget is JOB_MAX_ATTEMPTS: the last failure dead-letters", async (t) => {
-    const restore = patchPerformJob(store, () => {
+    const jobStore = storeWithJobRunner(() => {
       throw new Error("boom");
     });
-    t.after(restore);
+    t.after(() => closeStore(jobStore));
 
-    const job = await store.enqueueJob({
+    const job = await jobStore.enqueueJob({
       kind: "lint_graph",
       payload: { smoke: "dead-letter" },
       priority: 0,
@@ -265,8 +255,8 @@ describe("jobs", () => {
     }, context);
     assert.equal(typeof JOB_MAX_ATTEMPTS, "number");
     for (let attempt = 1; attempt <= JOB_MAX_ATTEMPTS; attempt += 1) {
-      await ageJob(store, job.id);
-      const result = await store.runJob({ jobId: job.id }, context);
+      await ageJob(jobStore, job.id);
+      const result = await jobStore.runJob({ jobId: job.id }, context);
       assert.equal(result?.attempts, attempt);
       assert.equal(
         result?.status as string,
@@ -397,7 +387,7 @@ describe("jobs", () => {
     await store.runJob({ jobId: first.id }, context); // drain: leave nothing pending
   });
 
-  it("enqueueEmbeddingDrainFollowUp continues an unfinished drain in its owner scope", async () => {
+  it("an unfinished embedding drain continues in its own owner scope", () => {
     const drainJob = (ownerId: string | null, missing: number, embedded: number): GraphJob => ({
       id: `drain-${stamp}`,
       kind: "refresh_embeddings",
@@ -413,24 +403,13 @@ describe("jobs", () => {
       startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
     });
 
-    // Unfinished, owner-scoped: follow-up queued with the owner's dedupe key.
-    const queued = await enqueueEmbeddingDrainFollowUp(store, drainJob(`owner-${stamp}`, 10, 4), context);
-    assert.equal(queued, true);
-    const followUps = (await store.jobs({ kind: "refresh_embeddings", limit: 100 }))
-      .filter((job) => String(job.dedupeKey).endsWith(`:owner-${stamp}`));
-    assert.equal(followUps.length, 1, "exactly one owner-scoped follow-up");
-    assert.equal((followUps[0]!.payload as Record<string, unknown>).ownerId, `owner-${stamp}`);
-
-    // Finished drain: no follow-up.
-    assert.equal(await enqueueEmbeddingDrainFollowUp(store, drainJob(`owner-${stamp}`, 4, 4), context), false);
-
-    // Global drain: global dedupe key, no ownerId in the payload.
-    await store.enqueueJob({ kind: "refresh_embeddings", payload: { reason: "graph_mutation" }, priority: 40, dedupeKey: "maintenance:refresh_embeddings" }, context);
-    const globalQueued = await enqueueEmbeddingDrainFollowUp(store, drainJob(null, 10, 4), context);
-    assert.equal(globalQueued, true);
-    const globals = (await store.jobs({ kind: "refresh_embeddings", limit: 100 }))
-      .filter((job) => job.dedupeKey === "maintenance:refresh_embeddings" && job.status === "pending");
-    assert.equal(globals.length, 1, "the global follow-up dedupes onto the one pending row");
-    assert.equal((globals[0]!.payload as Record<string, unknown>).ownerId, undefined);
+    const owned = followUpRequest(drainJob(`owner-${stamp}`, 10, 4));
+    const other = followUpRequest(drainJob(`other-${stamp}`, 10, 4));
+    const global = followUpRequest(drainJob(null, 10, 4));
+    assert.equal(owned?.kind, "refresh_embeddings");
+    assert.equal(owned?.payload.ownerId, `owner-${stamp}`);
+    assert.equal(global?.payload.ownerId, undefined);
+    assert.equal(new Set([owned?.dedupeKey, other?.dedupeKey, global?.dedupeKey]).size, 3, "an owner's drain is never absorbed into another's or the global one");
+    assert.equal(followUpRequest(drainJob(`owner-${stamp}`, 4, 4)), null, "a finished drain asks for nothing");
   });
 });

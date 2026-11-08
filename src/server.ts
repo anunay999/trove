@@ -67,8 +67,9 @@ import {
   resourceMetadataUrl,
 } from "./oauthMetadata.js";
 import { createGraphStore } from "./createStore.js";
-import { EdgeValidityConflictError } from "./graphCore.js";
+import { EdgeValidityConflictError, ownerScope } from "./graphCore.js";
 import { isSmokeEvent } from "./events.js";
+import { scopeEnqueueInput } from "./jobs.js";
 import { buildMemoryIndex } from "./memoryIndex.js";
 import { sourceDaySeries } from "./sourceStats.js";
 import { jobResultAs } from "./jobResults.js";
@@ -792,7 +793,8 @@ app.post("/v1/jobs", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:admin"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), enqueueJobInputSchema);
-  return context.json({ job: await store.enqueueJob(input, operationContextFromAuth(auth)) }, 201);
+  const operation = operationContextFromAuth(auth);
+  return context.json({ job: await store.enqueueJob(scopeEnqueueInput(input, ownerScope(operation)), operation) }, 201);
 });
 
 app.post("/v1/jobs/run", async (context) => {

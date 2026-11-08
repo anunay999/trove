@@ -26,7 +26,6 @@ import type {
   GraphLintReport,
   RefreshEmbeddingsResult,
 } from "./graphCore.js";
-import type { ObsidianManifest } from "./obsidianExport.js";
 import type { ReconcileResult } from "./reconcile.js";
 import type { DreamResult } from "./dream.js";
 
@@ -41,15 +40,9 @@ export type LintGraphJobResult = {
   prunedEvents: number;
 };
 
-export type RefreshObsidianProjectionJobResult = {
-  manifest: ObsidianManifest;
-  fileCount: number;
-};
-
 export type GraphJobResultMap = {
   lint_graph: LintGraphJobResult;
   refresh_embeddings: RefreshEmbeddingsResult;
-  refresh_obsidian_projection: RefreshObsidianProjectionJobResult;
   reconcile_node: ReconcileResult;
   recall_self_test: RecallSelfTestResult;
   dream: DreamResult;

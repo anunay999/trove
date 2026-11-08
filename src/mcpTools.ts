@@ -25,7 +25,8 @@ import {
 } from "./contracts.js";
 import { assertScopes, operationContextFromAuth, type AuthContext, type TroveScope } from "./auth.js";
 import { forget, ingest, readAny, remember } from "./agentOps.js";
-import type { GraphStore } from "./graphCore.js";
+import { ownerScope, type GraphStore } from "./graphCore.js";
+import { scopeEnqueueInput } from "./jobs.js";
 import { buildMemoryIndex } from "./memoryIndex.js";
 import { toolDescription, TROVE_AGENT_DOCTRINE, visibleTiers } from "./toolDefinitions.js";
 import { getSkill } from "./skills.js";
@@ -324,7 +325,7 @@ export function createTroveMcpServer(
       async (input) => withScopes(
         authContext,
         ["graph:admin"],
-        async () => jsonToolResult(await store.enqueueJob(input, operationContext)),
+        async () => jsonToolResult(await store.enqueueJob(scopeEnqueueInput(input, ownerScope(operationContext)), operationContext)),
       ),
     );
 

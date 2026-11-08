@@ -1,5 +1,6 @@
 import { createGraphStore } from "../src/createStore.js";
-import type { GraphStore } from "../src/graphCore.js";
+import type { GraphJob, GraphStore } from "../src/graphCore.js";
+import type { GraphJobResult } from "../src/jobResults.js";
 
 export type WriteContext = {
   actorId: string;
@@ -32,6 +33,11 @@ export function suiteStore(name: string): {
       requestId: `${name}-test-${stamp}`,
     },
   };
+}
+
+/** A store of the configured driver whose jobs run `runner` instead of their real work. */
+export function storeWithJobRunner(runner: (job: GraphJob) => unknown): GraphStore {
+  return createGraphStore({ jobRunner: async (_host, job) => (await runner(job)) as GraphJobResult }).store;
 }
 
 export async function closeStore(store: GraphStore): Promise<void> {

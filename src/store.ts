@@ -106,15 +106,21 @@ import { ServedUnitLog } from "./servedUnits.js";
 import { revisedAfterSupersededFinding, RECONCILE_FINDING_LIMIT, reconcileLintFinding } from "./lint.js";
 import { cosineSimilarity, createEmbeddingProviderFromEnv, type EmbeddingProvider } from "./embeddings.js";
 import type { Reranker } from "./rerank.js";
-import { buildObsidianVaultExport } from "./obsidianExport.js";
 import { EdgeValidityConflictError, ownerScope, UnknownEvidenceReferenceError } from "./graphCore.js";
-import { JOB_MAX_ATTEMPTS, TERMINAL_JOB_RETENTION_DAYS, lintMinIntervalSeconds } from "./jobs.js";
+import {
+  JOB_MAX_ATTEMPTS,
+  followUpRequest,
+  maintenanceRequests,
+  reconcileRequest,
+  runJobKind,
+  TERMINAL_JOB_RETENTION_DAYS,
+  type JobHost,
+  type JobRequest,
+  type JobRunner,
+  type StoreOptions,
+} from "./jobs.js";
 import { eventPruneMaxRows, eventRetentionDays } from "./events.js";
-import { performReconcileNode, type ReconcileJudge } from "./reconcile.js";
-import { runRecallSelfTest } from "./recallSelfTest.js";
-import { dreamOptionsFromPayload, performDream } from "./dream.js";
-import { observe, withTraceAttributes } from "./tracing.js";
-import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
+import type { ReconcileJudge } from "./reconcile.js";
 import { slugify } from "./slug.js";
 
 type Revision = {
@@ -127,9 +133,6 @@ type Revision = {
   createdAt: string;
 };
 
-function asSelfTestPayload(payload: unknown): Record<string, unknown> {
-  return payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
-}
 
 /** Catalog/log-style pages are useful as pointers but starve search/recall. */
 const GIANT_CONTENT_CHARS = 12_000;
@@ -176,7 +179,10 @@ export class InMemoryGraphStore implements GraphStore {
   private reranker: Reranker | null;
   private embeddings: EmbeddingProvider | null;
 
-  constructor(options: { reconcileJudge?: ReconcileJudge | null; reranker?: Reranker | null; embeddings?: EmbeddingProvider | null } = {}) {
+  private jobRunner: JobRunner;
+
+  constructor(options: StoreOptions = {}) {
+    this.jobRunner = options.jobRunner ?? runJobKind;
     this.reconcileJudge = options.reconcileJudge ?? null;
     this.reranker = options.reranker ?? null;
     this.embeddings = options.embeddings === undefined ? createEmbeddingProviderFromEnv() : options.embeddings;
@@ -224,7 +230,7 @@ export class InMemoryGraphStore implements GraphStore {
       this.textChunks.set(chunk.id, chunk);
     }
     this.recordEvent("ingest", source.id, context, now);
-    this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
+    this.enqueueRequests(maintenanceRequests({ lint: true, embeddings: true }, ownerScope(context)), context);
 
     const { contentText: _contentText, metadata: _metadata, ...publicSource } = source;
     this.servedUnits.mark(units.map((unit) => unit.id), context);
@@ -674,7 +680,7 @@ export class InMemoryGraphStore implements GraphStore {
         this.edges.set(edge.id, { ...edge, expiredAt: now, validUntil: closeAt(edge, now), invalidationReason: "tombstoned" });
       }
       this.recordEvent("tombstone", id, context, now);
-      this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
+      this.enqueueRequests(maintenanceRequests({ lint: true, embeddings: true }, ownerScope(context)), context);
       tombstoned.push(id);
     }
     return { tombstoned };
@@ -820,7 +826,7 @@ export class InMemoryGraphStore implements GraphStore {
     if (!existing) {
       this.edges.set(edge.id, edge);
       this.recordEvent("link", edge.id, context, now);
-      this.enqueueMaintenanceJobs(context, ["lint_graph"]);
+      this.enqueueRequests(maintenanceRequests({ lint: true }, ownerScope(context)), context);
     }
 
     if (previous) {
@@ -879,7 +885,7 @@ export class InMemoryGraphStore implements GraphStore {
     };
     this.edges.set(expired.id, expired);
     this.recordEvent("invalidate_edge", expired.id, context, patch.expiredAt);
-    this.enqueueMaintenanceJobs(context, ["lint_graph"]);
+    this.enqueueRequests(maintenanceRequests({ lint: true }, ownerScope(context)), context);
     return expired;
   }
 
@@ -919,8 +925,8 @@ export class InMemoryGraphStore implements GraphStore {
       createdAt: now,
     });
     this.recordEvent("capture", id, context, now);
-    this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
-    this.enqueueReconcileJob(context, id);
+    this.enqueueRequests(maintenanceRequests({ lint: true, embeddings: true }, ownerScope(context)), context);
+    this.enqueueRequests([reconcileRequest(id, ownerScope(context))], context);
 
     for (const evidence of input.evidence) {
       const annotationInput: AnnotateInput = {
@@ -987,7 +993,7 @@ export class InMemoryGraphStore implements GraphStore {
     };
     this.annotations.set(annotation.id, annotation);
     this.recordEvent("annotate", annotation.id, context, now);
-    this.enqueueMaintenanceJobs(context, ["lint_graph"]);
+    this.enqueueRequests(maintenanceRequests({ lint: true }, ownerScope(context)), context);
     return annotation;
   }
 
@@ -1070,9 +1076,9 @@ export class InMemoryGraphStore implements GraphStore {
       this.link({ fromNodeId: updated.id, toSlug: link.toSlug, predicate: link.predicate, weight: 1 }, context);
     }
     this.recordEvent("update", updated.id, context, now);
-    this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
+    this.enqueueRequests(maintenanceRequests({ lint: true, embeddings: true }, ownerScope(context)), context);
     // Preserve reconcile cadence: only body changes introduce claims to judge.
-    if (contentChanged) this.enqueueReconcileJob(context, updated.id);
+    if (contentChanged) this.enqueueRequests([reconcileRequest(updated.id, ownerScope(context))], context);
     return updated;
   }
 
@@ -1455,7 +1461,7 @@ export class InMemoryGraphStore implements GraphStore {
     this.graphJobs.set(running.id, running);
 
     try {
-      const result = await this.performJobTraced(running);
+      const result = await this.jobRunner(this.jobHost(), running);
       const finishedAt = new Date().toISOString();
       const succeeded: GraphJob = {
         ...running,
@@ -1466,6 +1472,8 @@ export class InMemoryGraphStore implements GraphStore {
       };
       this.graphJobs.set(succeeded.id, succeeded);
       this.recordEvent("run_job", succeeded.id, context, finishedAt);
+      const next = followUpRequest(succeeded);
+      if (next) this.enqueueRequests([next], context);
       return succeeded;
     } catch (error) {
       const finishedAt = new Date().toISOString();
@@ -1494,122 +1502,35 @@ export class InMemoryGraphStore implements GraphStore {
    * rides along so a cost view can be read per account, and the kind becomes
    * the trace name so one job type can be compared with itself over time.
    */
-  private async performJobTraced(job: GraphJob): Promise<GraphJobResult> {
-    const ownerId = typeof job.payload.ownerId === "string" ? job.payload.ownerId : undefined;
-    return withTraceAttributes(
-      { ...(ownerId ? { userId: ownerId } : {}), tags: ["job", job.kind] },
-      () => observe(`job:${job.kind}`, {
-        asType: "span",
-        input: { kind: job.kind, jobId: job.id, payload: job.payload },
-      }, async (span) => {
-        const result = await this.performJob(job);
-        span.update({ output: result });
-        return result;
+  private jobHost(): JobHost {
+    return {
+      store: this,
+      reconcileJudge: this.reconcileJudge,
+      prune: async () => ({ jobs: this.pruneTerminalJobs(), events: this.pruneEvents() }),
+      // No embedding backfill here: report what is missing and that it was skipped.
+      refreshEmbeddings: async (owner) => ({
+        provider: "none",
+        model: this.embeddings?.model ?? "unconfigured",
+        status: "skipped_no_embedding_provider",
+        ownerId: owner,
+        chunkedSources: 0,
+        missing: { nodeRevisions: this.nodes.size, textChunks: this.textChunks.size },
       }),
-    );
-  }
-
-  private async performJob(job: GraphJob): Promise<GraphJobResult> {
-    if (job.kind === "lint_graph") {
-      // The memory driver is single-user, so lint always covers the whole
-      // store; the owner is still reported so the result shape matches pg.
-      const payloadOwner = (job.payload as Record<string, unknown>).ownerId;
-      const ownerId = typeof payloadOwner === "string" ? payloadOwner : null;
-      const report = this.lint();
-      const prunedJobs = this.pruneTerminalJobs();
-      const prunedEvents = this.pruneEvents();
-      // Carry the findings themselves (capped) — counts alone are not actionable.
-      const result: GraphJobResultMap["lint_graph"] = {
-        ownerId,
-        lint: { ...report.summary, findings: report.findings.slice(0, 200) },
-        prunedJobs,
-        prunedEvents,
-      };
-      return result;
-    }
-
-    if (job.kind === "recall_self_test") {
-      const payload = asSelfTestPayload(job.payload);
-      const ownerId = typeof payload.ownerId === "string" ? payload.ownerId : null;
-      const sampleSize = typeof payload.sampleSize === "number" ? payload.sampleSize : undefined;
-      // Owner-scoped like every other read: a self-test must ask the graph the
-      // way its owner would, or it measures a pool they cannot see.
-      const result: GraphJobResultMap["recall_self_test"] = await runRecallSelfTest(
-        this,
-        sampleSize === undefined ? {} : { sampleSize },
-        ownerId ? { ownerId } : undefined,
-      );
-      return result;
-    }
-
-    if (job.kind === "dream") {
-      const payload = job.payload as Record<string, unknown>;
-      const result: GraphJobResultMap["dream"] = await performDream(this, { ...dreamOptionsFromPayload(payload), ownerId: typeof payload.ownerId === "string" ? payload.ownerId : null });
-      return result;
-    }
-
-    if (job.kind === "reconcile_node") {
-      const payload = job.payload as Record<string, unknown>;
-      const nodeId = typeof payload.nodeId === "string" ? payload.nodeId : null;
-      if (!nodeId) throw new Error("reconcile_node: payload.nodeId is required");
-      const ownerId = typeof payload.ownerId === "string" ? payload.ownerId : null;
-      const result: GraphJobResultMap["reconcile_node"] = await performReconcileNode(this, { nodeId, ownerId }, this.reconcileJudge);
-      return result;
-    }
-
-    if (job.kind === "refresh_obsidian_projection") {
-      const projection = buildObsidianVaultExport(this.exportMarkdown(), this.timeline(), this.exportGraph());
-      const result: GraphJobResultMap["refresh_obsidian_projection"] = {
-        manifest: projection.manifest,
-        fileCount: Object.keys(projection.files).length,
-      };
-      return result;
-    }
-
-    // The in-memory driver has no embedding backfill; report the skipped shape.
-    const result: GraphJobResultMap["refresh_embeddings"] = {
-      provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "none",
-      model: "unconfigured",
-      status: "skipped_no_embedding_provider",
-      ownerId: null,
-      chunkedSources: 0,
-      missing: {
-        nodeRevisions: this.nodes.size,
-        textChunks: this.textChunks.size,
-      },
     };
-    return result;
   }
 
-  /**
-   * Per-owner lint key and payload, global embedding refresh, and the lint
-   * throttle (no new lint within TROVE_LINT_MIN_INTERVAL_SECONDS of a
-   * successful one for the same key); see pgStore for the rationale.
-   */
-  private enqueueMaintenanceJobs(
-    context: GraphOperationContext | undefined,
-    kinds: Array<GraphJob["kind"]>,
-  ): void {
-    const scope = ownerScope(context);
-    for (const kind of kinds) {
-      const scoped = kind === "lint_graph" && scope.scoped && scope.ownerId !== null;
-      const dedupeKey = scoped ? `maintenance:${kind}:${scope.ownerId}` : `maintenance:${kind}`;
-      if (kind === "lint_graph" && this.lintSucceededRecently(dedupeKey)) continue;
-      this.enqueueJob({
-        kind,
-        payload: scoped ? { reason: "graph_mutation", ownerId: scope.ownerId } : { reason: "graph_mutation" },
-        priority: kind === "refresh_embeddings" ? 40 : 60,
-        dedupeKey,
-      }, context);
+  private enqueueRequests(requests: JobRequest[], context: GraphOperationContext | undefined): void {
+    for (const request of requests) {
+      if (request.throttleSeconds > 0 && this.succeededWithin(request.kind, request.dedupeKey, request.throttleSeconds)) continue;
+      const { throttleSeconds: _throttle, ...input } = request;
+      this.enqueueJob(input, context);
     }
   }
 
-  private lintSucceededRecently(dedupeKey: string): boolean {
-    const intervalMs = lintMinIntervalSeconds() * 1000;
-    if (intervalMs <= 0) return false;
-    const floor = Date.now() - intervalMs;
+  private succeededWithin(kind: GraphJob["kind"], dedupeKey: string, seconds: number): boolean {
+    const floor = Date.now() - seconds * 1000;
     return [...this.graphJobs.values()].some((job) =>
-      job.kind === "lint_graph" &&
+      job.kind === kind &&
       job.dedupeKey === dedupeKey &&
       job.status === "succeeded" &&
       Date.parse(job.finishedAt ?? job.updatedAt) > floor
@@ -1621,7 +1542,7 @@ export class InMemoryGraphStore implements GraphStore {
     const floor = Date.now() - TERMINAL_JOB_RETENTION_DAYS * 86_400_000;
     let pruned = 0;
     for (const [id, job] of this.graphJobs) {
-      const terminal = job.status === "succeeded" || job.status === "failed" || job.status === "cancelled" || (job.status as string) === "dead";
+      const terminal = job.status === "succeeded" || job.status === "failed" || job.status === "cancelled" || job.status === "dead";
       if (!terminal || Date.parse(job.finishedAt ?? job.updatedAt) >= floor) continue;
       this.graphJobs.delete(id);
       pruned += 1;
@@ -1652,16 +1573,6 @@ export class InMemoryGraphStore implements GraphStore {
     this.eventLog.length = 0;
     for (const event of survivors) this.eventLog.push(event);
     return expired.length;
-  }
-
-  /** Per-node reconciliation enqueue; see pgStore for the rationale. */
-  private enqueueReconcileJob(context: GraphOperationContext | undefined, nodeId: string): void {
-    this.enqueueJob({
-      kind: "reconcile_node",
-      payload: { reason: "graph_mutation", nodeId, ownerId: ownerScope(context).ownerId },
-      priority: 30,
-      dedupeKey: `reconcile:${nodeId}`,
-    }, context);
   }
 
   private uniqueSlug(baseSlug: string): string {

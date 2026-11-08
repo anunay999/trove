@@ -1,6 +1,7 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { embeddingDrainRemaining, startJobWorker } from "../src/jobWorker.js";
+import { embeddingDrainRemaining } from "../src/jobs.js";
+import { startJobWorker } from "../src/jobWorker.js";
 import type { GraphJob } from "../src/graphCore.js";
 import { suiteStore, closeStore, sleep, isolateDatabase } from "./helpers.js";
 

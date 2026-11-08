@@ -1,7 +1,7 @@
 import { describe, it, after, before } from "node:test";
 import assert from "node:assert/strict";
 import type { GraphOperationContext } from "../src/graphCore.js";
-import { embeddingDrainRemaining } from "../src/jobWorker.js";
+import { embeddingDrainRemaining } from "../src/jobs.js";
 import { PgGraphStore } from "../src/pgStore.js";
 import { isolateDatabase, hasPostgres } from "./helpers.js";
 
