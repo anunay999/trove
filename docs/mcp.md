@@ -151,7 +151,7 @@ Operator (admin credentials only):
 
 - `events` - cursor-paginated graph mutation events for interface sync
 - `lint` - graph health issues
-- `jobs` / `enqueue_job` / `run_job` - durable maintenance queue
+- `jobs` / `enqueue_job` / `run_job` - durable maintenance queue (kinds include `dream`, the offline consolidation pass; payload `budget`, `pages`, `retireAfterDays`)
 - `export_obsidian` - Obsidian vault projection with files and a manifest
 
 ## Resources
@@ -159,6 +159,7 @@ Operator (admin credentials only):
 Trove exposes read-only MCP resources for stable agent context:
 
 - `trove://doctrine` - **agent operating model** (read at session start if needed)
+- `trove://index` - **session-start memory index** for the caller: hubs, entity pages, most-used and recently changed notes (markdown, at most 200 lines / 25 KB)
 - `trove://health` - store health
 - `trove://lint` - current graph health report
 - `trove://events` - first page of the cursor event feed

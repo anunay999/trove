@@ -43,6 +43,19 @@ Lint:
 npm run cli -- lint
 ```
 
+Session-start memory index (markdown, for a hook or a quick look):
+
+```bash
+npm run cli -- index
+```
+
+Run dreaming now (offline consolidation; see `src/dream.ts`):
+
+```bash
+npm run cli -- enqueue-job dream --payload-json '{"budget":200}'
+npm run cli -- run-job
+```
+
 Poll the interface sync event feed:
 
 ```bash
@@ -93,6 +106,7 @@ The reusable HTTP client lives at `src/httpClient.ts` and exposes:
 - `search`
 - `capture`
 - `lint`
+- `memoryIndex`
 - `events`
 - `views`
 - `createView`

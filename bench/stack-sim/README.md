@@ -16,6 +16,20 @@ Question: what can Trove adopt, which dimensions are new, and how do the layers
 
 ---
 
+## Status (what has since landed in this branch)
+
+| Proposal | Status |
+|---|---|
+| 4.1 stale SUPERSEDED mark | **Fixed**, read-side: `supersededBy` ignores an edge recorded before the target's current revision (both drivers); lint `revised_after_superseded` reports the edge. Rerunning S1c on the fixed store gives strong · full stack **89.3%** (82.1% before, 91.6% with the sim's write-side variant; the gap is the both-read-as-current window until dreaming re-points the edge). |
+| 4.2 citations a revision contradicts | **Fixed**: `remember` returns `evidenceStale`; the write is incomplete unless the call cites new support. |
+| 4.3 session-start index | **Added**: `trove://index`, `GET /v1/index?format=text`, `trove index`; SessionStart hook recipe in `docs/agent-usage.md`. |
+| 4.4 dream job | **Added** (`src/dream.ts`, job kind `dream`): re-point turned-around supersessions, report newer conflicting sources and uncited sources, opt-in retirement. Not yet: merging judged duplicates, LLM verification. Scheduled only with `TROVE_DREAM=1`. |
+| 4.5 entity pages | **Added** as a dream output: one `community` page per hub, quoting current notes, listed in the index. |
+| 4.6 new dimensions | Not started. |
+
+The result tables below are from before these changes and are kept as the record
+the decisions were made on.
+
 ## 1 · The intuition in one picture
 
 Think of a new team member who keeps a notebook.

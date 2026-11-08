@@ -183,6 +183,7 @@ Use stable URI shapes:
 
 ```text
 trove://health
+trove://index
 trove://lint
 trove://events
 trove://jobs
@@ -198,7 +199,7 @@ trove://view/{view_id}                         # planned
 trove://search?q=deterministic+dedup           # planned
 ```
 
-Current MCP resources expose health, lint, cursor events, jobs, saved views, and the graph snapshot. Node/source URI templates are the next resource expansion.
+Current MCP resources expose health, the session-start memory index, lint, cursor events, jobs, saved views, and the graph snapshot. The index is also `GET /v1/index` (JSON `{ text, nodes, edges, truncated }`; `?format=text` returns the markdown alone, for hooks). Node/source URI templates are the next resource expansion.
 
 ## Write Discipline
 
