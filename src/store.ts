@@ -82,6 +82,7 @@ import {
   type ProjectResult,
   type ReadResult,
   type RecallResult,
+  type RecallTrace,
   type SearchResult,
   type TextQuoteMatch,
 } from "./graphCore.js";
@@ -104,6 +105,7 @@ import {
 import { ServedUnitLog } from "./servedUnits.js";
 import { revisedAfterSupersededFinding, RECONCILE_FINDING_LIMIT, reconcileLintFinding } from "./lint.js";
 import { cosineSimilarity, createEmbeddingProviderFromEnv, type EmbeddingProvider } from "./embeddings.js";
+import type { Reranker } from "./rerank.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
 import { EdgeValidityConflictError, ownerScope, UnknownEvidenceReferenceError } from "./graphCore.js";
 import { JOB_MAX_ATTEMPTS, TERMINAL_JOB_RETENTION_DAYS, lintMinIntervalSeconds } from "./jobs.js";
@@ -171,8 +173,13 @@ export class InMemoryGraphStore implements GraphStore {
    */
   private reconcileJudge: ReconcileJudge | null;
 
-  constructor(options: { reconcileJudge?: ReconcileJudge | null } = {}) {
+  private reranker: Reranker | null;
+  private embeddings: EmbeddingProvider | null;
+
+  constructor(options: { reconcileJudge?: ReconcileJudge | null; reranker?: Reranker | null; embeddings?: EmbeddingProvider | null } = {}) {
     this.reconcileJudge = options.reconcileJudge ?? null;
+    this.reranker = options.reranker ?? null;
+    this.embeddings = options.embeddings === undefined ? createEmbeddingProviderFromEnv() : options.embeddings;
     this.seed();
   }
 
@@ -260,7 +267,7 @@ export class InMemoryGraphStore implements GraphStore {
     context?: GraphOperationContext,
     observer?: SearchObserver,
   ): Promise<SearchResult> {
-    const provider = input.mode === "lexical" ? null : createEmbeddingProviderFromEnv();
+    const provider = input.mode === "lexical" ? null : this.embeddings;
 
     let result: SearchResult;
     // Mirrors PgGraphStore.search: a semantic-only search must not run (and
@@ -847,8 +854,8 @@ export class InMemoryGraphStore implements GraphStore {
     }, context);
   }
 
-  recall(input: RecallInput): Promise<RecallResult> {
-    return performRecall(this, input);
+  recall(input: RecallInput, context?: GraphOperationContext, options: { onTrace?: RecallTrace } = {}): Promise<RecallResult> {
+    return performRecall(this, input, context, { reranker: this.reranker, ...options });
   }
 
   private expireEdge(

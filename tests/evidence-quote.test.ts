@@ -299,6 +299,16 @@ describe("cite-by-quote evidence (backlog #9)", () => {
     assert.equal(result.evidenceUnserved, undefined, "a unit recall served is not a hallucination");
   });
 
+  it("recall serves the evidence it packs to the owner who asked", { skip: hasPostgres() ? "an owner cannot read unscoped units on pg" : false }, async () => {
+    const owner = { ...context, ownerId: "00000000-0000-4000-8000-0000000000aa" };
+    const { textUnits } = await store.ingest({ kind: "agent_note", title: `Gizmo log ${stamp}`, contentText: `The gizmo${stamp} relay runs on port 7171.`, metadata: {} }, context);
+    const unit = textUnits[0]!;
+    assert.equal(await store.textUnitWasServed({ textUnitId: unit.id }, owner), false);
+    const pack = await store.recall({ query: `gizmo${stamp} relay port`, tokenBudget: 8000, depth: 0, includeEvidence: true }, owner);
+    assert.ok(pack.evidence.some((packed) => packed.id === unit.id));
+    assert.equal(await store.textUnitWasServed({ textUnitId: unit.id }, owner), true, "recall must mark what it served under the caller's owner");
+  });
+
   it("quote resolution fails closed across owner scopes (pg-only; memory declares no owner enforcement)", async () => {
     // S1/S2 were ingested by the UNSCOPED main context (owner NULL on pg), so
     // the owner-scoped context must not resolve quotes against them. The

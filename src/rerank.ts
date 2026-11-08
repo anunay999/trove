@@ -38,9 +38,9 @@
 
 import type { GraphNode } from "./contracts.js";
 import { contentTerms } from "./queryNormalize.js";
-import { defaultUtilityModel, resolveLlmProvider } from "./llmProvider.js";
+import { completeJson, defaultUtilityModel, resolveLlmProvider } from "./llmProvider.js";
 import { featureEnabled } from "./flags.js";
-import { observe, usageFrom, type Recorder } from "./tracing.js";
+import { observe } from "./tracing.js";
 
 /** What the reranker is shown about one candidate. Bounded by construction. */
 export type RerankCandidate = {
@@ -207,7 +207,6 @@ export function createRecallRerankerFromEnv(): Reranker | null {
   if (!featureEnabled(process.env.TROVE_RECALL_RERANK)) return null;
   const provider = resolveLlmProvider();
   if (!provider) return null;
-  const { apiKey, baseUrl } = provider;
   const model = process.env.TROVE_RECALL_RERANK_MODEL ?? defaultUtilityModel(provider);
 
   return async ({ query, candidates }) => {
@@ -219,44 +218,13 @@ export function createRecallRerankerFromEnv(): Reranker | null {
       metadata: { model, candidates: candidates.length },
     }, async (recorder) => {
       recorder.update({ model });
-      return rerankOnce({ apiKey, baseUrl, model, prompt, count: candidates.length }, recorder);
+      const { reply, usage } = await completeJson(provider, { label: "recall reranker", model, prompt, timeoutMs: rerankTimeoutMs() });
+      recorder.update({ output: reply, ...(usage ? { usageDetails: usage } : {}) });
+      const scores = parseRerankScores(reply, candidates.length);
+      if (!scores) throw new Error("recall reranker: unusable reply");
+      return scores;
     });
   };
-}
-
-/**
- * One reranking call. Split out so the traced wrapper above reads as one line
- * and this stays the plain HTTP it always was.
- */
-async function rerankOnce(
-  call: { apiKey: string; baseUrl: string; model: string; prompt: string; count: number },
-  recorder: Recorder,
-): Promise<number[]> {
-  const { apiKey, baseUrl, model, prompt, count } = call;
-  {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-      // The fetch carries its own deadline so the socket is actually released;
-      // rerankCandidates races the same budget so a provider that ignores the
-      // signal still cannot hold up a recall.
-      signal: AbortSignal.timeout(rerankTimeoutMs()),
-      body: JSON.stringify({
-        model,
-        temperature: 0,
-        response_format: { type: "json_object" },
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-    if (!response.ok) throw new Error(`recall reranker: OpenAI ${response.status}`);
-    const body = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    const reply = body.choices?.[0]?.message?.content ?? "";
-    const usage = usageFrom(body);
-    recorder.update({ output: reply, ...(usage ? { usageDetails: usage } : {}) });
-    const scores = parseRerankScores(reply, count);
-    if (!scores) throw new Error("recall reranker: unusable reply");
-    return scores;
-  }
 }
 
 /**

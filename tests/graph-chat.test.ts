@@ -8,9 +8,9 @@ import {
   parseChatDelta,
   emptyAnswerMessage,
   parseChatFinishReason,
-  providerErrorMessage,
   type GraphChatModel,
 } from "../src/chatModel.js";
+import { providerErrorMessage } from "../src/llmProvider.js";
 import { encodeChatEvent, graphChatResponse, runGraphChat, type GraphChatEvent } from "../src/graphChat.js";
 import { createGraphStore } from "../src/createStore.js";
 import type { GraphStore } from "../src/graphCore.js";

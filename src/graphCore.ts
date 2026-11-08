@@ -527,7 +527,7 @@ export type GraphStore = {
    * agent prefers the successor instead of reading two co-equal "truths".
    */
   supersededBy(nodeIds: string[], context?: GraphOperationContext): MaybePromise<Map<string, { byNodeId: string; byTitle: string }>>;
-  recall(input: RecallInput, context?: GraphOperationContext): MaybePromise<RecallResult>;
+  recall(input: RecallInput, context?: GraphOperationContext, options?: { onTrace?: RecallTrace }): MaybePromise<RecallResult>;
   link(input: LinkInput, context?: GraphOperationContext): MaybePromise<GraphEdge | null>;
   invalidateEdge(input: InvalidateEdgeInput, context?: GraphOperationContext): MaybePromise<GraphEdge | null>;
   capture(input: CaptureInput, context?: GraphOperationContext): MaybePromise<GraphNode>;

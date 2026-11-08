@@ -17,7 +17,6 @@ import type {
 } from "./graphCore.js";
 import { contentTerms } from "./queryNormalize.js";
 import {
-  createRecallRerankerFromEnv,
   mmrOrder,
   RERANK_MAX_CANDIDATES,
   rerankCandidates,
@@ -382,7 +381,7 @@ async function performRecallInner(
   // Head only, and the tail keeps its place behind it. Scores either side of
   // that boundary come from different scales and are deliberately not compared;
   // what packing consumes is the order, not the number.
-  const reranker = options.reranker === undefined ? createRecallRerankerFromEnv() : options.reranker;
+  const reranker = options.reranker ?? null;
   const rerankHead = blended.slice(0, RERANK_MAX_CANDIDATES);
   const rerankScores = await rerankCandidates(reranker, {
     query: input.query,

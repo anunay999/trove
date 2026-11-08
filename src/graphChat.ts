@@ -35,12 +35,10 @@
  */
 
 import { graphChatInputSchema, type GraphChatInput, type GraphNode } from "./contracts.js";
-import { performRecall } from "./recall.js";
 import type { GraphOperationContext, GraphStore, RecallCitation, SearchArm } from "./graphCore.js";
 import {
   buildChatMessages,
   citedSlugs,
-  createGraphChatModelFromEnv,
   type GraphChatModel,
 } from "./chatModel.js";
 import { observe, withTraceAttributes } from "./tracing.js";
@@ -166,7 +164,7 @@ export async function* runGraphChat(
   options: { model?: GraphChatModel | null; signal?: AbortSignal } = {},
 ): AsyncGenerator<GraphChatEvent> {
   const input = graphChatInputSchema.parse(rawInput);
-  const model = options.model === undefined ? createGraphChatModelFromEnv() : options.model;
+  const model = options.model ?? null;
   const startedAt = Date.now();
   const abort = new AbortController();
   if (options.signal) {
@@ -206,7 +204,7 @@ export async function* runGraphChat(
       try {
         emit({ type: "start", query: input.query });
 
-        const recall = await performRecall(store, {
+        const recall = await store.recall({
           query: input.query,
           tokenBudget: input.tokenBudget,
           depth: input.depth,

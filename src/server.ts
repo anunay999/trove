@@ -73,6 +73,7 @@ import { buildMemoryIndex } from "./memoryIndex.js";
 import { sourceDaySeries } from "./sourceStats.js";
 import { jobResultAs } from "./jobResults.js";
 import { flushTracing, startTracing, tracingEnabled } from "./tracing.js";
+import { createGraphChatModelFromEnv } from "./chatModel.js";
 import { graphChatResponse } from "./graphChat.js";
 import { startJobWorker } from "./jobWorker.js";
 import {
@@ -96,6 +97,7 @@ import { DASHBOARD_PATHS } from "./webRoutes.js";
 
 const app = new Hono();
 const { store, driver } = createGraphStore();
+const chatModel = createGraphChatModelFromEnv();
 
 // User accounts and per-user API keys need Postgres; without it (in-memory
 // dev store) the Clerk/key resolvers stay off and env tokens rule alone.
@@ -574,6 +576,7 @@ app.post("/v1/graph-chat", async (context) => {
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), graphChatInputSchema);
   return graphChatResponse(store, input, operationContextFromAuth(auth), {
+    model: chatModel,
     // A closed tab must abort the model call, not leave it streaming to nobody.
     signal: context.req.raw.signal,
   });

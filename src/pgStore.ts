@@ -63,6 +63,7 @@ import {
   type ProjectResult,
   type ReadResult,
   type RecallResult,
+  type RecallTrace,
   type SearchResult,
   type TextQuoteMatch,
 } from "./graphCore.js";
@@ -89,6 +90,7 @@ import { ServedUnitLog } from "./servedUnits.js";
 import { RECONCILE_FINDING_LIMIT, revisedAfterSupersededFinding, reconcileLintFinding } from "./lint.js";
 import { ActivationBuffer, type ActivationBump } from "./activation.js";
 import { createEmbeddingProviderFromEnv, vectorLiteral, type EmbeddingProvider } from "./embeddings.js";
+import { createRecallRerankerFromEnv, type Reranker } from "./rerank.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
 import {
   createReconcileJudgeFromEnv,
@@ -495,11 +497,17 @@ type PgStoreOptions = {
    * unconfigured). Pass `null` explicitly to force the heuristic.
    */
   reconcileJudge?: ReconcileJudge | null;
+  /** Recall reranker; defaults to the environment's. */
+  reranker?: Reranker | null;
+  /** Embedding provider; defaults to the environment's. */
+  embeddings?: EmbeddingProvider | null;
 };
 
 export class PgGraphStore implements GraphStore {
   private pool: pg.Pool;
   private reconcileJudge: ReconcileJudge | null;
+  private reranker: Reranker | null;
+  private embeddings: EmbeddingProvider | null;
   /**
    * Session-served provenance log (backlog #9b). In-process by design — the
    * server is one process, and this backs a warning, not a security boundary.
@@ -523,6 +531,8 @@ export class PgGraphStore implements GraphStore {
   constructor(options: PgStoreOptions) {
     this.pool = new Pool({ connectionString: options.connectionString, keepAlive: true });
     this.reconcileJudge = options.reconcileJudge === undefined ? createReconcileJudgeFromEnv() : options.reconcileJudge;
+    this.reranker = options.reranker === undefined ? createRecallRerankerFromEnv() : options.reranker;
+    this.embeddings = options.embeddings === undefined ? createEmbeddingProviderFromEnv() : options.embeddings;
     // Idle clients dropped by the pooler (e.g. Supabase) emit 'error'; without
     // a listener that unhandled event kills the whole process.
     this.pool.on("error", (error) => {
@@ -847,7 +857,7 @@ export class PgGraphStore implements GraphStore {
     observer?: SearchObserver,
   ): Promise<SearchResult> {
     const scope = ownerScope(context);
-    const provider = input.mode === "lexical" ? null : createEmbeddingProviderFromEnv();
+    const provider = input.mode === "lexical" ? null : this.embeddings;
 
     let result: SearchResult;
     // Semantic-only searches used to run a full lexical search first and throw
@@ -1659,8 +1669,8 @@ export class PgGraphStore implements GraphStore {
     return result.rows.map((row) => ({ node: mapNode(row), score: Number(row.score) }));
   }
 
-  async recall(input: RecallInput, context?: GraphOperationContext): Promise<RecallResult> {
-    return performRecall(this, input, context);
+  async recall(input: RecallInput, context?: GraphOperationContext, options: { onTrace?: RecallTrace } = {}): Promise<RecallResult> {
+    return performRecall(this, input, context, { reranker: this.reranker, ...options });
   }
 
   async capture(input: CaptureInput, context?: GraphOperationContext): Promise<GraphNode> {
@@ -3110,7 +3120,7 @@ export class PgGraphStore implements GraphStore {
       return result;
     }
 
-    const provider = createEmbeddingProviderFromEnv();
+    const provider = this.embeddings;
     const model = provider?.model ?? process.env.TROVE_EMBEDDING_MODEL ?? "unconfigured";
     // payload.ownerId scopes the whole job to one tenant: a bulk importer can
     // ask "is MY data indexed yet?" and drain just its own slice instead of
@@ -3713,7 +3723,7 @@ export class PgGraphStore implements GraphStore {
 
   /** For each note, the nearest team note by meaning, when it is close enough to be the same fact. */
   private async closestTeamNotes(nodeIds: string[], team: string): Promise<Map<string, { slug: string; title: string; distance: number }>> {
-    const provider = createEmbeddingProviderFromEnv();
+    const provider = this.embeddings;
     if (!provider || nodeIds.length === 0) return new Map();
     // ponytail: compares each listed note with every team note, a vector index if teams reach thousands of notes.
     const result = await this.pool.query(
@@ -3744,7 +3754,7 @@ export class PgGraphStore implements GraphStore {
     );
     const found = new Map<string, { slug: string; title: string; score: number; match: SimilarNote["match"] }>();
     for (const row of titles.rows) found.set(String(row.id), { slug: String(row.slug), title: String(row.title), score: Number(row.score), match: "title" });
-    const provider = createEmbeddingProviderFromEnv();
+    const provider = this.embeddings;
     if (provider) {
       try {
         const { nodes } = await this.semanticSearch(
