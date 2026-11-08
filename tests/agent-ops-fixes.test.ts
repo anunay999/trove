@@ -1,7 +1,9 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { forget, remember } from "../src/agentOps.js";
-import { suiteStore, closeStore } from "./helpers.js";
+import { suiteStore, closeStore, isolateDatabase } from "./helpers.js";
+
+await isolateDatabase("agent_ops_fixes");
 
 // Regression tests for the agent-ops fixes:
 // - F2: forget retires whole beliefs (nodes), not only edges.

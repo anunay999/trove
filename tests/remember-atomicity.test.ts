@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { remember } from "../src/agentOps.js";
 import { UnknownEvidenceReferenceError } from "../src/graphCore.js";
 import { slugify } from "../src/slug.js";
-import { suiteStore, closeStore, hasPostgres } from "./helpers.js";
+import { suiteStore, closeStore, hasPostgres, isolateDatabase } from "./helpers.js";
+
+await isolateDatabase("remember_atomicity");
 
 /**
  * docs/architecture.md promises that remember is one transaction. These lock

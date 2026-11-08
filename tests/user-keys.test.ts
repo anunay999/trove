@@ -1,6 +1,9 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { UserStore, generateApiKey } from "../src/users.js";
+import { isolateDatabase } from "./helpers.js";
+
+await isolateDatabase("user_keys");
 
 const databaseUrl = process.env.DATABASE_URL;
 

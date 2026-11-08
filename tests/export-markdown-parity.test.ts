@@ -1,6 +1,8 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { suiteStore, closeStore } from "./helpers.js";
+import { suiteStore, closeStore, isolateDatabase } from "./helpers.js";
+
+await isolateDatabase("export_markdown_parity");
 
 // exportMarkdown used to call project() once per node. The Postgres driver now
 // assembles the whole vault from three bulk reads instead, because the N+1 made

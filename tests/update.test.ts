@@ -1,6 +1,8 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { suiteStore, closeStore } from "./helpers.js";
+import { suiteStore, closeStore, isolateDatabase } from "./helpers.js";
+
+await isolateDatabase("update");
 
 describe("update", () => {
   const { store, context, stamp } = suiteStore("update");
