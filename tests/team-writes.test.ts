@@ -4,7 +4,8 @@ import pg from "pg";
 import { createGraphStore } from "../src/createStore.js";
 import { UserStore } from "../src/users.js";
 import type { GraphStore } from "../src/graphCore.js";
-import { TeamSpaceError, contextForSpace, ingest, looksLikeCredential, remember } from "../src/agentOps.js";
+import { TeamSpaceError, contextForSpace, looksLikeCredential } from "../src/spaces.js";
+import { ingest, remember } from "../src/agentOps.js";
 import { SPACE_RULES, type RememberInput } from "../src/contracts.js";
 import { closeStore, isolateDatabase } from "./helpers.js";
 

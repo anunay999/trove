@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { GraphNode } from "../src/contracts.js";
 import type { GraphJob, GraphOperationContext, GraphStore } from "../src/graphCore.js";
-import { performRecall } from "../src/graphCore.js";
+import { performRecall } from "../src/recall.js";
 import { InMemoryGraphStore } from "../src/store.js";
 import { PgGraphStore } from "../src/pgStore.js";
 import {

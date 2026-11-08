@@ -31,40 +31,15 @@ import type {
   TextUnit,
   UpdateInput,
 } from "./contracts.js";
+import { compileGrepPattern, grepExcerpt, reportSearchArm } from "./retrievalPolicy.js";
 import {
-  compileGrepPattern,
-  grepExcerpt,
   isTextUnit,
   ownerScope,
   type OwnerScope,
-  JOB_MAX_ATTEMPTS,
-  TERMINAL_JOB_RETENTION_DAYS,
-  lintMinIntervalSeconds,
-  selfTestMinIntervalSeconds,
-  capEventPayload,
-  eventPruneMaxRows,
-  eventRetentionDays,
-  EVENT_PRUNE_BATCH_ROWS,
-  decodeEventCursor,
-  encodeEventCursor,
-  evidenceSupportScore,
-  performRecall,
-  reportSearchArm,
   type SearchObserver,
-  renderAgentContext,
-  renderMarkdownProjection,
   sha256,
-  splitTextUnits,
-  buildTextChunks,
-  chunkEmbeddingInput,
-  ServedUnitLog,
-  FUZZY_QUOTE_CANDIDATE_FLOOR,
   EdgeValidityConflictError,
   UnknownEvidenceReferenceError,
-  WEAK_EVIDENCE_FLOOR,
-  RECONCILE_FINDING_LIMIT,
-  revisedAfterSupersededFinding,
-  reconcileLintFinding,
   type ReconcileFlag,
   type ReconcileFlagCode,
   type GraphEvent,
@@ -72,7 +47,6 @@ import {
   type EmbeddingCounts,
   type GraphEventStats,
   type MemoryDay,
-  WRITE_ACTIONS,
   type GraphJob,
   type GraphOperationContext,
   type ShareableResult,
@@ -92,6 +66,27 @@ import {
   type SearchResult,
   type TextQuoteMatch,
 } from "./graphCore.js";
+import {
+  JOB_MAX_ATTEMPTS,
+  TERMINAL_JOB_RETENTION_DAYS,
+  lintMinIntervalSeconds,
+  selfTestMinIntervalSeconds,
+} from "./jobs.js";
+import {
+  capEventPayload,
+  eventPruneMaxRows,
+  eventRetentionDays,
+  EVENT_PRUNE_BATCH_ROWS,
+  decodeEventCursor,
+  encodeEventCursor,
+  WRITE_ACTIONS,
+} from "./events.js";
+import { evidenceSupportScore, FUZZY_QUOTE_CANDIDATE_FLOOR, WEAK_EVIDENCE_FLOOR } from "./evidence.js";
+import { performRecall } from "./recall.js";
+import { renderAgentContext, renderMarkdownProjection } from "./render.js";
+import { splitTextUnits, buildTextChunks, chunkEmbeddingInput } from "./chunking.js";
+import { ServedUnitLog } from "./servedUnits.js";
+import { RECONCILE_FINDING_LIMIT, revisedAfterSupersededFinding, reconcileLintFinding } from "./lint.js";
 import { ActivationBuffer, type ActivationBump } from "./activation.js";
 import { createEmbeddingProviderFromEnv, vectorLiteral, type EmbeddingProvider } from "./embeddings.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
@@ -105,7 +100,7 @@ import { dreamMinIntervalSeconds, dreamOptionsFromPayload, performDream } from "
 import { observe, withTraceAttributes } from "./tracing.js";
 import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
 import { slugify } from "./slug.js";
-import { looksLikeCredential, TeamSpaceError } from "./agentOps.js";
+import { looksLikeCredential, TeamSpaceError } from "./spaces.js";
 
 const { Pool } = pg;
 

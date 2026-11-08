@@ -1,7 +1,7 @@
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { remember } from "../src/agentOps.js";
-import { citationContradictsRevision } from "../src/graphCore.js";
+import { citationContradictsRevision } from "../src/evidence.js";
 import { closeStore, isolateDatabase, suiteStore } from "./helpers.js";
 
 await isolateDatabase("evidence_stale");

@@ -42,7 +42,8 @@ import {
   searchInputSchema,
   updateInputSchema,
 } from "./contracts.js";
-import { forget, ingest, remember, TeamSpaceError } from "./agentOps.js";
+import { forget, ingest, remember } from "./agentOps.js";
+import { TeamSpaceError } from "./spaces.js";
 import {
   AuthError,
   applyImpersonation,
@@ -54,14 +55,20 @@ import {
   type AuthResolvers,
   type TroveScope,
 } from "./auth.js";
-import { createApiKeyResolver, createClerkResolver, createOAuthResolver, createServiceOwnerResolver } from "./clerkAuth.js";
+import {
+  createApiKeyResolver,
+  createClerkResolver,
+  createOAuthResolver,
+  createServiceOwnerResolver,
+} from "./clerkAuth.js";
 import {
   buildProtectedResourceMetadata,
   requestOrigin,
   resourceMetadataUrl,
 } from "./oauthMetadata.js";
 import { createGraphStore } from "./createStore.js";
-import { EdgeValidityConflictError, isSmokeEvent } from "./graphCore.js";
+import { EdgeValidityConflictError } from "./graphCore.js";
+import { isSmokeEvent } from "./events.js";
 import { buildMemoryIndex } from "./memoryIndex.js";
 import { sourceDaySeries } from "./sourceStats.js";
 import { jobResultAs } from "./jobResults.js";

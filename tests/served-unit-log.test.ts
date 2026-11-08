@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ServedUnitLog } from "../src/graphCore.js";
+import { ServedUnitLog } from "../src/servedUnits.js";
 import type { GraphOperationContext } from "../src/graphCore.js";
 
 // Production RSS grew ~0.42 GB/day with flat CPU. Per-owner maps that are

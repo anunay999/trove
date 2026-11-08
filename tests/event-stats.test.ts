@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { InMemoryGraphStore } from "../src/store.js";
 import type { GraphEvent } from "../src/graphCore.js";
 import { suiteStore, closeStore, hasPostgres, isolateDatabase } from "./helpers.js";
-import { isSmokeEvent, WRITE_ACTIONS } from "../src/graphCore.js";
+import { isSmokeEvent, WRITE_ACTIONS } from "../src/events.js";
 
 /**
  * The dashboard's day/action rollups used to be built by paging the event feed

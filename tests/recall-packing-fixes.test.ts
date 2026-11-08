@@ -1,6 +1,6 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { estimateTokens } from "../src/graphCore.js";
+import { estimateTokens } from "../src/recall.js";
 import { suiteStore, closeStore, isolateDatabase } from "./helpers.js";
 
 // Regression tests for the recall packing fixes:

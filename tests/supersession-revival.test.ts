@@ -1,7 +1,7 @@
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { remember } from "../src/agentOps.js";
-import { supersessionRevivedBy } from "../src/graphCore.js";
+import { supersessionRevivedBy } from "../src/evidence.js";
 import { closeStore, isolateDatabase, sleep, suiteStore } from "./helpers.js";
 
 await isolateDatabase("supersession_revival");

@@ -23,7 +23,13 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { contentTerms, normalizeMatchToken, normalizeRetrievalQuery, retrievalQueryTerms, tokenizeForMatch } from "./queryNormalize.js";
+import {
+  contentTerms,
+  normalizeMatchToken,
+  normalizeRetrievalQuery,
+  retrievalQueryTerms,
+  tokenizeForMatch,
+} from "./queryNormalize.js";
 import type {
   AnnotateInput,
   CaptureInput,
@@ -52,38 +58,16 @@ import type {
   TextUnit,
   UpdateInput,
 } from "./contracts.js";
+import { compileGrepPattern, grepExcerpt, reportSearchArm } from "./retrievalPolicy.js";
 import {
-  compileGrepPattern,
-  grepExcerpt,
   isTextUnit,
-  performRecall,
-  reportSearchArm,
   type SearchObserver,
-  renderAgentContext,
-  renderMarkdownProjection,
-  decodeEventCursor,
-  encodeEventCursor,
-  evidenceSupportScore,
   sha256,
-  splitTextUnits,
-  buildTextChunks,
-  chunkEmbeddingInput,
-  isEmbeddableUnitText,
-  type TextChunk,
-  ServedUnitLog,
-  FUZZY_QUOTE_CANDIDATE_FLOOR,
-  WEAK_EVIDENCE_FLOOR,
-  supersessionRevivedBy,
-  revisedAfterSupersededFinding,
   type GraphEvent,
   type GraphEventFeed,
   type GraphEventStats,
   type MemoryDay,
-  isSmokeEvent,
-  RECONCILE_FINDING_LIMIT,
-  reconcileLintFinding,
   type ReconcileFlag,
-  WRITE_ACTIONS,
   type GraphJob,
   type GraphOperationContext,
   type GraphLintFinding,
@@ -101,18 +85,29 @@ import {
   type SearchResult,
   type TextQuoteMatch,
 } from "./graphCore.js";
+import { performRecall } from "./recall.js";
+import { renderAgentContext, renderMarkdownProjection } from "./render.js";
+import { decodeEventCursor, encodeEventCursor, isSmokeEvent, WRITE_ACTIONS } from "./events.js";
+import {
+  evidenceSupportScore,
+  FUZZY_QUOTE_CANDIDATE_FLOOR,
+  WEAK_EVIDENCE_FLOOR,
+  supersessionRevivedBy,
+} from "./evidence.js";
+import {
+  splitTextUnits,
+  buildTextChunks,
+  chunkEmbeddingInput,
+  isEmbeddableUnitText,
+  type TextChunk,
+} from "./chunking.js";
+import { ServedUnitLog } from "./servedUnits.js";
+import { revisedAfterSupersededFinding, RECONCILE_FINDING_LIMIT, reconcileLintFinding } from "./lint.js";
 import { cosineSimilarity, createEmbeddingProviderFromEnv, type EmbeddingProvider } from "./embeddings.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
-import {
-  EdgeValidityConflictError,
-  JOB_MAX_ATTEMPTS,
-  TERMINAL_JOB_RETENTION_DAYS,
-  lintMinIntervalSeconds,
-  eventPruneMaxRows,
-  eventRetentionDays,
-  ownerScope,
-  UnknownEvidenceReferenceError,
-} from "./graphCore.js";
+import { EdgeValidityConflictError, ownerScope, UnknownEvidenceReferenceError } from "./graphCore.js";
+import { JOB_MAX_ATTEMPTS, TERMINAL_JOB_RETENTION_DAYS, lintMinIntervalSeconds } from "./jobs.js";
+import { eventPruneMaxRows, eventRetentionDays } from "./events.js";
 import { performReconcileNode, type ReconcileJudge } from "./reconcile.js";
 import { runRecallSelfTest } from "./recallSelfTest.js";
 import { dreamOptionsFromPayload, performDream } from "./dream.js";

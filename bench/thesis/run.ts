@@ -42,7 +42,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import pg from "pg";
 import { PgGraphStore } from "../../src/pgStore.js";
-import { performRecall } from "../../src/graphCore.js";
+import { performRecall } from "../../src/recall.js";
 import type { GraphOperationContext, TextUnit } from "../../src/graphCore.js";
 import { cosineSimilarity, createEmbeddingProviderFromEnv } from "../../src/embeddings.js";
 import { createReconcileJudgeFromEnv } from "../../src/reconcile.js";

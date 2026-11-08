@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { InMemoryGraphStore } from "../src/store.js";
 import { suiteStore, closeStore, isolateDatabase, hasPostgres } from "./helpers.js";
-import { capEventPayload, EVENT_PAYLOAD_MAX_BYTES, isSmokeEvent, WRITE_ACTIONS } from "../src/graphCore.js";
+import { capEventPayload, EVENT_PAYLOAD_MAX_BYTES, isSmokeEvent, WRITE_ACTIONS } from "../src/events.js";
 import type { GraphEvent } from "../src/graphCore.js";
 
 /**

@@ -35,13 +35,8 @@
  */
 
 import { graphChatInputSchema, type GraphChatInput, type GraphNode } from "./contracts.js";
-import {
-  performRecall,
-  type GraphOperationContext,
-  type GraphStore,
-  type RecallCitation,
-  type SearchArm,
-} from "./graphCore.js";
+import { performRecall } from "./recall.js";
+import type { GraphOperationContext, GraphStore, RecallCitation, SearchArm } from "./graphCore.js";
 import {
   buildChatMessages,
   citedSlugs,

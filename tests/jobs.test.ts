@@ -5,7 +5,7 @@ import pg from "pg";
 import { suiteStore, closeStore, isolateDatabase, hasPostgres, sleep } from "./helpers.js";
 import { enqueueEmbeddingDrainFollowUp } from "../src/jobWorker.js";
 import { UserStore } from "../src/users.js";
-import { JOB_MAX_ATTEMPTS } from "../src/graphCore.js";
+import { JOB_MAX_ATTEMPTS } from "../src/jobs.js";
 import type { GraphJob, GraphOperationContext } from "../src/graphCore.js";
 
 // This suite asserts on queue state, and `runJob({})` claims whichever job is
