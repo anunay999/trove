@@ -2277,7 +2277,7 @@ export class PgGraphStore implements GraphStore {
         actorUuid,
       );
       await client.query("commit");
-      return await this.snapshotForView(view);
+      return await this.snapshotForView(view, ownerScope(context));
     } catch (error) {
       await client.query("rollback");
       throw error;
@@ -2314,7 +2314,7 @@ export class PgGraphStore implements GraphStore {
       params,
     );
     if (result.rowCount === 0) return null;
-    return await this.snapshotForView(mapView(result.rows[0]));
+    return await this.snapshotForView(mapView(result.rows[0]), scope);
   }
 
   async deleteView(input: DeleteViewInput, context?: GraphOperationContext): Promise<{ deleted: boolean; view: GraphView | null }> {
@@ -3726,8 +3726,9 @@ export class PgGraphStore implements GraphStore {
            and from_node_id = any($1::uuid[])
            and to_node_id = any($1::uuid[])
            and ($2::uuid[] is null or id = any($2::uuid[]))
+           and ($3 or owner_id = any($4::uuid[]))
          order by predicate, id`,
-        [nodeIds, candidateEdgeIds],
+        [nodeIds, candidateEdgeIds, !scope.scoped, scope.readOwnerIds],
       );
       return {
         rootNodeId: rootNodeId && nodeIdSet.has(rootNodeId) ? rootNodeId : rootNodeId ?? null,
@@ -3761,8 +3762,9 @@ export class PgGraphStore implements GraphStore {
          where deleted_at is null and expired_at is null
            and from_node_id = any($1::uuid[])
            and to_node_id = any($1::uuid[])
+           and ($2 or owner_id = any($3::uuid[]))
          order by predicate, id`,
-        [nodeIds],
+        [nodeIds, !scope.scoped, scope.readOwnerIds],
       );
       return {
         rootNodeId: null,
@@ -3774,14 +3776,15 @@ export class PgGraphStore implements GraphStore {
     return { rootNodeId: null, nodeIds: [], edgeIds: [] };
   }
 
-  private async snapshotForView(view: GraphView): Promise<GraphViewSnapshot> {
+  private async snapshotForView(view: GraphView, scope: OwnerScope): Promise<GraphViewSnapshot> {
     const nodeResult = view.includedNodeIds.length === 0 ? { rows: [] } : await this.pool.query(
       `select n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id, n.updated_at, n.access_count, n.last_accessed_at
        from node n
        left join node_revision nr on nr.id = n.current_revision_id
        where n.deleted_at is null and n.id = any($1::uuid[])
+         and ($2 or n.owner_id = any($3::uuid[]))
        order by array_position($1::uuid[], n.id)`,
-      [view.includedNodeIds],
+      [view.includedNodeIds, !scope.scoped, scope.readOwnerIds],
     );
     const nodeIds = new Set(nodeResult.rows.map((row) => String(row.id)));
     const edgeResult = view.includedEdgeIds.length === 0 ? { rows: [] } : await this.pool.query(
@@ -3791,8 +3794,9 @@ export class PgGraphStore implements GraphStore {
          and e.id = any($1::uuid[])
          and e.from_node_id = any($2::uuid[])
          and e.to_node_id = any($2::uuid[])
+         and ($3 or e.owner_id = any($4::uuid[]))
        order by array_position($1::uuid[], e.id)`,
-      [view.includedEdgeIds, [...nodeIds]],
+      [view.includedEdgeIds, [...nodeIds], !scope.scoped, scope.readOwnerIds],
     );
 
     return {
