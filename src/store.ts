@@ -73,6 +73,8 @@ import {
   ServedUnitLog,
   FUZZY_QUOTE_CANDIDATE_FLOOR,
   WEAK_EVIDENCE_FLOOR,
+  supersessionRevivedBy,
+  revisedAfterSupersededFinding,
   type GraphEvent,
   type GraphEventFeed,
   type GraphEventStats,
@@ -675,6 +677,13 @@ export class InMemoryGraphStore implements GraphStore {
     return { tombstoned };
   }
 
+  /** When the node's current fact revision was recorded (null if unknown). */
+  private currentRevisionCreatedAt(nodeId: string): string | null {
+    const node = this.nodes.get(nodeId);
+    if (!node) return null;
+    return this.revisions.get(node.revisionId)?.createdAt ?? null;
+  }
+
   supersededBy(nodeIds: string[], _context?: GraphOperationContext): Map<string, { byNodeId: string; byTitle: string }> {
     const map = new Map<string, { byNodeId: string; byTitle: string }>();
     const wanted = new Set(nodeIds);
@@ -683,6 +692,9 @@ export class InMemoryGraphStore implements GraphStore {
       if (!wanted.has(edge.toNodeId)) continue;
       const by = this.nodes.get(edge.fromNodeId);
       if (!by || this.deletedNodeIds.has(by.id)) continue;
+      // A fact revision recorded after the edge re-asserts the target: the
+      // edge judged an older belief, so it no longer marks the current one.
+      if (supersessionRevivedBy(this.currentRevisionCreatedAt(edge.toNodeId), edge.recordedAt)) continue;
       map.set(edge.toNodeId, { byNodeId: by.id, byTitle: by.title });
     }
     return map;
@@ -1223,6 +1235,19 @@ export class InMemoryGraphStore implements GraphStore {
         findings.push(reconcileLintFinding({ code: flag.code, node, other, detail: flag.detail }));
         reconcileCount += 1;
       }
+    }
+
+    // revised_after_superseded: see the pg lint and supersessionRevivedBy.
+    let revivedCount = 0;
+    for (const edge of this.edges.values()) {
+      if (revivedCount >= 50) break;
+      if (edge.predicate !== "supersedes" || edge.expiredAt !== null) continue;
+      const from = this.nodes.get(edge.fromNodeId);
+      const to = this.nodes.get(edge.toNodeId);
+      if (!from || !to || this.deletedNodeIds.has(from.id) || this.deletedNodeIds.has(to.id)) continue;
+      if (!supersessionRevivedBy(this.currentRevisionCreatedAt(to.id), edge.recordedAt)) continue;
+      findings.push(revisedAfterSupersededFinding({ edgeId: edge.id, fromTitle: from.title, toTitle: to.title }));
+      revivedCount += 1;
     }
 
     const errors = findings.filter((finding) => finding.severity === "error").length;

@@ -1,7 +1,7 @@
 import { SPACE_RULES } from "./contracts.js";
 import type { CaptureInput, ForgetInput, GraphEdge, GraphNode, GraphSource, IngestInput, QuoteEvidenceRef, ReadAnyInput, RememberInput, TextUnit } from "./contracts.js";
 import type { GraphOperationContext, GraphSourceDocument, GraphStore, ReadResult, TextQuoteMatch } from "./graphCore.js";
-import { evidenceSupportScore, WEAK_EVIDENCE_FLOOR } from "./graphCore.js";
+import { citationContradictsRevision, evidenceSupportScore, isTextUnit, WEAK_EVIDENCE_FLOOR } from "./graphCore.js";
 import { slugify } from "./slug.js";
 
 export class TeamSpaceError extends Error {
@@ -109,6 +109,15 @@ export type RememberResult = {
    * quote citation exempts the note. Present only when support is weak.
    */
   evidenceUnsupported?: Array<{ sourceId: string | null; textUnitId: string | null; reason: string }>;
+  /**
+   * Citations attached for an EARLIER revision that contradict this one
+   * (citationContradictsRevision): the quote still states the value this
+   * revision replaced. Evidence attaches to the node, so it would otherwise
+   * sit under the new value as if it proved it. Present only on a revision
+   * that changed the fact; makes `complete` false unless this call cited new
+   * evidence, because the note's provenance now argues against it.
+   */
+  evidenceStale?: Array<{ sourceId: string | null; textUnitId: string; staleTerms: string[]; reason: string }>;
   /** Requested links that could not be attached after the node mutation landed. */
   linkRejected?: Array<{ toSlug: string; predicate: string; reason: string }>;
 };
@@ -284,6 +293,7 @@ export async function remember(
   const evidenceUnserved: NonNullable<RememberResult["evidenceUnserved"]> = [];
   const evidenceUnsupported: NonNullable<RememberResult["evidenceUnsupported"]> = [];
   const linkRejected: NonNullable<RememberResult["linkRejected"]> = [];
+  const evidenceStale: NonNullable<RememberResult["evidenceStale"]> = [];
   const evidence: CaptureInput["evidence"] = [];
   const attachedRawUnits: Array<{ sourceId: string | null; textUnitId: string; text: string }> = [];
   let hasResolvedQuote = false;
@@ -403,14 +413,20 @@ export async function remember(
     }
   };
   const finish = (
-    result: Omit<RememberResult, "complete" | "evidenceRejected" | "evidenceUnserved" | "evidenceUnsupported" | "linkRejected">,
+    result: Omit<RememberResult, "complete" | "evidenceRejected" | "evidenceUnserved" | "evidenceUnsupported" | "evidenceStale" | "linkRejected">,
   ): RememberResult => ({
     ...result,
     ...(callerContext?.sharedOwnerIds?.length && input.space ? { space: input.space } : {}),
-    complete: evidenceRejected.length === 0 && evidenceUnserved.length === 0 && evidenceUnsupported.length === 0 && linkRejected.length === 0,
+    complete:
+      evidenceRejected.length === 0 &&
+      evidenceUnserved.length === 0 &&
+      evidenceUnsupported.length === 0 &&
+      linkRejected.length === 0 &&
+      (evidenceStale.length === 0 || evidence.length > 0),
     ...(evidenceRejected.length > 0 ? { evidenceRejected } : {}),
     ...(evidenceUnserved.length > 0 ? { evidenceUnserved } : {}),
     ...(evidenceUnsupported.length > 0 ? { evidenceUnsupported } : {}),
+    ...(evidenceStale.length > 0 ? { evidenceStale } : {}),
     ...(linkRejected.length > 0 ? { linkRejected } : {}),
   });
 
@@ -445,6 +461,24 @@ export async function remember(
     throw new Error(`remember: update of ${target.id} kept conflicting; re-read and retry.`);
   }
   scoreSupport(updated);
+  if (updated.revisionId !== target.revisionId) {
+    const previousText = `${target.title}\n${target.summary ?? ""}\n${(target.content ?? "").slice(0, 2000)}`;
+    const revisedText = `${updated.title}\n${updated.summary ?? ""}\n${(updated.content ?? "").slice(0, 2000)}`;
+    const citedNow = new Set(evidence.map((ref) => ref.textUnitId).filter(Boolean));
+    for (const unit of target.evidence) {
+      if (!isTextUnit(unit) || citedNow.has(unit.id)) continue;
+      const staleTerms = citationContradictsRevision(previousText, revisedText, unit.text);
+      if (!staleTerms) continue;
+      evidenceStale.push({
+        sourceId: unit.sourceId ?? null,
+        textUnitId: unit.id,
+        staleTerms,
+        reason:
+          `An earlier citation still states ${staleTerms.map((term) => `"${term}"`).join(", ")}, which this revision replaced. ` +
+          "Cite the span that supports the new value as { quote }, or forget the old note if the change was a mistake.",
+      });
+    }
+  }
   return finish({ action: "updated", node: updated, similar });
 }
 

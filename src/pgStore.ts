@@ -63,6 +63,7 @@ import {
   UnknownEvidenceReferenceError,
   WEAK_EVIDENCE_FLOOR,
   RECONCILE_FINDING_LIMIT,
+  revisedAfterSupersededFinding,
   reconcileLintFinding,
   type ReconcileFlag,
   type ReconcileFlagCode,
@@ -1295,14 +1296,19 @@ export class PgGraphStore implements GraphStore {
     if (nodeIds.length === 0) return map;
     const scope = ownerScope(context);
     // Only ACTIVE supersedes edges count: an expired/invalidated one is history,
-    // not a reason to distrust the atom today.
+    // not a reason to distrust the atom today. A fact revision of the target
+    // recorded after the edge re-asserts it (supersessionRevivedBy), so such an
+    // edge no longer marks the current belief.
     const result = await this.pool.query(
       `select e.to_node_id, e.from_node_id, n.title
        from edge e
        join node n on n.id = e.from_node_id and n.deleted_at is null
+       join node t on t.id = e.to_node_id
+       left join node_revision tr on tr.id = t.current_revision_id
        where e.predicate = 'supersedes'
          and e.to_node_id = any($1::uuid[])
          and e.deleted_at is null and e.expired_at is null
+         and (tr.created_at is null or tr.created_at <= e.created_at)
          and ($2 or e.owner_id = any($3::uuid[]))`,
       [nodeIds, !scope.scoped, scope.readOwnerIds],
     );
@@ -2037,7 +2043,7 @@ export class PgGraphStore implements GraphStore {
   async lint(context?: GraphOperationContext): Promise<GraphLintReport> {
     const scope = ownerScope(context);
     const p: [boolean, string | null] = [!scope.scoped, scope.ownerId];
-    const [nodeCount, edgeCount, orphanNodes, missingEvidence, duplicateTitles, danglingEdges, evidenceRows, reconcileFlags] = await Promise.all([
+    const [nodeCount, edgeCount, orphanNodes, missingEvidence, duplicateTitles, danglingEdges, evidenceRows, reconcileFlags, revivedSupersessions] = await Promise.all([
       this.pool.query("select count(*)::int as count from node where deleted_at is null and ($1 or owner_id = $2)", p),
       this.pool.query("select count(*)::int as count from edge where deleted_at is null and expired_at is null and ($1 or owner_id = $2)", p),
       this.pool.query(
@@ -2111,6 +2117,21 @@ export class PgGraphStore implements GraphStore {
          limit $3`,
         [...p, RECONCILE_FINDING_LIMIT],
       ),
+      // revised_after_superseded: an active supersedes edge whose target got a
+      // fact revision afterwards. supersededBy no longer marks the target, so
+      // both notes read as current until someone re-links or retires one.
+      this.pool.query(
+        `select e.id, f.title as from_title, t.title as to_title
+         from edge e
+         join node f on f.id = e.from_node_id and f.deleted_at is null
+         join node t on t.id = e.to_node_id and t.deleted_at is null
+         join node_revision tr on tr.id = t.current_revision_id
+         where e.predicate = 'supersedes' and e.deleted_at is null and e.expired_at is null
+           and tr.created_at > e.created_at and ($1 or e.owner_id = $2)
+         order by tr.created_at desc
+         limit 50`,
+        p,
+      ),
     ]);
 
     const findings: GraphLintFinding[] = [];
@@ -2182,6 +2203,10 @@ export class PgGraphStore implements GraphStore {
         });
         weakEvidenceCount += 1;
       }
+    }
+
+    for (const row of revivedSupersessions.rows) {
+      findings.push(revisedAfterSupersededFinding({ edgeId: String(row.id), fromTitle: String(row.from_title), toTitle: String(row.to_title) }));
     }
 
     for (const row of reconcileFlags.rows) {
