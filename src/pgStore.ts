@@ -31,43 +31,15 @@ import type {
   TextUnit,
   UpdateInput,
 } from "./contracts.js";
-import { compileGrepPattern, grepExcerpt, reportSearchArm } from "./retrievalPolicy.js";
 import {
-  isTextUnit,
-  ownerScope,
-  type OwnerScope,
-  type SearchObserver,
-  sha256,
-  EdgeValidityConflictError,
-  UnknownEvidenceReferenceError,
-  type ReconcileFlag,
-  type ReconcileFlagCode,
-  type GraphEvent,
-  type GraphEventFeed,
-  type EmbeddingCounts,
-  type GraphEventStats,
-  type MemoryDay,
-  type GraphJob,
-  type GraphOperationContext,
-  type ShareableResult,
-  type SimilarNote,
-  type SpaceMoveResult,
-  type GraphLintFinding,
-  type GraphLintReport,
-  type GraphSnapshot,
-  type GraphStore,
-  type GraphViewSnapshot,
-  type GrepMatch,
-  type GrepResult,
-  type NeighborhoodResult,
-  type ProjectResult,
-  type ReadResult,
-  type RefreshEmbeddingsResult,
-  type RecallResult,
-  type RecallTrace,
-  type SearchResult,
-  type TextQuoteMatch,
-} from "./graphCore.js";
+  compileGrepPattern,
+  GIANT_CONTENT_CHARS,
+  grepExcerpt,
+  maxSemanticDistanceFor,
+  reciprocalRankFusion,
+  reportSearchArm,
+} from "./retrievalPolicy.js";
+import { isTextUnit, ownerScope, type OwnerScope, type SearchObserver, sha256, EdgeValidityConflictError, UnknownEvidenceReferenceError, type ReconcileFlag, type ReconcileFlagCode, type GraphEvent, type GraphEventFeed, type EmbeddingCounts, type GraphEventStats, type MemoryDay, type GraphJob, type GraphOperationContext, type ShareableResult, type SimilarNote, type SpaceMoveResult, type GraphLintReport, type GraphSnapshot, type GraphStore, type GraphViewSnapshot, type GrepMatch, type GrepResult, type NeighborhoodResult, type ProjectResult, type ReadResult, type RefreshEmbeddingsResult, type RecallResult, type RecallTrace, type SearchResult, type TextQuoteMatch } from "./graphCore.js";
 import {
   JOB_MAX_ATTEMPTS,
   followUpRequest,
@@ -88,12 +60,12 @@ import {
   encodeEventCursor,
   WRITE_ACTIONS,
 } from "./events.js";
-import { evidenceSupportScore, FUZZY_QUOTE_CANDIDATE_FLOOR, WEAK_EVIDENCE_FLOOR } from "./evidence.js";
+import { evidenceSupportScore, FUZZY_QUOTE_CANDIDATE_FLOOR } from "./evidence.js";
 import { performRecall } from "./recall.js";
 import { renderAgentContext, renderMarkdownProjection } from "./render.js";
 import { splitTextUnits, buildTextChunks, chunkEmbeddingInput } from "./chunking.js";
 import { ServedUnitLog } from "./servedUnits.js";
-import { RECONCILE_FINDING_LIMIT, revisedAfterSupersededFinding, reconcileLintFinding } from "./lint.js";
+import { buildLintReport, LINT_FINDING_LIMIT } from "./lint.js";
 import { ActivationBuffer, type ActivationBump } from "./activation.js";
 import { createEmbeddingProviderFromEnv, vectorLiteral, type EmbeddingProvider } from "./embeddings.js";
 import { createRecallRerankerFromEnv, type Reranker } from "./rerank.js";
@@ -303,7 +275,7 @@ export const LEXICAL_NODE_SEARCH_SQL = `with q as (select $7::tsquery as query),
          and (
            -- Giant catalog/log pages starve recall packs; only a title or slug
            -- match lets them surface in search. Grep/read/neighborhood keep them.
-           coalesce(length(nr.content), 0) <= 12000
+           coalesce(length(nr.content), 0) <= ${GIANT_CONTENT_CHARS}
            or n.title ilike $4
            or n.slug = lower(replace($1, ' ', '-'))
          )
@@ -425,7 +397,7 @@ export function semanticNodeSearchSql(vectorCount: number, layout: EmbeddingLayo
          and (${p(4)} or n.owner_id = any(${p(5)}::uuid[]))
          and (${p(2)}::node_type[] is null or n.type = any(${p(2)}::node_type[]))
          and (
-           coalesce(length(nr.content), 0) <= 12000
+           coalesce(length(nr.content), 0) <= ${GIANT_CONTENT_CHARS}
            or n.title ilike ${p(7)}
            or n.slug = lower(replace(${p(8)}, ' ', '-'))
          )
@@ -2052,7 +2024,7 @@ export class PgGraphStore implements GraphStore {
          group by n.id, n.title
          having count(e.id) = 0
          order by n.updated_at desc
-         limit 50`,
+         limit ${LINT_FINDING_LIMIT}`,
         p,
       ),
       this.pool.query(
@@ -2063,7 +2035,7 @@ export class PgGraphStore implements GraphStore {
          group by n.id, n.title
          having count(a.id) = 0
          order by n.updated_at desc
-         limit 50`,
+         limit ${LINT_FINDING_LIMIT}`,
         p,
       ),
       this.pool.query(
@@ -2073,7 +2045,7 @@ export class PgGraphStore implements GraphStore {
          group by lower(title)
          having count(*) > 1
          order by count(*) desc, lower(title)
-         limit 50`,
+         limit ${LINT_FINDING_LIMIT}`,
         p,
       ),
       this.pool.query(
@@ -2083,7 +2055,7 @@ export class PgGraphStore implements GraphStore {
          left join node to_node on to_node.id = e.to_node_id and to_node.deleted_at is null
          where e.deleted_at is null and e.expired_at is null and ($1 or e.owner_id = $2)
            and (from_node.id is null or to_node.id is null)
-         limit 50`,
+         limit ${LINT_FINDING_LIMIT}`,
         p,
       ),
       // weak_evidence: nodes WITH citations, scored for whether the cited span
@@ -2113,7 +2085,7 @@ export class PgGraphStore implements GraphStore {
          where ($1 or f.owner_id = $2)
          order by f.created_at desc, f.node_id, f.code
          limit $3`,
-        [...p, RECONCILE_FINDING_LIMIT],
+        [...p, LINT_FINDING_LIMIT],
       ),
       // revised_after_superseded: an active supersedes edge whose target got a
       // fact revision afterwards. supersededBy no longer marks the target, so
@@ -2127,109 +2099,35 @@ export class PgGraphStore implements GraphStore {
          where e.predicate = 'supersedes' and e.deleted_at is null and e.expired_at is null
            and tr.created_at > e.created_at and ($1 or e.owner_id = $2)
          order by tr.created_at desc
-         limit 50`,
+         limit ${LINT_FINDING_LIMIT}`,
         p,
       ),
     ]);
 
-    const findings: GraphLintFinding[] = [];
-
-    for (const row of orphanNodes.rows) {
-      findings.push({
-        severity: "warning",
-        code: "orphan_node",
-        entityTable: "node",
-        entityId: String(row.id),
-        message: `Node has no graph edges: ${row.title}`,
-      });
-    }
-
-    for (const row of missingEvidence.rows) {
-      findings.push({
-        severity: "warning",
-        code: "missing_evidence",
-        entityTable: "node",
-        entityId: String(row.id),
-        message: `Node has no evidence annotation: ${row.title}`,
-      });
-    }
-
-    for (const row of duplicateTitles.rows) {
-      findings.push({
-        severity: "warning",
-        code: "duplicate_title",
-        count: Number(row.count),
-        message: `Multiple nodes share title: ${row.title_key}`,
-      });
-    }
-
-    for (const row of danglingEdges.rows) {
-      findings.push({
-        severity: "error",
-        code: "dangling_edge",
-        entityTable: "edge",
-        entityId: String(row.id),
-        message: "Edge points at a missing or deleted node.",
-      });
-    }
-
-    // weak_evidence: a citation that is present but probably wrong. Group the
-    // joined rows per node, score against the best cited unit, flag under the
-    // floor — capped so a bulk mis-ingest cannot flood the report.
-    const evidenceByNode = new Map<string, { title: string; nodeText: string; units: string[] }>();
+    // Rows per cited unit; group them per note for the support score.
+    const cited = new Map<string, { id: string; title: string; nodeText: string; units: string[] }>();
     for (const row of evidenceRows.rows) {
       const id = String(row.id);
-      const entry = evidenceByNode.get(id) ?? {
-        title: String(row.title),
-        nodeText: `${row.title}\n${row.summary}\n${row.content}`,
-        units: [] as string[],
-      };
+      const entry = cited.get(id) ?? { id, title: String(row.title), nodeText: `${row.title}\n${row.summary}\n${row.content}`, units: [] };
       entry.units.push(String(row.unit_text));
-      evidenceByNode.set(id, entry);
+      cited.set(id, entry);
     }
-    let weakEvidenceCount = 0;
-    for (const [id, entry] of evidenceByNode) {
-      if (weakEvidenceCount >= 50) break;
-      const score = evidenceSupportScore(entry.nodeText, entry.units);
-      if (score < WEAK_EVIDENCE_FLOOR) {
-        findings.push({
-          severity: "warning",
-          code: "weak_evidence",
-          entityTable: "node",
-          entityId: id,
-          message: `Cited evidence supports ${(score * 100).toFixed(0)}% of the node's content terms (floor ${WEAK_EVIDENCE_FLOOR * 100}%): ${entry.title}`,
-        });
-        weakEvidenceCount += 1;
-      }
-    }
-
-    for (const row of revivedSupersessions.rows) {
-      findings.push(revisedAfterSupersededFinding({ edgeId: String(row.id), fromTitle: String(row.from_title), toTitle: String(row.to_title) }));
-    }
-
-    for (const row of reconcileFlags.rows) {
-      findings.push(reconcileLintFinding({
+    return buildLintReport({
+      nodes: Number(nodeCount.rows[0]?.count ?? 0),
+      edges: Number(edgeCount.rows[0]?.count ?? 0),
+      orphans: orphanNodes.rows.map((row) => ({ id: String(row.id), title: String(row.title) })),
+      missingEvidence: missingEvidence.rows.map((row) => ({ id: String(row.id), title: String(row.title) })),
+      duplicateTitles: duplicateTitles.rows.map((row) => ({ title: String(row.title_key), count: Number(row.count) })),
+      danglingEdgeIds: danglingEdges.rows.map((row) => String(row.id)),
+      cited: [...cited.values()],
+      revivedSupersessions: revivedSupersessions.rows.map((row) => ({ edgeId: String(row.id), fromTitle: String(row.from_title), toTitle: String(row.to_title) })),
+      reconcileFlags: reconcileFlags.rows.map((row) => ({
         code: row.code as ReconcileFlagCode,
         node: { id: String(row.node_id), title: String(row.node_title), slug: String(row.node_slug) },
         other: { id: String(row.other_id), title: String(row.other_title), slug: String(row.other_slug) },
         detail: String(row.detail ?? ""),
-      }));
-    }
-
-    const errors = findings.filter((finding) => finding.severity === "error").length;
-    const warnings = findings.filter((finding) => finding.severity === "warning").length;
-
-    return {
-      generatedAt: new Date().toISOString(),
-      summary: {
-        nodes: Number(nodeCount.rows[0]?.count ?? 0),
-        edges: Number(edgeCount.rows[0]?.count ?? 0),
-        findings: findings.length,
-        errors,
-        warnings,
-      },
-      findings,
-    };
+      })),
+    });
   }
 
   async recordReconcileFlags(
@@ -4109,50 +4007,9 @@ function stripReadResult(read: ReadResult): GraphNode {
   return node;
 }
 
-/**
- * Reciprocal Rank Fusion over the per-mode ranked lists: each item scores
- * 1/(60 + rank) per list it appears in (1-based rank), ordered by fused score.
- * Ties break to the best single-list rank, then id for determinism.
- */
-function reciprocalRankFusion<T extends { id: string }>(...lists: T[][]): T[] {
-  const fused = new Map<string, { item: T; score: number; bestRank: number }>();
-  for (const list of lists) {
-    list.forEach((item, index) => {
-      const rank = index + 1;
-      const existing = fused.get(item.id);
-      if (existing) {
-        existing.score += 1 / (60 + rank);
-        existing.bestRank = Math.min(existing.bestRank, rank);
-        const incoming = (item as { distance?: number }).distance;
-        if (incoming !== undefined) {
-          const current = (existing.item as { distance?: number }).distance;
-          if (current === undefined || incoming < current) {
-            existing.item = { ...existing.item, distance: incoming };
-          }
-        }
-      } else {
-        fused.set(item.id, { item, score: 1 / (60 + rank), bestRank: rank });
-      }
-    });
-  }
-  return [...fused.values()]
-    .sort((left, right) =>
-      right.score - left.score ||
-      left.bestRank - right.bestRank ||
-      left.item.id.localeCompare(right.item.id))
-    .map((entry) => entry.item);
-}
 
 // Semantic hits farther than this cosine distance are noise. Input wins, then
 // the env override, then the default.
-function maxSemanticDistanceFor(input: SearchInput): number {
-  if (typeof input.maxSemanticDistance === "number" && Number.isFinite(input.maxSemanticDistance)) {
-    return input.maxSemanticDistance;
-  }
-  const fromEnv = Number(process.env.TROVE_SEMANTIC_MAX_DISTANCE);
-  if (process.env.TROVE_SEMANTIC_MAX_DISTANCE && Number.isFinite(fromEnv)) return fromEnv;
-  return 0.55;
-}
 
 /**
  * Closed versions of a triple whose world-time interval still covers

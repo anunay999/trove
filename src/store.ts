@@ -58,43 +58,19 @@ import type {
   TextUnit,
   UpdateInput,
 } from "./contracts.js";
-import { compileGrepPattern, grepExcerpt, reportSearchArm } from "./retrievalPolicy.js";
 import {
-  isTextUnit,
-  type SearchObserver,
-  sha256,
-  type GraphEvent,
-  type GraphEventFeed,
-  type GraphEventStats,
-  type MemoryDay,
-  type ReconcileFlag,
-  type GraphJob,
-  type GraphOperationContext,
-  type GraphLintFinding,
-  type GraphLintReport,
-  type GraphSnapshot,
-  type GraphStore,
-  type GraphViewSnapshot,
-  type GrepMatch,
-  type GrepResult,
-  type NeighborhoodNode,
-  type NeighborhoodResult,
-  type ProjectResult,
-  type ReadResult,
-  type RecallResult,
-  type RecallTrace,
-  type SearchResult,
-  type TextQuoteMatch,
-} from "./graphCore.js";
+  compileGrepPattern,
+  GIANT_CONTENT_CHARS,
+  grepExcerpt,
+  maxSemanticDistanceFor,
+  reciprocalRankFusion,
+  reportSearchArm,
+} from "./retrievalPolicy.js";
+import { isTextUnit, type SearchObserver, sha256, type GraphEvent, type GraphEventFeed, type GraphEventStats, type MemoryDay, type ReconcileFlag, type GraphJob, type GraphOperationContext, type GraphLintReport, type GraphSnapshot, type GraphStore, type GraphViewSnapshot, type GrepMatch, type GrepResult, type NeighborhoodNode, type NeighborhoodResult, type ProjectResult, type ReadResult, type RecallResult, type RecallTrace, type SearchResult, type TextQuoteMatch } from "./graphCore.js";
 import { performRecall } from "./recall.js";
 import { renderAgentContext, renderMarkdownProjection } from "./render.js";
 import { decodeEventCursor, encodeEventCursor, isSmokeEvent, WRITE_ACTIONS } from "./events.js";
-import {
-  evidenceSupportScore,
-  FUZZY_QUOTE_CANDIDATE_FLOOR,
-  WEAK_EVIDENCE_FLOOR,
-  supersessionRevivedBy,
-} from "./evidence.js";
+import { evidenceSupportScore, FUZZY_QUOTE_CANDIDATE_FLOOR, supersessionRevivedBy } from "./evidence.js";
 import {
   splitTextUnits,
   buildTextChunks,
@@ -103,7 +79,7 @@ import {
   type TextChunk,
 } from "./chunking.js";
 import { ServedUnitLog } from "./servedUnits.js";
-import { revisedAfterSupersededFinding, RECONCILE_FINDING_LIMIT, reconcileLintFinding } from "./lint.js";
+import { buildLintReport, lintNodeText } from "./lint.js";
 import { cosineSimilarity, createEmbeddingProviderFromEnv, type EmbeddingProvider } from "./embeddings.js";
 import type { Reranker } from "./rerank.js";
 import { EdgeValidityConflictError, ownerScope, UnknownEvidenceReferenceError } from "./graphCore.js";
@@ -134,8 +110,6 @@ type Revision = {
 };
 
 
-/** Catalog/log-style pages are useful as pointers but starve search/recall. */
-const GIANT_CONTENT_CHARS = 12_000;
 
 export class InMemoryGraphStore implements GraphStore {
   private sourceRows = new Map<string, GraphSource & { contentText: string; metadata: Record<string, unknown> }>();
@@ -1159,120 +1133,51 @@ export class InMemoryGraphStore implements GraphStore {
 
   lint(): GraphLintReport {
     const snapshot = this.exportGraph();
-    const findings: GraphLintFinding[] = [];
+    const live = new Set(snapshot.nodes.map((node) => node.id));
     const degree = new Map(snapshot.nodes.map((node) => [node.id, 0]));
-
     for (const edge of snapshot.edges) {
       degree.set(edge.fromNodeId, (degree.get(edge.fromNodeId) ?? 0) + 1);
       degree.set(edge.toNodeId, (degree.get(edge.toNodeId) ?? 0) + 1);
     }
-
-    for (const node of snapshot.nodes) {
-      if ((degree.get(node.id) ?? 0) === 0) {
-        findings.push({
-          severity: "warning",
-          code: "orphan_node",
-          entityTable: "node",
-          entityId: node.id,
-          message: `Node has no graph edges: ${node.title}`,
-        });
-      }
-
-      const hasEvidence = [...this.annotations.values()].some((annotation) => annotation.nodeId === node.id);
-      if (!hasEvidence) {
-        findings.push({
-          severity: "warning",
-          code: "missing_evidence",
-          entityTable: "node",
-          entityId: node.id,
-          message: `Node has no evidence annotation: ${node.title}`,
-        });
-      }
-    }
-
-    // weak_evidence: citations that are present but probably wrong (see pg lint).
-    let weakEvidenceCount = 0;
-    for (const node of snapshot.nodes) {
-      if (weakEvidenceCount >= 50) break;
-      const units = [...this.annotations.values()]
-        .filter((annotation) => annotation.nodeId === node.id && annotation.textUnitId !== null)
-        .map((annotation) => this.textUnits.get(annotation.textUnitId as string)?.text)
-        .filter((text): text is string => typeof text === "string");
-      if (units.length === 0) continue;
-      const nodeText = `${node.title}\n${node.summary ?? ""}\n${(node.content ?? "").slice(0, 2000)}`;
-      const score = evidenceSupportScore(nodeText, units);
-      if (score < WEAK_EVIDENCE_FLOOR) {
-        findings.push({
-          severity: "warning",
-          code: "weak_evidence",
-          entityTable: "node",
-          entityId: node.id,
-          message: `Cited evidence supports ${(score * 100).toFixed(0)}% of the node's content terms (floor ${WEAK_EVIDENCE_FLOOR * 100}%): ${node.title}`,
-        });
-        weakEvidenceCount += 1;
-      }
-    }
-
+    const annotations = [...this.annotations.values()];
     const titleCounts = new Map<string, number>();
-    for (const node of snapshot.nodes) {
-      const key = node.title.toLowerCase();
-      titleCounts.set(key, (titleCounts.get(key) ?? 0) + 1);
-    }
-    for (const [title, count] of titleCounts) {
-      if (count > 1) {
-        findings.push({
-          severity: "warning",
-          code: "duplicate_title",
-          count,
-          message: `Multiple nodes share title: ${title}`,
+    for (const node of snapshot.nodes) titleCounts.set(node.title.toLowerCase(), (titleCounts.get(node.title.toLowerCase()) ?? 0) + 1);
+    const activeEdges = [...this.edges.values()].filter((edge) => edge.expiredAt === null);
+
+    return buildLintReport({
+      nodes: snapshot.nodes.length,
+      edges: snapshot.edges.length,
+      orphans: snapshot.nodes.filter((node) => (degree.get(node.id) ?? 0) === 0),
+      missingEvidence: snapshot.nodes.filter((node) => !annotations.some((annotation) => annotation.nodeId === node.id)),
+      duplicateTitles: [...titleCounts].filter(([, count]) => count > 1).map(([title, count]) => ({ title, count })),
+      danglingEdgeIds: activeEdges.filter((edge) => !live.has(edge.fromNodeId) || !live.has(edge.toNodeId)).map((edge) => edge.id),
+      cited: snapshot.nodes.flatMap((node) => {
+        const units = annotations
+          .filter((annotation) => annotation.nodeId === node.id && annotation.textUnitId !== null)
+          .map((annotation) => this.textUnits.get(annotation.textUnitId as string)?.text)
+          .filter((text): text is string => typeof text === "string");
+        return units.length ? [{ id: node.id, title: node.title, nodeText: lintNodeText(node), units }] : [];
+      }),
+      revivedSupersessions: activeEdges.flatMap((edge) => {
+        const from = this.nodes.get(edge.fromNodeId);
+        const to = this.nodes.get(edge.toNodeId);
+        if (edge.predicate !== "supersedes" || !from || !to || this.deletedNodeIds.has(from.id) || this.deletedNodeIds.has(to.id)) return [];
+        return supersessionRevivedBy(this.currentRevisionCreatedAt(to.id), edge.recordedAt)
+          ? [{ edgeId: edge.id, fromTitle: from.title, toTitle: to.title }]
+          : [];
+      }),
+      // A flag whose node or counterpart has since been tombstoned is skipped, mirroring pg's join.
+      reconcileFlags: [...this.reconcileFlags].flatMap(([nodeId, flags]) => {
+        const node = this.nodes.get(nodeId);
+        if (!node || this.deletedNodeIds.has(nodeId)) return [];
+        return flags.flatMap((flag) => {
+          const other = this.nodes.get(flag.otherNodeId);
+          return other && !this.deletedNodeIds.has(other.id) ? [{ code: flag.code, node, other, detail: flag.detail }] : [];
         });
-      }
-    }
-
-    // reconcile_duplicate / reconcile_contradiction: what the write-time
-    // reconciliation judge already decided. A flag whose node or counterpart
-    // has since been tombstoned is skipped, mirroring the pg driver's join.
-    let reconcileCount = 0;
-    for (const [nodeId, flags] of this.reconcileFlags) {
-      if (reconcileCount >= RECONCILE_FINDING_LIMIT) break;
-      const node = this.nodes.get(nodeId);
-      if (!node || this.deletedNodeIds.has(nodeId)) continue;
-      for (const flag of flags) {
-        if (reconcileCount >= RECONCILE_FINDING_LIMIT) break;
-        const other = this.nodes.get(flag.otherNodeId);
-        if (!other || this.deletedNodeIds.has(other.id)) continue;
-        findings.push(reconcileLintFinding({ code: flag.code, node, other, detail: flag.detail }));
-        reconcileCount += 1;
-      }
-    }
-
-    // revised_after_superseded: see the pg lint and supersessionRevivedBy.
-    let revivedCount = 0;
-    for (const edge of this.edges.values()) {
-      if (revivedCount >= 50) break;
-      if (edge.predicate !== "supersedes" || edge.expiredAt !== null) continue;
-      const from = this.nodes.get(edge.fromNodeId);
-      const to = this.nodes.get(edge.toNodeId);
-      if (!from || !to || this.deletedNodeIds.has(from.id) || this.deletedNodeIds.has(to.id)) continue;
-      if (!supersessionRevivedBy(this.currentRevisionCreatedAt(to.id), edge.recordedAt)) continue;
-      findings.push(revisedAfterSupersededFinding({ edgeId: edge.id, fromTitle: from.title, toTitle: to.title }));
-      revivedCount += 1;
-    }
-
-    const errors = findings.filter((finding) => finding.severity === "error").length;
-    const warnings = findings.filter((finding) => finding.severity === "warning").length;
-    return {
-      generatedAt: new Date().toISOString(),
-      summary: {
-        nodes: snapshot.nodes.length,
-        edges: snapshot.edges.length,
-        findings: findings.length,
-        errors,
-        warnings,
-      },
-      findings,
-    };
+      }),
+    });
   }
+
 
   recordReconcileFlags(input: { nodeId: string; flags: ReconcileFlag[] }, _context?: GraphOperationContext): void {
     // Replace, never append: the pass that just ran is the whole truth about
@@ -1788,49 +1693,9 @@ function jaccardSimilarity(left: Set<string>, right: Set<string>): number {
   return shared / (left.size + right.size - shared);
 }
 
-/**
- * Reciprocal Rank Fusion over the per-mode ranked lists: each item scores
- * 1/(60 + rank) per list it appears in (1-based rank), ordered by fused score.
- */
-function reciprocalRankFusion<T extends { id: string }>(...lists: T[][]): T[] {
-  const fused = new Map<string, { item: T; score: number; bestRank: number }>();
-  for (const list of lists) {
-    list.forEach((item, index) => {
-      const rank = index + 1;
-      const existing = fused.get(item.id);
-      if (existing) {
-        existing.score += 1 / (60 + rank);
-        existing.bestRank = Math.min(existing.bestRank, rank);
-        const incoming = (item as { distance?: number }).distance;
-        if (incoming !== undefined) {
-          const current = (existing.item as { distance?: number }).distance;
-          if (current === undefined || incoming < current) {
-            existing.item = { ...existing.item, distance: incoming };
-          }
-        }
-      } else {
-        fused.set(item.id, { item, score: 1 / (60 + rank), bestRank: rank });
-      }
-    });
-  }
-  return [...fused.values()]
-    .sort((left, right) =>
-      right.score - left.score ||
-      left.bestRank - right.bestRank ||
-      left.item.id.localeCompare(right.item.id))
-    .map((entry) => entry.item);
-}
 
 // Semantic hits farther than this cosine distance are noise. Input wins, then
 // the env override, then the default.
-function maxSemanticDistanceFor(input: SearchInput): number {
-  if (typeof input.maxSemanticDistance === "number" && Number.isFinite(input.maxSemanticDistance)) {
-    return input.maxSemanticDistance;
-  }
-  const fromEnv = Number(process.env.TROVE_SEMANTIC_MAX_DISTANCE);
-  if (process.env.TROVE_SEMANTIC_MAX_DISTANCE && Number.isFinite(fromEnv)) return fromEnv;
-  return 0.55;
-}
 
 function entityTableForAction(action: string): string {
   if (action === "ingest") return "source";

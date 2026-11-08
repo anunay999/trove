@@ -1,3 +1,4 @@
+import { GIANT_CONTENT_CHARS } from "./retrievalPolicy.js";
 import {
   type GraphEdge,
   type GraphNode,
@@ -106,8 +107,6 @@ function isPlaceholderContent(content: string | null | undefined): boolean {
   return content.includes("The source document remains the evidence layer.");
 }
 
-/** Catalog/log-style pages are useful as pointers but starve the pack if dumped whole. */
-const GIANT_CONTENT_CHARS = 12_000;
 /**
  * Soft rank penalty for those pages, applied by BOTH ranking paths — the hand
  * blend and the reranked one. See the note at its second use for why a
