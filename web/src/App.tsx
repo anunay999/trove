@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { AuthenticateWithRedirectCallback } from "@clerk/clerk-react";
 import { GITHUB_PATH } from "@/lib/brandIcons";
 import { clearLayout, layoutOwnerKey } from "@/lib/graphLayoutCache";
@@ -11,7 +11,9 @@ import { ApiKeys } from "@/pages/ApiKeys";
 import { Agents } from "@/pages/Agents";
 import { Admin } from "@/pages/Admin";
 import { WaitlistGate } from "@/pages/WaitlistGate";
-import { AuthControls } from "@/components/AuthControls";
+import { Bot, KeyRound, ShieldCheck } from "lucide-react";
+import { AuthControls, type AccountMenuItem } from "@/components/AuthControls";
+import { TeamSwitcher } from "@/components/TeamSwitcher";
 import { LoginDrawer } from "@/components/LoginDrawer";
 import { UserSwitcher, switchToUser, userLabel } from "@/components/UserSwitcher";
 import {
@@ -23,6 +25,7 @@ import {
   setImpersonation,
   type GraphSnapshot,
   type Me,
+  type Scope,
   type Stats,
 } from "@/lib/api";
 
@@ -35,6 +38,13 @@ type Tab = "overview" | "graph" | "agents" | "keys" | "admin";
 // thing we ship. Keep this list in step with DASHBOARD_PATHS in
 // src/webRoutes.ts — that is what makes a hard refresh on /graph reach us.
 const TABS: Tab[] = ["overview", "graph", "agents", "keys", "admin"];
+
+/** Pages that sit in the avatar menu rather than the tab row, for Clerk accounts. */
+const MENU_TABS: Partial<Record<Tab, { label: string; icon: ReactNode }>> = {
+  agents: { label: "Agents", icon: <Bot className="size-4" /> },
+  keys: { label: "API keys", icon: <KeyRound className="size-4" /> },
+  admin: { label: "Admin", icon: <ShieldCheck className="size-4" /> },
+};
 
 function tabFromPath(pathname: string): Tab {
   const segment = pathname.replace(/^\/+/, "").replace(/\/+$/, "").toLowerCase();
@@ -76,6 +86,15 @@ export default function App() {
   // carries the reason across so the switcher is not silently inert.
   const [error, setError] = useState<string | null>(() => takeImpersonationBounce());
   const [me, setMe] = useState<Me | null>(null);
+  // Whose memories each page shows. Overview has no "all": its rollups are per space.
+  const [overviewScope, setOverviewScope] = useState<Exclude<Scope, "all">>("mine");
+  const [graphScope, setGraphScope] = useState<Scope>("mine");
+  // A key-only dashboard never gets `me` (that is the Clerk session's answer), so the mount probe's team flag stands in.
+  const [probedTeam, setProbedTeam] = useState(false);
+  const hasTeam = !!(me?.hasTeam ?? probedTeam);
+  // Agents reads lint from the same stats, and that is always your own graph.
+  const statsScope = hasTeam && tab === "overview" ? overviewScope : "mine";
+  const snapshotScope = hasTeam ? graphScope : "mine";
   const [signedIn, setSignedIn] = useState(false);
   const [drawer, setDrawer] = useState<{ open: boolean; mode: "sign-in" | "sign-up"; email?: string }>({ open: false, mode: "sign-in" });
   /**
@@ -131,7 +150,7 @@ export default function App() {
     const seq = (loadSeq.current += 1);
     setError(null);
     try {
-      const [statsResult, graphResult] = await Promise.all([fetchStats(), fetchGraph()]);
+      const [statsResult, graphResult] = await Promise.all([fetchStats(statsScope), fetchGraph(snapshotScope)]);
       if (seq !== loadSeq.current) return;
       setStats(statsResult);
       setSnapshot(graphResult);
@@ -139,7 +158,12 @@ export default function App() {
       if (seq !== loadSeq.current) return;
       setError(cause instanceof Error ? cause.message : "Failed to load Trove data.");
     }
-  }, []);
+  }, [statsScope, snapshotScope]);
+  // Session changes reload through the newest load without making the session bridge re-fire.
+  const loadRef = useRef(load);
+  useEffect(() => {
+    loadRef.current = load;
+  }, [load]);
 
   useEffect(() => {
     void load();
@@ -158,7 +182,9 @@ export default function App() {
     let live = true;
     void fetchMe()
       .then((result) => {
-        if (live) setAuthDisabled(result.mode === "disabled");
+        if (!live) return;
+        setAuthDisabled(result.mode === "disabled");
+        setProbedTeam(!!result.hasTeam);
       })
       .catch(() => undefined)
       .finally(() => {
@@ -175,7 +201,7 @@ export default function App() {
     if (isSignedIn) {
       setDrawer((current) => ({ ...current, open: false }));
       void fetchMe().then(setMe).catch(() => setMe(null));
-      void load();
+      void loadRef.current();
     } else {
       setMe(null);
       // A "view as" choice belongs to the admin who made it, not to the
@@ -184,7 +210,7 @@ export default function App() {
       // because Clerk reports signed-out while it is still restoring.
       if (loaded && getImpersonation()) setImpersonation(null);
     }
-  }, [load]);
+  }, []);
 
   const identity = me?.identity ?? null;
   const impersonating = me?.impersonating ?? null;
@@ -224,6 +250,9 @@ export default function App() {
   // account. Hiding the tab keeps the page from contradicting the banner.
   const tabs: Tab[] = impersonating ? allTabs.filter((candidate) => candidate !== "keys") : allTabs;
   const activeTab: Tab = tabs.includes(tab) ? tab : "overview";
+  // With a Clerk account, Agents, API keys and Admin live under the avatar; key-only sessions keep them as tabs.
+  const accountMenu = clerkEnabled && !isFrontDoor && signedIn;
+  const navTabs = accountMenu ? tabs.filter((candidate) => !MENU_TABS[candidate]) : tabs;
 
   // Clicking a tab is a navigation, not a state change: push it, so back and
   // forward walk the tabs instead of walking out of the app.
@@ -232,6 +261,20 @@ export default function App() {
     if (window.location.pathname !== pathForTab(next)) {
       window.history.pushState(null, "", pathForTab(next) + window.location.search);
     }
+  }, []);
+
+  const accountMenuItems: AccountMenuItem[] = tabs.flatMap((candidate) => {
+    const item = MENU_TABS[candidate];
+    return item ? [{ ...item, onSelect: () => selectTab(candidate) }] : [];
+  });
+  // A new scope is a different graph: drop the old one so nothing stale stays on screen.
+  const changeGraphScope = useCallback((next: Scope) => {
+    setSnapshot(null);
+    setGraphScope(next);
+  }, []);
+  const changeOverviewScope = useCallback((next: Exclude<Scope, "all">) => {
+    setStats(null);
+    setOverviewScope(next);
   }, []);
 
   useEffect(() => {
@@ -322,13 +365,18 @@ export default function App() {
             showLanding ? "mx-auto max-w-7xl 2xl:max-w-[88rem]" : ""
           }`}
         >
-          <span className="flex shrink-0 items-center gap-2 font-serif text-xl tracking-tight sm:flex-1">
-            <img src="/favicon.svg?v=2" alt="" className="size-5" />
-            Trove
-          </span>
+          <div className="flex min-w-0 shrink-0 items-center gap-3 sm:flex-1">
+            <span className="flex shrink-0 items-center gap-2 font-serif text-xl tracking-tight">
+              <img src="/favicon.svg?v=2" alt="" className="size-5" />
+              Trove
+            </span>
+            {accountMenu && dashboardReady && !impersonating ? (
+              <TeamSwitcher dark={dark} teamOrgId={me?.teamOrgId ?? null} />
+            ) : null}
+          </div>
           {dashboardReady && (
             <nav className="order-last -mx-6 flex w-[calc(100%+3rem)] items-center gap-1 overflow-x-auto px-6 py-1 [scrollbar-width:none] sm:order-none sm:mx-0 sm:w-auto sm:min-w-0 sm:shrink sm:justify-center sm:px-0 [&::-webkit-scrollbar]:hidden">
-              {tabs.map((candidate) => (
+              {navTabs.map((candidate) => (
                 <button
                   key={candidate}
                   type="button"
@@ -401,7 +449,7 @@ export default function App() {
                 Log in
               </button>
             )}
-            {clerkEnabled && !isFrontDoor && <AuthControls onOpenLogin={openLogin} onSessionChange={onSessionChange} dark={dark} />}
+            {clerkEnabled && !isFrontDoor && <AuthControls onOpenLogin={openLogin} onSessionChange={onSessionChange} dark={dark} menu={accountMenu ? accountMenuItems : []} />}
           </div>
         </div>
       </header>
@@ -508,12 +556,19 @@ export default function App() {
         </div>
       ) : activeTab === "overview" ? (
         <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">
-          <Overview stats={stats} dark={dark} />
+          <Overview stats={stats} dark={dark} scope={statsScope} onScopeChange={hasTeam ? changeOverviewScope : undefined} />
         </main>
       ) : activeTab === "graph" ? (
         <main className="min-h-0 flex-1">
           <Suspense fallback={<div className="h-full w-full" />}>
-            <GraphView snapshot={snapshot} dark={dark} layoutOwner={layoutOwner} />
+            <GraphView
+              key={snapshotScope}
+              snapshot={snapshot}
+              dark={dark}
+              layoutOwner={layoutOwner && snapshotScope !== "mine" ? `${layoutOwner}~${snapshotScope}` : layoutOwner}
+              scope={snapshotScope}
+              onScopeChange={hasTeam ? changeGraphScope : undefined}
+            />
           </Suspense>
         </main>
       ) : activeTab === "agents" ? (

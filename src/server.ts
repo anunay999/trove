@@ -388,17 +388,45 @@ app.get("/v1/tools", async (context) => {
   });
 });
 
+/**
+ * The space a dashboard read looks at. "team" swaps the owner for the team's
+ * shared space, so every own-space read below reads that space unchanged; the
+ * caller's membership was already checked when their spaces were resolved.
+ */
+function dashboardScope(auth: AuthContext, scope: string | undefined, allowed: string[]) {
+  const own = operationContextFromAuth(auth);
+  const choice = scope ?? "mine";
+  if (!allowed.includes(choice)) {
+    return Response.json({ error: "invalid_scope", message: `scope must be one of ${allowed.join(", ")}.` }, { status: 400 });
+  }
+  if (choice === "mine") return { choice, own, team: null };
+  const teamSpace = auth.sharedOwnerIds?.[0];
+  if (!teamSpace) return Response.json({ error: "no_team", message: "You are not in a team." }, { status: 404 });
+  return { choice, own, team: { ...own, ownerId: teamSpace, sharedOwnerIds: [] } };
+}
+
 app.get("/v1/graph", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
-  return context.json(await store.exportGraph(operationContextFromAuth(auth)));
+  const scope = dashboardScope(auth, context.req.query("scope"), ["mine", "team", "all"]);
+  if (scope instanceof Response) return scope;
+  if (!scope.team) return context.json(await store.exportGraph(scope.own));
+  const team = await store.exportGraph(scope.team);
+  const teamNodeIds = team.nodes.map((node) => node.id);
+  if (scope.choice === "team") return context.json({ ...team, teamNodeIds });
+  // Each edge lives in one space; a private one may point at a team memory, and the union holds both ends.
+  const mine = await store.exportGraph(scope.own);
+  return context.json({ nodes: [...mine.nodes, ...team.nodes], edges: [...mine.edges, ...team.edges], views: mine.views, teamNodeIds });
 });
 
 app.get("/v1/stats", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
 
-  const owner = operationContextFromAuth(auth);
+  // ponytail: no "all" here; it would mean merging every rollup below. Graph has it.
+  const scope = dashboardScope(auth, context.req.query("scope"), ["mine", "team"]);
+  if (scope instanceof Response) return scope;
+  const owner = scope.team ?? scope.own;
   const [snapshot, jobList, lintReport, latest, sourceRows, memoryDays] = await Promise.all([
     store.exportGraph(owner),
     store.jobs({ limit: 100 }, owner),
@@ -839,6 +867,10 @@ app.get("/v1/me", async (context) => {
     identity: auth.identity ?? null,
     // The tenant this caller's credentials act in (the dashboard's active Clerk org, else personal).
     tenantId: auth.tenantId ?? null,
+    // Whether the active tenant has a shared space this caller can read (the dashboard's Team scope).
+    hasTeam: (auth.sharedOwnerIds?.length ?? 0) > 0,
+    // The Clerk organization behind that team, so the dashboard's switcher can show the one in use.
+    teamOrgId: auth.teamOrgId ?? null,
     // Set while an admin is viewing Trove as someone else; the dashboard shows
     // this account's graph and keys, and offers the way back.
     impersonating: auth.impersonating ?? null,
