@@ -4,8 +4,9 @@ import pg from "pg";
 import { createGraphStore } from "../src/createStore.js";
 import { UserStore } from "../src/users.js";
 import type { GraphStore } from "../src/graphCore.js";
-import { TeamSpaceError, contextForSpace, ingest, looksLikeCredential, remember } from "../src/agentOps.js";
-import { SPACE_RULES, type RememberInput } from "../src/contracts.js";
+import { TeamSpaceError, contextForSpace, looksLikeCredential } from "../src/spaces.js";
+import { ingest, remember } from "../src/agentOps.js";
+import { createViewInputSchema, SPACE_RULES, type RememberInput } from "../src/contracts.js";
 import { closeStore, isolateDatabase } from "./helpers.js";
 
 await isolateDatabase("team-writes");
@@ -118,6 +119,16 @@ describe("team writes through remember and ingest", { skip: databaseUrl ? false 
     assert.equal(await ownerOf(result.node.id), alice.ownerId);
     const recall = await store.recall({ query: `editor setup vim ${MARK}`, tokenBudget: 2000 }, bob);
     assert.ok(!recall.atoms.some((atom) => atom.node.id === result.node.id), "a private note reached a teammate");
+  });
+
+  it("a teammate's private edge between team notes stays out of a view", async () => {
+    const first = await remember(store, { title: `Billing service ${MARK}`, summary: "Owns invoices.", space: "team" } as RememberInput, alice);
+    const second = await remember(store, { title: `Invoice queue ${MARK}`, summary: "Feeds billing.", space: "team" } as RememberInput, alice);
+    const privateEdge = await store.link({ fromNodeId: second.node.id, toSlug: first.node.slug, predicate: "bob_thinks", weight: 1 }, bob);
+    assert.ok(privateEdge, "bob can link two notes he can see");
+    const view = await store.createView(createViewInputSchema.parse({ title: `Billing view ${MARK}`, query: `billing invoice ${MARK}` }), alice);
+    assert.ok(view.nodes.some((node) => node.id === first.node.id) && view.nodes.some((node) => node.id === second.node.id), "the view holds both team notes");
+    assert.ok(!view.edges.some((edge) => edge.id === privateEdge.id), "bob's private edge reached alice's view");
   });
 
   it("a credential never reaches the team, through remember or ingest", async () => {

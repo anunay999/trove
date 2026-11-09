@@ -71,7 +71,7 @@ DATABASE_URL=postgres://trove:trove@localhost:5433/trove npm run mcp   # stdio
 ```
 
 
-Read-only MCP resources: `trove://health`, `trove://lint`, `trove://timeline`, `trove://events`, `trove://jobs`, `trove://views`, `trove://graph`, `trove://projection/obsidian/manifest`.
+Read-only MCP resources: `trove://health`, `trove://index`, `trove://lint`, `trove://timeline`, `trove://events`, `trove://jobs`, `trove://views`, `trove://graph`, `trove://projection/obsidian/manifest`.
 
 Full contract: [mcp.md](mcp.md) and [agent-api.md](agent-api.md).
 

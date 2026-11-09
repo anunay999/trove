@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { performRecall } from "../src/graphCore.js";
+import { performRecall } from "../src/recall.js";
 import type { Reranker } from "../src/rerank.js";
 import { suiteStore, closeStore, isolateDatabase } from "./helpers.js";
 

@@ -1,70 +1,26 @@
-import { SPACE_RULES } from "./contracts.js";
-import type { CaptureInput, ForgetInput, GraphEdge, GraphNode, GraphSource, IngestInput, QuoteEvidenceRef, ReadAnyInput, RememberInput, TextUnit } from "./contracts.js";
-import type { GraphOperationContext, GraphSourceDocument, GraphStore, ReadResult, TextQuoteMatch } from "./graphCore.js";
-import { evidenceSupportScore, WEAK_EVIDENCE_FLOOR } from "./graphCore.js";
+import type {
+  CaptureInput,
+  ForgetInput,
+  GraphEdge,
+  GraphNode,
+  GraphSource,
+  IngestInput,
+  QuoteEvidenceRef,
+  ReadAnyInput,
+  RememberInput,
+  TextUnit,
+} from "./contracts.js";
+import { citationContradictsRevision, evidenceSupportScore, WEAK_EVIDENCE_FLOOR } from "./evidence.js";
+import {
+  type GraphOperationContext,
+  type GraphSourceDocument,
+  type GraphStore,
+  isTextUnit,
+  type ReadResult,
+  type TextQuoteMatch,
+} from "./graphCore.js";
 import { slugify } from "./slug.js";
-
-export class TeamSpaceError extends Error {
-  constructor(
-    public readonly code: "no_team" | "credential_in_team_write" | "space_required",
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
-// ponytail: pattern list, not a scanner; catches the token shapes and password-bearing URLs seen in real notes.
-const CREDENTIAL_PATTERNS = [
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
-  /\b(?:sk|rk)-[A-Za-z0-9_-]{20,}/,
-  /\bsk_live_[A-Za-z0-9]{16,}/,
-  /\bgh[pousr]_[A-Za-z0-9]{30,}/,
-  /\bgithub_pat_[A-Za-z0-9_]{30,}/,
-  /\bxox[abprs]-[A-Za-z0-9-]{10,}/,
-  /\bAKIA[0-9A-Z]{16}\b/,
-  /\bdapi[a-f0-9]{30,}/,
-  /\btrove_[a-f0-9]{40}\b/,
-  /\bAIza[0-9A-Za-z_-]{35}\b/,
-];
-const URL_WITH_PASSWORD = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:([^\s@/]+)@([^\s/:?]+)/gi;
-const SECRET_ASSIGNMENT = /\b[A-Za-z0-9_]*(?:password|passwd|secret|api[_-]?key|access[_-]?key|token|private[_-]?key|key)[A-Za-z0-9_]*["'`]?\s*(?:[:=]|\|)\s*["'`]?([A-Za-z0-9+/_=.-]{16,})/gi;
-const LOCAL_HOST = /^(?:localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|host\.docker\.internal)$/i;
-const PLACEHOLDER = /^(?:<.*>|\$\{.*\}|\$[A-Z_]+|\*+|x+|password|postgres|changeme)$/i;
-
-/** True when text holds something that works as a credential: a known token shape, a password in a non-local URL, or a long random value assigned to a secret-named key. */
-export function looksLikeCredential(text: string): boolean {
-  if (CREDENTIAL_PATTERNS.some((pattern) => pattern.test(text))) return true;
-  for (const [, password, host] of text.matchAll(URL_WITH_PASSWORD)) {
-    if (!LOCAL_HOST.test(host!) && !PLACEHOLDER.test(password!)) return true;
-  }
-  for (const [, value] of text.matchAll(SECRET_ASSIGNMENT)) {
-    if (/[A-Za-z]/.test(value!) && /\d/.test(value!)) return true;
-  }
-  return false;
-}
-
-/**
- * The context a write runs in. A team member must name the space, since a note in
- * the wrong one cannot be unseen. A team write runs as the team's shared space, so any
- * member revises the same team note; it is refused when no team is active or the text
- * looks like a credential.
- */
-export function contextForSpace(
-  space: "mine" | "team" | undefined,
-  context: GraphOperationContext | undefined,
-  text: string,
-): GraphOperationContext | undefined {
-  const team = context?.sharedOwnerIds?.[0];
-  if (!space && team) throw new TeamSpaceError("space_required", `Choose where this goes and call again with space. ${SPACE_RULES}`);
-  if ((space ?? "mine") === "mine") return context;
-  if (!team) {
-    throw new TeamSpaceError("no_team", 'No team is active, so there is no team space to write to. Switch to a team in the dashboard, or write with space: "mine".');
-  }
-  if (looksLikeCredential(text)) {
-    throw new TeamSpaceError("credential_in_team_write", 'This looks like it contains a credential, so it was not saved to the team. Remove the secret, or save it with space: "mine".');
-  }
-  return { ...context, ownerId: team, sharedOwnerIds: undefined };
-}
+import { contextForSpace } from "./spaces.js";
 
 export async function ingest(
   store: GraphStore,
@@ -109,6 +65,15 @@ export type RememberResult = {
    * quote citation exempts the note. Present only when support is weak.
    */
   evidenceUnsupported?: Array<{ sourceId: string | null; textUnitId: string | null; reason: string }>;
+  /**
+   * Citations attached for an EARLIER revision that contradict this one
+   * (citationContradictsRevision): the quote still states the value this
+   * revision replaced. Evidence attaches to the node, so it would otherwise
+   * sit under the new value as if it proved it. Present only on a revision
+   * that changed the fact; makes `complete` false unless this call cited new
+   * evidence, because the note's provenance now argues against it.
+   */
+  evidenceStale?: Array<{ sourceId: string | null; textUnitId: string; staleTerms: string[]; reason: string }>;
   /** Requested links that could not be attached after the node mutation landed. */
   linkRejected?: Array<{ toSlug: string; predicate: string; reason: string }>;
 };
@@ -284,6 +249,7 @@ export async function remember(
   const evidenceUnserved: NonNullable<RememberResult["evidenceUnserved"]> = [];
   const evidenceUnsupported: NonNullable<RememberResult["evidenceUnsupported"]> = [];
   const linkRejected: NonNullable<RememberResult["linkRejected"]> = [];
+  const evidenceStale: NonNullable<RememberResult["evidenceStale"]> = [];
   const evidence: CaptureInput["evidence"] = [];
   const attachedRawUnits: Array<{ sourceId: string | null; textUnitId: string; text: string }> = [];
   let hasResolvedQuote = false;
@@ -403,14 +369,20 @@ export async function remember(
     }
   };
   const finish = (
-    result: Omit<RememberResult, "complete" | "evidenceRejected" | "evidenceUnserved" | "evidenceUnsupported" | "linkRejected">,
+    result: Omit<RememberResult, "complete" | "evidenceRejected" | "evidenceUnserved" | "evidenceUnsupported" | "evidenceStale" | "linkRejected">,
   ): RememberResult => ({
     ...result,
     ...(callerContext?.sharedOwnerIds?.length && input.space ? { space: input.space } : {}),
-    complete: evidenceRejected.length === 0 && evidenceUnserved.length === 0 && evidenceUnsupported.length === 0 && linkRejected.length === 0,
+    complete:
+      evidenceRejected.length === 0 &&
+      evidenceUnserved.length === 0 &&
+      evidenceUnsupported.length === 0 &&
+      linkRejected.length === 0 &&
+      (evidenceStale.length === 0 || evidence.length > 0),
     ...(evidenceRejected.length > 0 ? { evidenceRejected } : {}),
     ...(evidenceUnserved.length > 0 ? { evidenceUnserved } : {}),
     ...(evidenceUnsupported.length > 0 ? { evidenceUnsupported } : {}),
+    ...(evidenceStale.length > 0 ? { evidenceStale } : {}),
     ...(linkRejected.length > 0 ? { linkRejected } : {}),
   });
 
@@ -445,6 +417,24 @@ export async function remember(
     throw new Error(`remember: update of ${target.id} kept conflicting; re-read and retry.`);
   }
   scoreSupport(updated);
+  if (updated.revisionId !== target.revisionId) {
+    const previousText = `${target.title}\n${target.summary ?? ""}\n${(target.content ?? "").slice(0, 2000)}`;
+    const revisedText = `${updated.title}\n${updated.summary ?? ""}\n${(updated.content ?? "").slice(0, 2000)}`;
+    const citedNow = new Set(evidence.map((ref) => ref.textUnitId).filter(Boolean));
+    for (const unit of target.evidence) {
+      if (!isTextUnit(unit) || citedNow.has(unit.id)) continue;
+      const staleTerms = citationContradictsRevision(previousText, revisedText, unit.text);
+      if (!staleTerms) continue;
+      evidenceStale.push({
+        sourceId: unit.sourceId ?? null,
+        textUnitId: unit.id,
+        staleTerms,
+        reason:
+          `An earlier citation still states ${staleTerms.map((term) => `"${term}"`).join(", ")}, which this revision replaced. ` +
+          "Cite the span that supports the new value as { quote }, or forget the old note if the change was a mistake.",
+      });
+    }
+  }
   return finish({ action: "updated", node: updated, similar });
 }
 

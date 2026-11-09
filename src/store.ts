@@ -23,7 +23,13 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { contentTerms, normalizeMatchToken, normalizeRetrievalQuery, retrievalQueryTerms, tokenizeForMatch } from "./queryNormalize.js";
+import {
+  contentTerms,
+  normalizeMatchToken,
+  normalizeRetrievalQuery,
+  retrievalQueryTerms,
+  tokenizeForMatch,
+} from "./queryNormalize.js";
 import type {
   AnnotateInput,
   CaptureInput,
@@ -54,67 +60,43 @@ import type {
 } from "./contracts.js";
 import {
   compileGrepPattern,
+  GIANT_CONTENT_CHARS,
   grepExcerpt,
-  isTextUnit,
-  performRecall,
+  maxSemanticDistanceFor,
+  reciprocalRankFusion,
   reportSearchArm,
-  type SearchObserver,
-  renderAgentContext,
-  renderMarkdownProjection,
-  decodeEventCursor,
-  encodeEventCursor,
-  evidenceSupportScore,
-  sha256,
+} from "./retrievalPolicy.js";
+import { isTextUnit, type SearchObserver, sha256, type GraphEvent, type GraphEventFeed, type GraphEventStats, type MemoryDay, type ReconcileFlag, type GraphJob, type GraphOperationContext, type GraphLintReport, type GraphSnapshot, type GraphStore, type GraphViewSnapshot, type GrepMatch, type GrepResult, type NeighborhoodNode, type NeighborhoodResult, type ProjectResult, type ReadResult, type RecallResult, type RecallTrace, type SearchResult, type TextQuoteMatch } from "./graphCore.js";
+import { performRecall } from "./recall.js";
+import { renderAgentContext, renderMarkdownProjection } from "./render.js";
+import { decodeEventCursor, encodeEventCursor, isSmokeEvent, WRITE_ACTIONS } from "./events.js";
+import { evidenceSupportScore, FUZZY_QUOTE_CANDIDATE_FLOOR, supersessionRevivedBy } from "./evidence.js";
+import {
   splitTextUnits,
   buildTextChunks,
   chunkEmbeddingInput,
   isEmbeddableUnitText,
   type TextChunk,
-  ServedUnitLog,
-  FUZZY_QUOTE_CANDIDATE_FLOOR,
-  WEAK_EVIDENCE_FLOOR,
-  type GraphEvent,
-  type GraphEventFeed,
-  type GraphEventStats,
-  type MemoryDay,
-  isSmokeEvent,
-  RECONCILE_FINDING_LIMIT,
-  reconcileLintFinding,
-  type ReconcileFlag,
-  WRITE_ACTIONS,
-  type GraphJob,
-  type GraphOperationContext,
-  type GraphLintFinding,
-  type GraphLintReport,
-  type GraphSnapshot,
-  type GraphStore,
-  type GraphViewSnapshot,
-  type GrepMatch,
-  type GrepResult,
-  type NeighborhoodNode,
-  type NeighborhoodResult,
-  type ProjectResult,
-  type ReadResult,
-  type RecallResult,
-  type SearchResult,
-  type TextQuoteMatch,
-} from "./graphCore.js";
+} from "./chunking.js";
+import { ServedUnitLog } from "./servedUnits.js";
+import { buildLintReport, lintNodeText } from "./lint.js";
 import { cosineSimilarity, createEmbeddingProviderFromEnv, type EmbeddingProvider } from "./embeddings.js";
-import { buildObsidianVaultExport } from "./obsidianExport.js";
+import type { Reranker } from "./rerank.js";
+import { EdgeValidityConflictError, ownerScope, UnknownEvidenceReferenceError } from "./graphCore.js";
 import {
-  EdgeValidityConflictError,
   JOB_MAX_ATTEMPTS,
+  followUpRequest,
+  maintenanceRequests,
+  reconcileRequest,
+  runJobKind,
   TERMINAL_JOB_RETENTION_DAYS,
-  lintMinIntervalSeconds,
-  eventPruneMaxRows,
-  eventRetentionDays,
-  ownerScope,
-  UnknownEvidenceReferenceError,
-} from "./graphCore.js";
-import { performReconcileNode, type ReconcileJudge } from "./reconcile.js";
-import { runRecallSelfTest } from "./recallSelfTest.js";
-import { observe, withTraceAttributes } from "./tracing.js";
-import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
+  type JobHost,
+  type JobRequest,
+  type JobRunner,
+  type StoreOptions,
+} from "./jobs.js";
+import { eventPruneMaxRows, eventRetentionDays } from "./events.js";
+import type { ReconcileJudge } from "./reconcile.js";
 import { slugify } from "./slug.js";
 
 type Revision = {
@@ -127,12 +109,7 @@ type Revision = {
   createdAt: string;
 };
 
-function asSelfTestPayload(payload: unknown): Record<string, unknown> {
-  return payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
-}
 
-/** Catalog/log-style pages are useful as pointers but starve search/recall. */
-const GIANT_CONTENT_CHARS = 12_000;
 
 export class InMemoryGraphStore implements GraphStore {
   private sourceRows = new Map<string, GraphSource & { contentText: string; metadata: Record<string, unknown> }>();
@@ -173,8 +150,16 @@ export class InMemoryGraphStore implements GraphStore {
    */
   private reconcileJudge: ReconcileJudge | null;
 
-  constructor(options: { reconcileJudge?: ReconcileJudge | null } = {}) {
+  private reranker: Reranker | null;
+  private embeddings: EmbeddingProvider | null;
+
+  private jobRunner: JobRunner;
+
+  constructor(options: StoreOptions = {}) {
+    this.jobRunner = options.jobRunner ?? runJobKind;
     this.reconcileJudge = options.reconcileJudge ?? null;
+    this.reranker = options.reranker ?? null;
+    this.embeddings = options.embeddings === undefined ? createEmbeddingProviderFromEnv() : options.embeddings;
     this.seed();
   }
 
@@ -219,7 +204,7 @@ export class InMemoryGraphStore implements GraphStore {
       this.textChunks.set(chunk.id, chunk);
     }
     this.recordEvent("ingest", source.id, context, now);
-    this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
+    this.enqueueRequests(maintenanceRequests({ lint: true, embeddings: true }, ownerScope(context)), context);
 
     const { contentText: _contentText, metadata: _metadata, ...publicSource } = source;
     this.servedUnits.mark(units.map((unit) => unit.id), context);
@@ -262,7 +247,7 @@ export class InMemoryGraphStore implements GraphStore {
     context?: GraphOperationContext,
     observer?: SearchObserver,
   ): Promise<SearchResult> {
-    const provider = input.mode === "lexical" ? null : createEmbeddingProviderFromEnv();
+    const provider = input.mode === "lexical" ? null : this.embeddings;
 
     let result: SearchResult;
     // Mirrors PgGraphStore.search: a semantic-only search must not run (and
@@ -669,10 +654,17 @@ export class InMemoryGraphStore implements GraphStore {
         this.edges.set(edge.id, { ...edge, expiredAt: now, validUntil: closeAt(edge, now), invalidationReason: "tombstoned" });
       }
       this.recordEvent("tombstone", id, context, now);
-      this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
+      this.enqueueRequests(maintenanceRequests({ lint: true, embeddings: true }, ownerScope(context)), context);
       tombstoned.push(id);
     }
     return { tombstoned };
+  }
+
+  /** When the node's current fact revision was recorded (null if unknown). */
+  private currentRevisionCreatedAt(nodeId: string): string | null {
+    const node = this.nodes.get(nodeId);
+    if (!node) return null;
+    return this.revisions.get(node.revisionId)?.createdAt ?? null;
   }
 
   supersededBy(nodeIds: string[], _context?: GraphOperationContext): Map<string, { byNodeId: string; byTitle: string }> {
@@ -683,6 +675,9 @@ export class InMemoryGraphStore implements GraphStore {
       if (!wanted.has(edge.toNodeId)) continue;
       const by = this.nodes.get(edge.fromNodeId);
       if (!by || this.deletedNodeIds.has(by.id)) continue;
+      // A fact revision recorded after the edge re-asserts the target: the
+      // edge judged an older belief, so it no longer marks the current one.
+      if (supersessionRevivedBy(this.currentRevisionCreatedAt(edge.toNodeId), edge.recordedAt)) continue;
       map.set(edge.toNodeId, { byNodeId: by.id, byTitle: by.title });
     }
     return map;
@@ -805,7 +800,7 @@ export class InMemoryGraphStore implements GraphStore {
     if (!existing) {
       this.edges.set(edge.id, edge);
       this.recordEvent("link", edge.id, context, now);
-      this.enqueueMaintenanceJobs(context, ["lint_graph"]);
+      this.enqueueRequests(maintenanceRequests({ lint: true }, ownerScope(context)), context);
     }
 
     if (previous) {
@@ -839,8 +834,8 @@ export class InMemoryGraphStore implements GraphStore {
     }, context);
   }
 
-  recall(input: RecallInput): Promise<RecallResult> {
-    return performRecall(this, input);
+  recall(input: RecallInput, context?: GraphOperationContext, options: { onTrace?: RecallTrace } = {}): Promise<RecallResult> {
+    return performRecall(this, input, context, { reranker: this.reranker, ...options });
   }
 
   private expireEdge(
@@ -864,7 +859,7 @@ export class InMemoryGraphStore implements GraphStore {
     };
     this.edges.set(expired.id, expired);
     this.recordEvent("invalidate_edge", expired.id, context, patch.expiredAt);
-    this.enqueueMaintenanceJobs(context, ["lint_graph"]);
+    this.enqueueRequests(maintenanceRequests({ lint: true }, ownerScope(context)), context);
     return expired;
   }
 
@@ -904,8 +899,8 @@ export class InMemoryGraphStore implements GraphStore {
       createdAt: now,
     });
     this.recordEvent("capture", id, context, now);
-    this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
-    this.enqueueReconcileJob(context, id);
+    this.enqueueRequests(maintenanceRequests({ lint: true, embeddings: true }, ownerScope(context)), context);
+    this.enqueueRequests([reconcileRequest(id, ownerScope(context))], context);
 
     for (const evidence of input.evidence) {
       const annotationInput: AnnotateInput = {
@@ -972,7 +967,7 @@ export class InMemoryGraphStore implements GraphStore {
     };
     this.annotations.set(annotation.id, annotation);
     this.recordEvent("annotate", annotation.id, context, now);
-    this.enqueueMaintenanceJobs(context, ["lint_graph"]);
+    this.enqueueRequests(maintenanceRequests({ lint: true }, ownerScope(context)), context);
     return annotation;
   }
 
@@ -1055,9 +1050,9 @@ export class InMemoryGraphStore implements GraphStore {
       this.link({ fromNodeId: updated.id, toSlug: link.toSlug, predicate: link.predicate, weight: 1 }, context);
     }
     this.recordEvent("update", updated.id, context, now);
-    this.enqueueMaintenanceJobs(context, ["lint_graph", "refresh_embeddings"]);
+    this.enqueueRequests(maintenanceRequests({ lint: true, embeddings: true }, ownerScope(context)), context);
     // Preserve reconcile cadence: only body changes introduce claims to judge.
-    if (contentChanged) this.enqueueReconcileJob(context, updated.id);
+    if (contentChanged) this.enqueueRequests([reconcileRequest(updated.id, ownerScope(context))], context);
     return updated;
   }
 
@@ -1138,107 +1133,51 @@ export class InMemoryGraphStore implements GraphStore {
 
   lint(): GraphLintReport {
     const snapshot = this.exportGraph();
-    const findings: GraphLintFinding[] = [];
+    const live = new Set(snapshot.nodes.map((node) => node.id));
     const degree = new Map(snapshot.nodes.map((node) => [node.id, 0]));
-
     for (const edge of snapshot.edges) {
       degree.set(edge.fromNodeId, (degree.get(edge.fromNodeId) ?? 0) + 1);
       degree.set(edge.toNodeId, (degree.get(edge.toNodeId) ?? 0) + 1);
     }
-
-    for (const node of snapshot.nodes) {
-      if ((degree.get(node.id) ?? 0) === 0) {
-        findings.push({
-          severity: "warning",
-          code: "orphan_node",
-          entityTable: "node",
-          entityId: node.id,
-          message: `Node has no graph edges: ${node.title}`,
-        });
-      }
-
-      const hasEvidence = [...this.annotations.values()].some((annotation) => annotation.nodeId === node.id);
-      if (!hasEvidence) {
-        findings.push({
-          severity: "warning",
-          code: "missing_evidence",
-          entityTable: "node",
-          entityId: node.id,
-          message: `Node has no evidence annotation: ${node.title}`,
-        });
-      }
-    }
-
-    // weak_evidence: citations that are present but probably wrong (see pg lint).
-    let weakEvidenceCount = 0;
-    for (const node of snapshot.nodes) {
-      if (weakEvidenceCount >= 50) break;
-      const units = [...this.annotations.values()]
-        .filter((annotation) => annotation.nodeId === node.id && annotation.textUnitId !== null)
-        .map((annotation) => this.textUnits.get(annotation.textUnitId as string)?.text)
-        .filter((text): text is string => typeof text === "string");
-      if (units.length === 0) continue;
-      const nodeText = `${node.title}\n${node.summary ?? ""}\n${(node.content ?? "").slice(0, 2000)}`;
-      const score = evidenceSupportScore(nodeText, units);
-      if (score < WEAK_EVIDENCE_FLOOR) {
-        findings.push({
-          severity: "warning",
-          code: "weak_evidence",
-          entityTable: "node",
-          entityId: node.id,
-          message: `Cited evidence supports ${(score * 100).toFixed(0)}% of the node's content terms (floor ${WEAK_EVIDENCE_FLOOR * 100}%): ${node.title}`,
-        });
-        weakEvidenceCount += 1;
-      }
-    }
-
+    const annotations = [...this.annotations.values()];
     const titleCounts = new Map<string, number>();
-    for (const node of snapshot.nodes) {
-      const key = node.title.toLowerCase();
-      titleCounts.set(key, (titleCounts.get(key) ?? 0) + 1);
-    }
-    for (const [title, count] of titleCounts) {
-      if (count > 1) {
-        findings.push({
-          severity: "warning",
-          code: "duplicate_title",
-          count,
-          message: `Multiple nodes share title: ${title}`,
+    for (const node of snapshot.nodes) titleCounts.set(node.title.toLowerCase(), (titleCounts.get(node.title.toLowerCase()) ?? 0) + 1);
+    const activeEdges = [...this.edges.values()].filter((edge) => edge.expiredAt === null);
+
+    return buildLintReport({
+      nodes: snapshot.nodes.length,
+      edges: snapshot.edges.length,
+      orphans: snapshot.nodes.filter((node) => (degree.get(node.id) ?? 0) === 0),
+      missingEvidence: snapshot.nodes.filter((node) => !annotations.some((annotation) => annotation.nodeId === node.id)),
+      duplicateTitles: [...titleCounts].filter(([, count]) => count > 1).map(([title, count]) => ({ title, count })),
+      danglingEdgeIds: activeEdges.filter((edge) => !live.has(edge.fromNodeId) || !live.has(edge.toNodeId)).map((edge) => edge.id),
+      cited: snapshot.nodes.flatMap((node) => {
+        const units = annotations
+          .filter((annotation) => annotation.nodeId === node.id && annotation.textUnitId !== null)
+          .map((annotation) => this.textUnits.get(annotation.textUnitId as string)?.text)
+          .filter((text): text is string => typeof text === "string");
+        return units.length ? [{ id: node.id, title: node.title, nodeText: lintNodeText(node), units }] : [];
+      }),
+      revivedSupersessions: activeEdges.flatMap((edge) => {
+        const from = this.nodes.get(edge.fromNodeId);
+        const to = this.nodes.get(edge.toNodeId);
+        if (edge.predicate !== "supersedes" || !from || !to || this.deletedNodeIds.has(from.id) || this.deletedNodeIds.has(to.id)) return [];
+        return supersessionRevivedBy(this.currentRevisionCreatedAt(to.id), edge.recordedAt)
+          ? [{ edgeId: edge.id, fromTitle: from.title, toTitle: to.title }]
+          : [];
+      }),
+      // A flag whose node or counterpart has since been tombstoned is skipped, mirroring pg's join.
+      reconcileFlags: [...this.reconcileFlags].flatMap(([nodeId, flags]) => {
+        const node = this.nodes.get(nodeId);
+        if (!node || this.deletedNodeIds.has(nodeId)) return [];
+        return flags.flatMap((flag) => {
+          const other = this.nodes.get(flag.otherNodeId);
+          return other && !this.deletedNodeIds.has(other.id) ? [{ code: flag.code, node, other, detail: flag.detail }] : [];
         });
-      }
-    }
-
-    // reconcile_duplicate / reconcile_contradiction: what the write-time
-    // reconciliation judge already decided. A flag whose node or counterpart
-    // has since been tombstoned is skipped, mirroring the pg driver's join.
-    let reconcileCount = 0;
-    for (const [nodeId, flags] of this.reconcileFlags) {
-      if (reconcileCount >= RECONCILE_FINDING_LIMIT) break;
-      const node = this.nodes.get(nodeId);
-      if (!node || this.deletedNodeIds.has(nodeId)) continue;
-      for (const flag of flags) {
-        if (reconcileCount >= RECONCILE_FINDING_LIMIT) break;
-        const other = this.nodes.get(flag.otherNodeId);
-        if (!other || this.deletedNodeIds.has(other.id)) continue;
-        findings.push(reconcileLintFinding({ code: flag.code, node, other, detail: flag.detail }));
-        reconcileCount += 1;
-      }
-    }
-
-    const errors = findings.filter((finding) => finding.severity === "error").length;
-    const warnings = findings.filter((finding) => finding.severity === "warning").length;
-    return {
-      generatedAt: new Date().toISOString(),
-      summary: {
-        nodes: snapshot.nodes.length,
-        edges: snapshot.edges.length,
-        findings: findings.length,
-        errors,
-        warnings,
-      },
-      findings,
-    };
+      }),
+    });
   }
+
 
   recordReconcileFlags(input: { nodeId: string; flags: ReconcileFlag[] }, _context?: GraphOperationContext): void {
     // Replace, never append: the pass that just ran is the whole truth about
@@ -1427,7 +1366,7 @@ export class InMemoryGraphStore implements GraphStore {
     this.graphJobs.set(running.id, running);
 
     try {
-      const result = await this.performJobTraced(running);
+      const result = await this.jobRunner(this.jobHost(), running);
       const finishedAt = new Date().toISOString();
       const succeeded: GraphJob = {
         ...running,
@@ -1438,6 +1377,8 @@ export class InMemoryGraphStore implements GraphStore {
       };
       this.graphJobs.set(succeeded.id, succeeded);
       this.recordEvent("run_job", succeeded.id, context, finishedAt);
+      const next = followUpRequest(succeeded);
+      if (next) this.enqueueRequests([next], context);
       return succeeded;
     } catch (error) {
       const finishedAt = new Date().toISOString();
@@ -1466,116 +1407,35 @@ export class InMemoryGraphStore implements GraphStore {
    * rides along so a cost view can be read per account, and the kind becomes
    * the trace name so one job type can be compared with itself over time.
    */
-  private async performJobTraced(job: GraphJob): Promise<GraphJobResult> {
-    const ownerId = typeof job.payload.ownerId === "string" ? job.payload.ownerId : undefined;
-    return withTraceAttributes(
-      { ...(ownerId ? { userId: ownerId } : {}), tags: ["job", job.kind] },
-      () => observe(`job:${job.kind}`, {
-        asType: "span",
-        input: { kind: job.kind, jobId: job.id, payload: job.payload },
-      }, async (span) => {
-        const result = await this.performJob(job);
-        span.update({ output: result });
-        return result;
+  private jobHost(): JobHost {
+    return {
+      store: this,
+      reconcileJudge: this.reconcileJudge,
+      prune: async () => ({ jobs: this.pruneTerminalJobs(), events: this.pruneEvents() }),
+      // No embedding backfill here: report what is missing and that it was skipped.
+      refreshEmbeddings: async (owner) => ({
+        provider: "none",
+        model: this.embeddings?.model ?? "unconfigured",
+        status: "skipped_no_embedding_provider",
+        ownerId: owner,
+        chunkedSources: 0,
+        missing: { nodeRevisions: this.nodes.size, textChunks: this.textChunks.size },
       }),
-    );
-  }
-
-  private async performJob(job: GraphJob): Promise<GraphJobResult> {
-    if (job.kind === "lint_graph") {
-      // The memory driver is single-user, so lint always covers the whole
-      // store; the owner is still reported so the result shape matches pg.
-      const payloadOwner = (job.payload as Record<string, unknown>).ownerId;
-      const ownerId = typeof payloadOwner === "string" ? payloadOwner : null;
-      const report = this.lint();
-      const prunedJobs = this.pruneTerminalJobs();
-      const prunedEvents = this.pruneEvents();
-      // Carry the findings themselves (capped) — counts alone are not actionable.
-      const result: GraphJobResultMap["lint_graph"] = {
-        ownerId,
-        lint: { ...report.summary, findings: report.findings.slice(0, 200) },
-        prunedJobs,
-        prunedEvents,
-      };
-      return result;
-    }
-
-    if (job.kind === "recall_self_test") {
-      const payload = asSelfTestPayload(job.payload);
-      const ownerId = typeof payload.ownerId === "string" ? payload.ownerId : null;
-      const sampleSize = typeof payload.sampleSize === "number" ? payload.sampleSize : undefined;
-      // Owner-scoped like every other read: a self-test must ask the graph the
-      // way its owner would, or it measures a pool they cannot see.
-      const result: GraphJobResultMap["recall_self_test"] = await runRecallSelfTest(
-        this,
-        sampleSize === undefined ? {} : { sampleSize },
-        ownerId ? { ownerId } : undefined,
-      );
-      return result;
-    }
-
-    if (job.kind === "reconcile_node") {
-      const payload = job.payload as Record<string, unknown>;
-      const nodeId = typeof payload.nodeId === "string" ? payload.nodeId : null;
-      if (!nodeId) throw new Error("reconcile_node: payload.nodeId is required");
-      const ownerId = typeof payload.ownerId === "string" ? payload.ownerId : null;
-      const result: GraphJobResultMap["reconcile_node"] = await performReconcileNode(this, { nodeId, ownerId }, this.reconcileJudge);
-      return result;
-    }
-
-    if (job.kind === "refresh_obsidian_projection") {
-      const projection = buildObsidianVaultExport(this.exportMarkdown(), this.timeline(), this.exportGraph());
-      const result: GraphJobResultMap["refresh_obsidian_projection"] = {
-        manifest: projection.manifest,
-        fileCount: Object.keys(projection.files).length,
-      };
-      return result;
-    }
-
-    // The in-memory driver has no embedding backfill; report the skipped shape.
-    const result: GraphJobResultMap["refresh_embeddings"] = {
-      provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "none",
-      model: "unconfigured",
-      status: "skipped_no_embedding_provider",
-      ownerId: null,
-      chunkedSources: 0,
-      missing: {
-        nodeRevisions: this.nodes.size,
-        textChunks: this.textChunks.size,
-      },
     };
-    return result;
   }
 
-  /**
-   * Per-owner lint key and payload, global embedding refresh, and the lint
-   * throttle (no new lint within TROVE_LINT_MIN_INTERVAL_SECONDS of a
-   * successful one for the same key); see pgStore for the rationale.
-   */
-  private enqueueMaintenanceJobs(
-    context: GraphOperationContext | undefined,
-    kinds: Array<GraphJob["kind"]>,
-  ): void {
-    const scope = ownerScope(context);
-    for (const kind of kinds) {
-      const scoped = kind === "lint_graph" && scope.scoped && scope.ownerId !== null;
-      const dedupeKey = scoped ? `maintenance:${kind}:${scope.ownerId}` : `maintenance:${kind}`;
-      if (kind === "lint_graph" && this.lintSucceededRecently(dedupeKey)) continue;
-      this.enqueueJob({
-        kind,
-        payload: scoped ? { reason: "graph_mutation", ownerId: scope.ownerId } : { reason: "graph_mutation" },
-        priority: kind === "refresh_embeddings" ? 40 : 60,
-        dedupeKey,
-      }, context);
+  private enqueueRequests(requests: JobRequest[], context: GraphOperationContext | undefined): void {
+    for (const request of requests) {
+      if (request.throttleSeconds > 0 && this.succeededWithin(request.kind, request.dedupeKey, request.throttleSeconds)) continue;
+      const { throttleSeconds: _throttle, ...input } = request;
+      this.enqueueJob(input, context);
     }
   }
 
-  private lintSucceededRecently(dedupeKey: string): boolean {
-    const intervalMs = lintMinIntervalSeconds() * 1000;
-    if (intervalMs <= 0) return false;
-    const floor = Date.now() - intervalMs;
+  private succeededWithin(kind: GraphJob["kind"], dedupeKey: string, seconds: number): boolean {
+    const floor = Date.now() - seconds * 1000;
     return [...this.graphJobs.values()].some((job) =>
-      job.kind === "lint_graph" &&
+      job.kind === kind &&
       job.dedupeKey === dedupeKey &&
       job.status === "succeeded" &&
       Date.parse(job.finishedAt ?? job.updatedAt) > floor
@@ -1587,7 +1447,7 @@ export class InMemoryGraphStore implements GraphStore {
     const floor = Date.now() - TERMINAL_JOB_RETENTION_DAYS * 86_400_000;
     let pruned = 0;
     for (const [id, job] of this.graphJobs) {
-      const terminal = job.status === "succeeded" || job.status === "failed" || job.status === "cancelled" || (job.status as string) === "dead";
+      const terminal = job.status === "succeeded" || job.status === "failed" || job.status === "cancelled" || job.status === "dead";
       if (!terminal || Date.parse(job.finishedAt ?? job.updatedAt) >= floor) continue;
       this.graphJobs.delete(id);
       pruned += 1;
@@ -1618,16 +1478,6 @@ export class InMemoryGraphStore implements GraphStore {
     this.eventLog.length = 0;
     for (const event of survivors) this.eventLog.push(event);
     return expired.length;
-  }
-
-  /** Per-node reconciliation enqueue; see pgStore for the rationale. */
-  private enqueueReconcileJob(context: GraphOperationContext | undefined, nodeId: string): void {
-    this.enqueueJob({
-      kind: "reconcile_node",
-      payload: { reason: "graph_mutation", nodeId, ownerId: ownerScope(context).ownerId },
-      priority: 30,
-      dedupeKey: `reconcile:${nodeId}`,
-    }, context);
   }
 
   private uniqueSlug(baseSlug: string): string {
@@ -1843,49 +1693,9 @@ function jaccardSimilarity(left: Set<string>, right: Set<string>): number {
   return shared / (left.size + right.size - shared);
 }
 
-/**
- * Reciprocal Rank Fusion over the per-mode ranked lists: each item scores
- * 1/(60 + rank) per list it appears in (1-based rank), ordered by fused score.
- */
-function reciprocalRankFusion<T extends { id: string }>(...lists: T[][]): T[] {
-  const fused = new Map<string, { item: T; score: number; bestRank: number }>();
-  for (const list of lists) {
-    list.forEach((item, index) => {
-      const rank = index + 1;
-      const existing = fused.get(item.id);
-      if (existing) {
-        existing.score += 1 / (60 + rank);
-        existing.bestRank = Math.min(existing.bestRank, rank);
-        const incoming = (item as { distance?: number }).distance;
-        if (incoming !== undefined) {
-          const current = (existing.item as { distance?: number }).distance;
-          if (current === undefined || incoming < current) {
-            existing.item = { ...existing.item, distance: incoming };
-          }
-        }
-      } else {
-        fused.set(item.id, { item, score: 1 / (60 + rank), bestRank: rank });
-      }
-    });
-  }
-  return [...fused.values()]
-    .sort((left, right) =>
-      right.score - left.score ||
-      left.bestRank - right.bestRank ||
-      left.item.id.localeCompare(right.item.id))
-    .map((entry) => entry.item);
-}
 
 // Semantic hits farther than this cosine distance are noise. Input wins, then
 // the env override, then the default.
-function maxSemanticDistanceFor(input: SearchInput): number {
-  if (typeof input.maxSemanticDistance === "number" && Number.isFinite(input.maxSemanticDistance)) {
-    return input.maxSemanticDistance;
-  }
-  const fromEnv = Number(process.env.TROVE_SEMANTIC_MAX_DISTANCE);
-  if (process.env.TROVE_SEMANTIC_MAX_DISTANCE && Number.isFinite(fromEnv)) return fromEnv;
-  return 0.55;
-}
 
 function entityTableForAction(action: string): string {
   if (action === "ingest") return "source";

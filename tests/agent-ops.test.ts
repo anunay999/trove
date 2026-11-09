@@ -1,7 +1,9 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { remember, forget, readAny } from "../src/agentOps.js";
-import { suiteStore, closeStore } from "./helpers.js";
+import { suiteStore, closeStore, isolateDatabase } from "./helpers.js";
+
+await isolateDatabase("agent_ops");
 
 describe("agent ops", () => {
   const { store, context, stamp } = suiteStore("agent-ops");

@@ -1,6 +1,6 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { ingestEpisodic, splitLogicalSegments } from "../src/graphCore.js";
+import { ingestEpisodic, splitLogicalSegments } from "../src/episodes.js";
 import { suiteStore, closeStore, isolateDatabase } from "./helpers.js";
 
 // Asserts on exact source counts for a re-ingested log, so it must not see

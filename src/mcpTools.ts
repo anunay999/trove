@@ -25,7 +25,9 @@ import {
 } from "./contracts.js";
 import { assertScopes, operationContextFromAuth, type AuthContext, type TroveScope } from "./auth.js";
 import { forget, ingest, readAny, remember } from "./agentOps.js";
-import type { GraphStore } from "./graphCore.js";
+import { ownerScope, type GraphStore } from "./graphCore.js";
+import { scopeEnqueueInput } from "./jobs.js";
+import { buildMemoryIndex } from "./memoryIndex.js";
 import { toolDescription, TROVE_AGENT_DOCTRINE, visibleTiers } from "./toolDefinitions.js";
 import { getSkill } from "./skills.js";
 import { buildObsidianVaultExport } from "./obsidianExport.js";
@@ -323,7 +325,7 @@ export function createTroveMcpServer(
       async (input) => withScopes(
         authContext,
         ["graph:admin"],
-        async () => jsonToolResult(await store.enqueueJob(input, operationContext)),
+        async () => jsonToolResult(await store.enqueueJob(scopeEnqueueInput(input, ownerScope(operationContext)), operationContext)),
       ),
     );
 
@@ -385,6 +387,23 @@ function registerTroveResources(
         },
       ],
     }),
+  );
+
+  // The session-start index (injected context): what this caller's memory
+  // holds, small enough to load into every session. Hosts that inject
+  // resources at startup should inject this one next to the doctrine.
+  server.registerResource(
+    "trove-index",
+    "trove://index",
+    {
+      title: "Trove Memory Index",
+      description:
+        "Session-start index of your memory: hubs, most-used and recently changed notes, capped at 200 lines. Read at session start so you look things up instead of re-deriving them.",
+      mimeType: "text/markdown",
+    },
+    async (uri) => withScopes(authContext, ["graph:read"], async () => ({
+      contents: [{ uri: uri.href, mimeType: "text/markdown", text: (await buildMemoryIndex(store, operationContext)).text }],
+    })),
   );
 
   server.registerResource(

@@ -57,10 +57,14 @@ describe("mcp stdio server", () => {
     assert.ok(promptNames.includes("trove-session"), "trove-session prompt must be listed");
   });
 
-  it("reads the doctrine, lint, jobs, views, and events resources", async () => {
-    for (const uri of ["trove://doctrine", "trove://lint", "trove://jobs", "trove://views", "trove://events"]) {
+  it("reads the doctrine, index, lint, jobs, views, and events resources", async () => {
+    for (const uri of ["trove://doctrine", "trove://index", "trove://lint", "trove://jobs", "trove://views", "trove://events"]) {
       const resource = await client.request({ method: "resources/read", params: { uri } });
       assert.ok(resource.contents.length > 0, `resource ${uri} returned no contents`);
+      if (uri === "trove://index") {
+        const text = resource.contents.map((c) => ("text" in c ? c.text : "")).join("\n");
+        assert.match(text, /# Trove memory index/);
+      }
       if (uri === "trove://doctrine") {
         const text = resource.contents.map((c) => ("text" in c ? c.text : "")).join("\n");
         assert.match(text, /grep/i);

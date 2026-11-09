@@ -9,7 +9,7 @@ import {
   chunkEmbeddingInput,
   isEmbeddableUnitText,
   splitTextUnits,
-} from "../src/graphCore.js";
+} from "../src/chunking.js";
 import { suiteStore, closeStore, hasPostgres, isolateDatabase } from "./helpers.js";
 
 /**

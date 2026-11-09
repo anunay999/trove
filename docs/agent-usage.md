@@ -32,10 +32,35 @@ You do **not** need skills for this model to reach the agent:
 |---|---|
 | **Server `instructions`** | Full operating doctrine on MCP initialize |
 | **Resource `trove://doctrine`** | Same text; `resources/read` at session start if instructions are ignored |
+| **Resource `trove://index`** | *Your* memory at a glance: hubs, entity pages, most-used and recently changed notes. 200 lines max |
 | **Tool descriptions** | Per-tool routing (shared by MCP and `GET /v1/tools`) |
 | **Prompts** | `trove-recall`, `trove-remember`, `trove-session` |
 
 If your host strips instructions, pin `trove://doctrine` or paste the [system-prompt blurb](#optional-system-prompt-blurb).
+
+### Load the memory index at session start
+
+The most common memory failure is not bad retrieval: it is an agent that never
+looks. A short index injected at session start fixes most of it, because the
+agent then knows memory exists and roughly what is in it. Trove renders one per
+caller, deterministically and with no model call: `trove://index`,
+`GET /v1/index?format=text`, or `npm run cli -- index`.
+
+In Claude Code, a SessionStart hook puts it into context automatically (a
+hook's stdout is added to the session). In `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command",
+        "command": "curl -sf -H \"Authorization: Bearer $TROVE_KEY\" https://mytrove.in/v1/index?format=text || true" }] }
+    ]
+  }
+}
+```
+
+Keep the key in your environment, not in the file.
 
 ---
 
@@ -149,6 +174,13 @@ remember({ title: "Deploy freezes start Friday noon", type: "decision", links: [
 | “What did this fact say then?” | `read` with `asOf` |
 | “Which relationships did we believe then?” | `neighborhood` with `asOf` |
 
+Revising a note re-asserts it. If another note had superseded it, the
+SUPERSEDED mark stops applying once the revision lands, and lint reports the
+edge as `revised_after_superseded` until someone decides which is current
+(dreaming does this automatically when only one side changed). When a revision
+changes a value, `remember` returns `evidenceStale` for older citations that
+still state the old value: cite the span that supports the new one.
+
 ---
 
 ## 4. Session shapes
@@ -200,6 +232,14 @@ Still not one node titled “Session notes …” with everything inside.
 | Fix stale notes when you see them | Bad beliefs poison every future brief |
 
 Using `recall`/`read` also strengthens activation — good notes get easier to find.
+
+**Dreaming** (job kind `dream`; scheduled every 6h per owner with
+`TROVE_DREAM=1`, or run on demand) is the background pass over all of this. It
+re-points supersessions a later revision turned around, reports newer sources
+that disagree with a note and sources nothing cites yet, and keeps one page per
+hub that quotes its current notes. Pages show up in `trove://index`; a note
+updated after a page's date is newer than the page. Retiring unused notes runs
+only when a run asks for it (`retireAfterDays` in the job payload).
 
 ---
 

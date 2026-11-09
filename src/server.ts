@@ -42,7 +42,8 @@ import {
   searchInputSchema,
   updateInputSchema,
 } from "./contracts.js";
-import { forget, ingest, remember, TeamSpaceError } from "./agentOps.js";
+import { forget, ingest, remember } from "./agentOps.js";
+import { TeamSpaceError } from "./spaces.js";
 import {
   AuthError,
   applyImpersonation,
@@ -54,17 +55,26 @@ import {
   type AuthResolvers,
   type TroveScope,
 } from "./auth.js";
-import { createApiKeyResolver, createClerkResolver, createOAuthResolver, createServiceOwnerResolver } from "./clerkAuth.js";
+import {
+  createApiKeyResolver,
+  createClerkResolver,
+  createOAuthResolver,
+  createServiceOwnerResolver,
+} from "./clerkAuth.js";
 import {
   buildProtectedResourceMetadata,
   requestOrigin,
   resourceMetadataUrl,
 } from "./oauthMetadata.js";
 import { createGraphStore } from "./createStore.js";
-import { EdgeValidityConflictError, isSmokeEvent } from "./graphCore.js";
+import { EdgeValidityConflictError, ownerScope } from "./graphCore.js";
+import { isSmokeEvent } from "./events.js";
+import { scopeEnqueueInput } from "./jobs.js";
+import { buildMemoryIndex } from "./memoryIndex.js";
 import { sourceDaySeries } from "./sourceStats.js";
 import { jobResultAs } from "./jobResults.js";
 import { flushTracing, startTracing, tracingEnabled } from "./tracing.js";
+import { createGraphChatModelFromEnv } from "./chatModel.js";
 import { graphChatResponse } from "./graphChat.js";
 import { startJobWorker } from "./jobWorker.js";
 import {
@@ -88,6 +98,7 @@ import { DASHBOARD_PATHS } from "./webRoutes.js";
 
 const app = new Hono();
 const { store, driver } = createGraphStore();
+const chatModel = createGraphChatModelFromEnv();
 
 // User accounts and per-user API keys need Postgres; without it (in-memory
 // dev store) the Clerk/key resolvers stay off and env tokens rule alone.
@@ -594,6 +605,7 @@ app.post("/v1/graph-chat", async (context) => {
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), graphChatInputSchema);
   return graphChatResponse(store, input, operationContextFromAuth(auth), {
+    model: chatModel,
     // A closed tab must abort the model call, not leave it streaming to nobody.
     signal: context.req.raw.signal,
   });
@@ -732,6 +744,18 @@ app.get("/v1/events", async (context) => {
   return context.json(await store.events(input, operationContextFromAuth(auth)));
 });
 
+// Session-start memory index. `?format=text` returns the markdown alone, so a
+// SessionStart hook can print it straight into the agent's context.
+app.get("/v1/index", async (context) => {
+  const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
+  if (auth instanceof Response) return auth;
+  const index = await buildMemoryIndex(store, operationContextFromAuth(auth));
+  if (context.req.query("format") === "text") {
+    return context.body(index.text, 200, { "content-type": "text/markdown; charset=utf-8" });
+  }
+  return context.json(index);
+});
+
 app.get("/v1/lint", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:read"]);
   if (auth instanceof Response) return auth;
@@ -797,7 +821,8 @@ app.post("/v1/jobs", async (context) => {
   const auth = await authorizeRequest(context.req.raw.headers, ["graph:admin"]);
   if (auth instanceof Response) return auth;
   const input = await parseJsonOrThrow(context.req.json(), enqueueJobInputSchema);
-  return context.json({ job: await store.enqueueJob(input, operationContextFromAuth(auth)) }, 201);
+  const operation = operationContextFromAuth(auth);
+  return context.json({ job: await store.enqueueJob(scopeEnqueueInput(input, ownerScope(operation)), operation) }, 201);
 });
 
 app.post("/v1/jobs/run", async (context) => {

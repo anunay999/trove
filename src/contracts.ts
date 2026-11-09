@@ -403,11 +403,11 @@ export const deleteViewInputSchema = z.object({
 });
 
 export const graphJobKindSchema = z.enum([
-  "refresh_obsidian_projection",
   "lint_graph",
   "refresh_embeddings",
   "reconcile_node",
   "recall_self_test",
+  "dream",
 ]);
 
 export const graphJobStatusSchema = z.enum([

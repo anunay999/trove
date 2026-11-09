@@ -1,6 +1,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, extname, join, relative } from "node:path";
-import { ingestEpisodic, type GraphOperationContext } from "../src/graphCore.js";
+import { ingestEpisodic } from "../src/episodes.js";
+import type { GraphOperationContext } from "../src/graphCore.js";
 import { PgGraphStore } from "../src/pgStore.js";
 import { UserStore } from "../src/users.js";
 import { slugify } from "../src/slug.js";

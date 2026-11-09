@@ -53,9 +53,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "npx oxlint src scripts tests",
     "check": "npm run typecheck && npm run lint",
-    "test": "node --import tsx --test \"tests/**/*.test.ts\"",
-    "test:watch": "node --import tsx --test --watch \"tests/**/*.test.ts\"",
-    "test:e2e": "TROVE_E2E=1 node --import tsx --test \"tests/**/*.test.ts\"",
+    "test": "node --import tsx --import ./tests/setup.ts --test \"tests/**/*.test.ts\"",
+    "test:watch": "node --import tsx --import ./tests/setup.ts --test --watch \"tests/**/*.test.ts\"",
+    "test:e2e": "TROVE_E2E=1 node --import tsx --import ./tests/setup.ts --test \"tests/**/*.test.ts\"",
     "clean": "rm -rf dist web/dist",
     "rebuild": "npm run clean && npm run build && npm run web:build"
   },

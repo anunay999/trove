@@ -33,7 +33,7 @@
  */
 
 import type { RecallResult } from "./graphCore.js";
-import { resolveLlmProvider } from "./llmProvider.js";
+import { llmFetch, resolveLlmProvider } from "./llmProvider.js";
 import { optedIn } from "./flags.js";
 
 export type ChatMessage = { role: "system" | "user"; content: string };
@@ -167,36 +167,6 @@ export function citedSlugs(answer: string, packSlugs: Iterable<string>): Set<str
 }
 
 /**
- * The human-readable half of a provider's error body, bounded.
- *
- * OpenAI-compatible providers answer failures with `{"error":{"message":...}}`,
- * OpenRouter sometimes nests a second one under `error.metadata.raw`, and a
- * gateway in front of either may return plain text or HTML. Take the most
- * specific string available and cap it: this ends up in a notice a reader sees.
- */
-export function providerErrorMessage(body: string): string {
-  const text = body.trim();
-  if (!text) return "";
-  try {
-    const parsed = JSON.parse(text) as {
-      error?: { message?: unknown; metadata?: { raw?: unknown } };
-      message?: unknown;
-    };
-    const raw = parsed.error?.metadata?.raw;
-    const candidate = [parsed.error?.message, raw, parsed.message]
-      .find((value) => typeof value === "string" && value.trim().length > 0);
-    if (typeof candidate === "string") return truncate(candidate.trim());
-  } catch {
-    // Not JSON: a gateway's text or HTML. Fall through to the raw body.
-  }
-  return truncate(text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
-}
-
-function truncate(value: string): string {
-  return value.length > 300 ? `${value.slice(0, 300)}…` : value;
-}
-
-/**
  * Pull `delta.content` out of one OpenAI-compatible SSE frame. Returns null for
  * `[DONE]`, keepalives, and anything without a text delta — providers differ in
  * what else they put on the wire (reasoning deltas, usage frames), and none of
@@ -254,7 +224,6 @@ export function createGraphChatModelFromEnv(): GraphChatModel | null {
   // other two want a small JSON-shaped one.
   const provider = resolveLlmProvider();
   if (!provider) return null;
-  const { apiKey, baseUrl } = provider;
   const model = process.env.TROVE_CHAT_MODEL
     ?? (provider.openRouter ? "meta/muse-spark-1.3-contributor" : "gpt-4o-mini");
   const effort = chatReasoningEffort();
@@ -264,20 +233,12 @@ export function createGraphChatModelFromEnv(): GraphChatModel | null {
     async *stream({ messages, signal }) {
       // Two deadlines, one signal: the caller's (the browser hung up) and ours
       // (the provider went quiet). Either one releases the socket below.
-      const deadline = AbortSignal.timeout(chatTimeoutMs());
-      const response = await fetch(`${baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${apiKey}`,
-          // OpenRouter attributes requests to an app when these are present and
-          // ignores them otherwise, so they cost nothing to send unconditionally.
-          "http-referer": "https://mytrove.in",
-          "x-title": "Trove",
-        },
-        signal: AbortSignal.any([signal, deadline]),
-        body: JSON.stringify({
-          model,
+      const response = await llmFetch(provider, {
+        label: "graph chat",
+        model,
+        timeoutMs: chatTimeoutMs(),
+        signal,
+        body: {
           stream: true,
           messages,
           // The reasoning budget is spent before the first visible token, so a
@@ -286,20 +247,9 @@ export function createGraphChatModelFromEnv(): GraphChatModel | null {
           ...(effort
             ? { max_completion_tokens: CHAT_MAX_OUTPUT_TOKENS * 4, reasoning_effort: effort }
             : { max_tokens: CHAT_MAX_OUTPUT_TOKENS, temperature: 0.2 }),
-        }),
+        },
       });
-      if (!response.ok || !response.body) {
-        // Carry the provider's own words. A bare status is undiagnosable: an
-        // OpenRouter 403 is usually a data policy that leaves no endpoint for
-        // the chosen model — its free and "contributor" tiers require prompt
-        // logging to be enabled in the account's privacy settings — but that
-        // reads exactly like a revoked key until you can see the body.
-        const detail = providerErrorMessage(await response.text().catch(() => ""));
-        throw new Error(
-          `graph chat: ${model} responded ${response.status}${detail ? ` — ${detail}` : ""}`,
-        );
-      }
-
+      if (!response.body) throw new Error(`graph chat: ${model} returned no body`);
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";

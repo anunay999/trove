@@ -1,3 +1,4 @@
+import { usageFrom } from "./tracing.js";
 /**
  * One place that decides which LLM endpoint this deployment talks to.
  *
@@ -72,4 +73,83 @@ export function resolveLlmProvider(): LlmProvider | null {
  */
 export function defaultUtilityModel(provider: LlmProvider): string {
   return provider.openRouter ? "openai/gpt-4o-mini" : "gpt-4o-mini";
+}
+
+/**
+ * POST one chat-completions request and return the response, or throw an error
+ * carrying the provider's own words. Every LLM caller goes through here, so a
+ * call never leaves without a deadline (a hung provider used to hold a reconcile
+ * job, and its lease heartbeat, forever).
+ */
+export async function llmFetch(
+  provider: LlmProvider,
+  request: { label: string; model: string; body: Record<string, unknown>; timeoutMs: number; signal?: AbortSignal },
+): Promise<Response> {
+  const deadline = AbortSignal.timeout(request.timeoutMs);
+  const response = await fetch(`${provider.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${provider.apiKey}`,
+      // OpenRouter attributes requests to an app when these are present and
+      // ignores them otherwise, so they cost nothing to send unconditionally.
+      "http-referer": "https://mytrove.in",
+      "x-title": "Trove",
+    },
+    signal: request.signal ? AbortSignal.any([request.signal, deadline]) : deadline,
+    body: JSON.stringify({ model: request.model, ...request.body }),
+  });
+  if (!response.ok) {
+    // A bare status is undiagnosable: an OpenRouter 403 is usually a data
+    // policy that leaves no endpoint for the chosen model, which reads exactly
+    // like a revoked key until you can see the body.
+    const detail = providerErrorMessage(await response.text().catch(() => ""));
+    throw new Error(`${request.label}: ${request.model} responded ${response.status}${detail ? ` — ${detail}` : ""}`);
+  }
+  return response;
+}
+
+/** One non-streaming, JSON-object reply: the shape the reranker and the judge both ask for. */
+export async function completeJson(
+  provider: LlmProvider,
+  request: { label: string; model: string; prompt: string; timeoutMs: number },
+): Promise<{ reply: string; usage: { input: number; output: number } | undefined }> {
+  const response = await llmFetch(provider, {
+    label: request.label,
+    model: request.model,
+    timeoutMs: request.timeoutMs,
+    body: { temperature: 0, response_format: { type: "json_object" }, messages: [{ role: "user", content: request.prompt }] },
+  });
+  const body = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
+  return { reply: body.choices?.[0]?.message?.content ?? "", usage: usageFrom(body) };
+}
+
+/**
+ * The human-readable half of a provider's error body, bounded.
+ *
+ * OpenAI-compatible providers answer failures with `{"error":{"message":...}}`,
+ * OpenRouter sometimes nests a second one under `error.metadata.raw`, and a
+ * gateway in front of either may return plain text or HTML. Take the most
+ * specific string available and cap it: this ends up in a notice a reader sees.
+ */
+export function providerErrorMessage(body: string): string {
+  const text = body.trim();
+  if (!text) return "";
+  try {
+    const parsed = JSON.parse(text) as {
+      error?: { message?: unknown; metadata?: { raw?: unknown } };
+      message?: unknown;
+    };
+    const raw = parsed.error?.metadata?.raw;
+    const candidate = [parsed.error?.message, raw, parsed.message]
+      .find((value) => typeof value === "string" && value.trim().length > 0);
+    if (typeof candidate === "string") return truncate(candidate.trim());
+  } catch {
+    // Not JSON: a gateway's text or HTML. Fall through to the raw body.
+  }
+  return truncate(text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
+}
+
+function truncate(value: string): string {
+  return value.length > 300 ? `${value.slice(0, 300)}…` : value;
 }

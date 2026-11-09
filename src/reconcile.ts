@@ -54,9 +54,9 @@
 
 import type { GraphNode } from "./contracts.js";
 import type { GraphOperationContext, GraphStore, ReconcileFlagCode, SearchResultNode } from "./graphCore.js";
-import { defaultUtilityModel, resolveLlmProvider } from "./llmProvider.js";
+import { completeJson, defaultUtilityModel, resolveLlmProvider } from "./llmProvider.js";
 import { featureEnabled } from "./flags.js";
-import { observe, usageFrom } from "./tracing.js";
+import { observe } from "./tracing.js";
 
 export type ReconcileVerdict = "supersedes" | "duplicate" | "contradicts" | "related" | "distinct";
 
@@ -112,6 +112,9 @@ const DUPLICATE_MIN_CONFIDENCE = 0.9;
 // Candidates are judged in one batched call, but the candidate set itself is
 // still capped so a pathological write cannot fan out into a huge prompt.
 const MAX_CANDIDATES = 5;
+
+/** A judge call runs inside a job whose lease is renewed while it waits, so it must end on its own. */
+const JUDGE_TIMEOUT_MS = 30_000;
 
 // CALIBRATED default — see the module doc and scripts/calibrateReconcileBands.ts.
 // Lowering this below ~0.42 loses real supersessions on the measured corpus
@@ -326,7 +329,6 @@ export function createReconcileJudgeFromEnv(): ReconcileJudge | null {
   if (!featureEnabled(process.env.TROVE_RECONCILE_JUDGE)) return null;
   const provider = resolveLlmProvider();
   if (!provider) return null;
-  const { apiKey, baseUrl } = provider;
   const model = process.env.TROVE_RECONCILE_JUDGE_MODEL ?? defaultUtilityModel(provider);
 
   return async ({ newNode, candidates }) => {
@@ -338,20 +340,7 @@ export function createReconcileJudgeFromEnv(): ReconcileJudge | null {
       metadata: { model, candidates: candidates.length, node: newNode.title },
     }, async (recorder) => {
       recorder.update({ model });
-      const response = await fetch(`${baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model,
-          temperature: 0,
-          response_format: { type: "json_object" },
-          messages: [{ role: "user", content: prompt }],
-        }),
-      });
-      if (!response.ok) throw new Error(`reconcile judge: OpenAI ${response.status}`);
-      const body = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
-      const reply = body.choices?.[0]?.message?.content ?? "";
-      const usage = usageFrom(body);
+      const { reply, usage } = await completeJson(provider, { label: "reconcile judge", model, prompt, timeoutMs: JUDGE_TIMEOUT_MS });
       recorder.update({ output: reply, ...(usage ? { usageDetails: usage } : {}) });
       return parseReconcileJudgments(reply, candidates.length, candidates);
     });

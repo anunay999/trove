@@ -92,6 +92,10 @@ export class TroveHttpClient {
     return this.request("POST", "/v1/jobs/run", input);
   }
 
+  memoryIndex(): Promise<{ text: string; nodes: number; edges: number; truncated: boolean }> {
+    return this.request("GET", "/v1/index");
+  }
+
   exportObsidian(): Promise<ObsidianVaultExport> {
     return this.request("GET", "/v1/export/obsidian");
   }

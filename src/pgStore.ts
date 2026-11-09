@@ -33,77 +33,46 @@ import type {
 } from "./contracts.js";
 import {
   compileGrepPattern,
+  GIANT_CONTENT_CHARS,
   grepExcerpt,
-  isTextUnit,
-  ownerScope,
-  type OwnerScope,
+  maxSemanticDistanceFor,
+  reciprocalRankFusion,
+  reportSearchArm,
+} from "./retrievalPolicy.js";
+import { isTextUnit, ownerScope, type OwnerScope, type SearchObserver, sha256, EdgeValidityConflictError, UnknownEvidenceReferenceError, type ReconcileFlag, type ReconcileFlagCode, type GraphEvent, type GraphEventFeed, type EmbeddingCounts, type GraphEventStats, type MemoryDay, type GraphJob, type GraphOperationContext, type ShareableResult, type SimilarNote, type SpaceMoveResult, type GraphLintReport, type GraphSnapshot, type GraphStore, type GraphViewSnapshot, type GrepMatch, type GrepResult, type NeighborhoodResult, type ProjectResult, type ReadResult, type RefreshEmbeddingsResult, type RecallResult, type RecallTrace, type SearchResult, type TextQuoteMatch } from "./graphCore.js";
+import {
   JOB_MAX_ATTEMPTS,
+  followUpRequest,
+  maintenanceRequests,
+  reconcileRequest,
+  runJobKind,
   TERMINAL_JOB_RETENTION_DAYS,
-  lintMinIntervalSeconds,
-  selfTestMinIntervalSeconds,
+  type JobHost,
+  type JobRequest,
+  type JobRunner,
+} from "./jobs.js";
+import {
   capEventPayload,
   eventPruneMaxRows,
   eventRetentionDays,
   EVENT_PRUNE_BATCH_ROWS,
   decodeEventCursor,
   encodeEventCursor,
-  evidenceSupportScore,
-  performRecall,
-  reportSearchArm,
-  type SearchObserver,
-  renderAgentContext,
-  renderMarkdownProjection,
-  sha256,
-  splitTextUnits,
-  buildTextChunks,
-  chunkEmbeddingInput,
-  ServedUnitLog,
-  FUZZY_QUOTE_CANDIDATE_FLOOR,
-  EdgeValidityConflictError,
-  UnknownEvidenceReferenceError,
-  WEAK_EVIDENCE_FLOOR,
-  RECONCILE_FINDING_LIMIT,
-  reconcileLintFinding,
-  type ReconcileFlag,
-  type ReconcileFlagCode,
-  type GraphEvent,
-  type GraphEventFeed,
-  type EmbeddingCounts,
-  type GraphEventStats,
-  type MemoryDay,
   WRITE_ACTIONS,
-  type GraphJob,
-  type GraphOperationContext,
-  type ShareableResult,
-  type SimilarNote,
-  type SpaceMoveResult,
-  type GraphLintFinding,
-  type GraphLintReport,
-  type GraphSnapshot,
-  type GraphStore,
-  type GraphViewSnapshot,
-  type GrepMatch,
-  type GrepResult,
-  type NeighborhoodResult,
-  type ProjectResult,
-  type ReadResult,
-  type RecallResult,
-  type SearchResult,
-  type TextQuoteMatch,
-} from "./graphCore.js";
+} from "./events.js";
+import { evidenceSupportScore, FUZZY_QUOTE_CANDIDATE_FLOOR } from "./evidence.js";
+import { performRecall } from "./recall.js";
+import { renderAgentContext, renderMarkdownProjection } from "./render.js";
+import { splitTextUnits, buildTextChunks, chunkEmbeddingInput } from "./chunking.js";
+import { ServedUnitLog } from "./servedUnits.js";
+import { buildLintReport, LINT_FINDING_LIMIT } from "./lint.js";
 import { ActivationBuffer, type ActivationBump } from "./activation.js";
 import { createEmbeddingProviderFromEnv, vectorLiteral, type EmbeddingProvider } from "./embeddings.js";
-import { buildObsidianVaultExport } from "./obsidianExport.js";
-import {
-  createReconcileJudgeFromEnv,
-  performReconcileNode,
-  type ReconcileJudge,
-} from "./reconcile.js";
-import { runRecallSelfTest } from "./recallSelfTest.js";
-import { observe, withTraceAttributes } from "./tracing.js";
-import type { GraphJobResult, GraphJobResultMap } from "./jobResults.js";
+import { createRecallRerankerFromEnv, type Reranker } from "./rerank.js";
+import { createReconcileJudgeFromEnv, type ReconcileJudge } from "./reconcile.js";
+import type { GraphJobResult } from "./jobResults.js";
 import { slugify } from "./slug.js";
-import { looksLikeCredential, TeamSpaceError } from "./agentOps.js";
+import { looksLikeCredential, TeamSpaceError } from "./spaces.js";
 
 const { Pool } = pg;
 
@@ -306,7 +275,7 @@ export const LEXICAL_NODE_SEARCH_SQL = `with q as (select $7::tsquery as query),
          and (
            -- Giant catalog/log pages starve recall packs; only a title or slug
            -- match lets them surface in search. Grep/read/neighborhood keep them.
-           coalesce(length(nr.content), 0) <= 12000
+           coalesce(length(nr.content), 0) <= ${GIANT_CONTENT_CHARS}
            or n.title ilike $4
            or n.slug = lower(replace($1, ' ', '-'))
          )
@@ -428,7 +397,7 @@ export function semanticNodeSearchSql(vectorCount: number, layout: EmbeddingLayo
          and (${p(4)} or n.owner_id = any(${p(5)}::uuid[]))
          and (${p(2)}::node_type[] is null or n.type = any(${p(2)}::node_type[]))
          and (
-           coalesce(length(nr.content), 0) <= 12000
+           coalesce(length(nr.content), 0) <= ${GIANT_CONTENT_CHARS}
            or n.title ilike ${p(7)}
            or n.slug = lower(replace(${p(8)}, ' ', '-'))
          )
@@ -498,11 +467,19 @@ type PgStoreOptions = {
    * unconfigured). Pass `null` explicitly to force the heuristic.
    */
   reconcileJudge?: ReconcileJudge | null;
+  /** Recall reranker; defaults to the environment's. */
+  reranker?: Reranker | null;
+  /** Embedding provider; defaults to the environment's. */
+  embeddings?: EmbeddingProvider | null;
+  jobRunner?: JobRunner;
 };
 
 export class PgGraphStore implements GraphStore {
   private pool: pg.Pool;
   private reconcileJudge: ReconcileJudge | null;
+  private reranker: Reranker | null;
+  private embeddings: EmbeddingProvider | null;
+  private jobRunner: JobRunner;
   /**
    * Session-served provenance log (backlog #9b). In-process by design — the
    * server is one process, and this backs a warning, not a security boundary.
@@ -526,6 +503,9 @@ export class PgGraphStore implements GraphStore {
   constructor(options: PgStoreOptions) {
     this.pool = new Pool({ connectionString: options.connectionString, keepAlive: true });
     this.reconcileJudge = options.reconcileJudge === undefined ? createReconcileJudgeFromEnv() : options.reconcileJudge;
+    this.reranker = options.reranker === undefined ? createRecallRerankerFromEnv() : options.reranker;
+    this.embeddings = options.embeddings === undefined ? createEmbeddingProviderFromEnv() : options.embeddings;
+    this.jobRunner = options.jobRunner ?? runJobKind;
     // Idle clients dropped by the pooler (e.g. Supabase) emit 'error'; without
     // a listener that unhandled event kills the whole process.
     this.pool.on("error", (error) => {
@@ -692,10 +672,7 @@ export class PgGraphStore implements GraphStore {
         context,
         actorUuid,
       );
-      await this.enqueueMaintenanceJobs(client, context, actorUuid, [
-        "lint_graph",
-        "refresh_embeddings",
-      ]);
+      await this.enqueueRequests(client, maintenanceRequests({ lint: true, embeddings: true }, ownerScope(context)), context, actorUuid);
       await client.query("commit");
 
       const textUnits = await this.textUnitsForSource(source.id);
@@ -850,7 +827,7 @@ export class PgGraphStore implements GraphStore {
     observer?: SearchObserver,
   ): Promise<SearchResult> {
     const scope = ownerScope(context);
-    const provider = input.mode === "lexical" ? null : createEmbeddingProviderFromEnv();
+    const provider = input.mode === "lexical" ? null : this.embeddings;
 
     let result: SearchResult;
     // Semantic-only searches used to run a full lexical search first and throw
@@ -1295,14 +1272,19 @@ export class PgGraphStore implements GraphStore {
     if (nodeIds.length === 0) return map;
     const scope = ownerScope(context);
     // Only ACTIVE supersedes edges count: an expired/invalidated one is history,
-    // not a reason to distrust the atom today.
+    // not a reason to distrust the atom today. A fact revision of the target
+    // recorded after the edge re-asserts it (supersessionRevivedBy), so such an
+    // edge no longer marks the current belief.
     const result = await this.pool.query(
       `select e.to_node_id, e.from_node_id, n.title
        from edge e
        join node n on n.id = e.from_node_id and n.deleted_at is null
+       join node t on t.id = e.to_node_id
+       left join node_revision tr on tr.id = t.current_revision_id
        where e.predicate = 'supersedes'
          and e.to_node_id = any($1::uuid[])
          and e.deleted_at is null and e.expired_at is null
+         and (tr.created_at is null or tr.created_at <= e.created_at)
          and ($2 or e.owner_id = any($3::uuid[]))`,
       [nodeIds, !scope.scoped, scope.readOwnerIds],
     );
@@ -1492,7 +1474,7 @@ export class PgGraphStore implements GraphStore {
         }
       }
 
-      await this.enqueueMaintenanceJobs(client, context, actorUuid, ["lint_graph"]);
+      await this.enqueueRequests(client, maintenanceRequests({ lint: true }, ownerScope(context)), context, actorUuid);
       await client.query("commit");
       return edge;
     } catch (error) {
@@ -1556,7 +1538,7 @@ export class PgGraphStore implements GraphStore {
         context,
         actorUuid,
       );
-      await this.enqueueMaintenanceJobs(client, context, actorUuid, ["lint_graph"]);
+      await this.enqueueRequests(client, maintenanceRequests({ lint: true }, ownerScope(context)), context, actorUuid);
       await client.query("commit");
       return edge;
     } catch (error) {
@@ -1624,7 +1606,7 @@ export class PgGraphStore implements GraphStore {
           context,
           actorUuid,
         );
-        await this.enqueueMaintenanceJobs(client, context, actorUuid, ["lint_graph", "refresh_embeddings"]);
+        await this.enqueueRequests(client, maintenanceRequests({ lint: true, embeddings: true }, ownerScope(context)), context, actorUuid);
         await client.query("commit");
         tombstoned.push(id);
       } catch (error) {
@@ -1657,8 +1639,8 @@ export class PgGraphStore implements GraphStore {
     return result.rows.map((row) => ({ node: mapNode(row), score: Number(row.score) }));
   }
 
-  async recall(input: RecallInput, context?: GraphOperationContext): Promise<RecallResult> {
-    return performRecall(this, input, context);
+  async recall(input: RecallInput, context?: GraphOperationContext, options: { onTrace?: RecallTrace } = {}): Promise<RecallResult> {
+    return performRecall(this, input, context, { reranker: this.reranker, ...options });
   }
 
   async capture(input: CaptureInput, context?: GraphOperationContext): Promise<GraphNode> {
@@ -1716,11 +1698,8 @@ export class PgGraphStore implements GraphStore {
         context,
         actorUuid,
       );
-      await this.enqueueMaintenanceJobs(client, context, actorUuid, [
-        "lint_graph",
-        "refresh_embeddings",
-      ]);
-      await this.enqueueReconcileJob(client, context, actorUuid, id);
+      await this.enqueueRequests(client, maintenanceRequests({ lint: true, embeddings: true }, ownerScope(context)), context, actorUuid);
+      await this.enqueueRequests(client, [reconcileRequest(id, ownerScope(context))], context, actorUuid);
       await client.query("commit");
 
       const node = await this.read({ nodeId: id }, undefined, { trackAccess: false });
@@ -1855,14 +1834,11 @@ export class PgGraphStore implements GraphStore {
         context,
         actorUuid,
       );
-      await this.enqueueMaintenanceJobs(client, context, actorUuid, [
-        "lint_graph",
-        "refresh_embeddings",
-      ]);
+      await this.enqueueRequests(client, maintenanceRequests({ lint: true, embeddings: true }, ownerScope(context)), context, actorUuid);
       // Preserve reconcile cadence: title/summary revisions refresh search,
       // but only body changes introduce claims for the reconcile judge.
       if (contentChanged) {
-        await this.enqueueReconcileJob(client, context, actorUuid, input.nodeId);
+        await this.enqueueRequests(client, [reconcileRequest(input.nodeId, ownerScope(context))], context, actorUuid);
       }
       await client.query("commit");
 
@@ -2037,7 +2013,7 @@ export class PgGraphStore implements GraphStore {
   async lint(context?: GraphOperationContext): Promise<GraphLintReport> {
     const scope = ownerScope(context);
     const p: [boolean, string | null] = [!scope.scoped, scope.ownerId];
-    const [nodeCount, edgeCount, orphanNodes, missingEvidence, duplicateTitles, danglingEdges, evidenceRows, reconcileFlags] = await Promise.all([
+    const [nodeCount, edgeCount, orphanNodes, missingEvidence, duplicateTitles, danglingEdges, evidenceRows, reconcileFlags, revivedSupersessions] = await Promise.all([
       this.pool.query("select count(*)::int as count from node where deleted_at is null and ($1 or owner_id = $2)", p),
       this.pool.query("select count(*)::int as count from edge where deleted_at is null and expired_at is null and ($1 or owner_id = $2)", p),
       this.pool.query(
@@ -2048,7 +2024,7 @@ export class PgGraphStore implements GraphStore {
          group by n.id, n.title
          having count(e.id) = 0
          order by n.updated_at desc
-         limit 50`,
+         limit ${LINT_FINDING_LIMIT}`,
         p,
       ),
       this.pool.query(
@@ -2059,7 +2035,7 @@ export class PgGraphStore implements GraphStore {
          group by n.id, n.title
          having count(a.id) = 0
          order by n.updated_at desc
-         limit 50`,
+         limit ${LINT_FINDING_LIMIT}`,
         p,
       ),
       this.pool.query(
@@ -2069,7 +2045,7 @@ export class PgGraphStore implements GraphStore {
          group by lower(title)
          having count(*) > 1
          order by count(*) desc, lower(title)
-         limit 50`,
+         limit ${LINT_FINDING_LIMIT}`,
         p,
       ),
       this.pool.query(
@@ -2079,7 +2055,7 @@ export class PgGraphStore implements GraphStore {
          left join node to_node on to_node.id = e.to_node_id and to_node.deleted_at is null
          where e.deleted_at is null and e.expired_at is null and ($1 or e.owner_id = $2)
            and (from_node.id is null or to_node.id is null)
-         limit 50`,
+         limit ${LINT_FINDING_LIMIT}`,
         p,
       ),
       // weak_evidence: nodes WITH citations, scored for whether the cited span
@@ -2109,104 +2085,49 @@ export class PgGraphStore implements GraphStore {
          where ($1 or f.owner_id = $2)
          order by f.created_at desc, f.node_id, f.code
          limit $3`,
-        [...p, RECONCILE_FINDING_LIMIT],
+        [...p, LINT_FINDING_LIMIT],
+      ),
+      // revised_after_superseded: an active supersedes edge whose target got a
+      // fact revision afterwards. supersededBy no longer marks the target, so
+      // both notes read as current until someone re-links or retires one.
+      this.pool.query(
+        `select e.id, f.title as from_title, t.title as to_title
+         from edge e
+         join node f on f.id = e.from_node_id and f.deleted_at is null
+         join node t on t.id = e.to_node_id and t.deleted_at is null
+         join node_revision tr on tr.id = t.current_revision_id
+         where e.predicate = 'supersedes' and e.deleted_at is null and e.expired_at is null
+           and tr.created_at > e.created_at and ($1 or e.owner_id = $2)
+         order by tr.created_at desc
+         limit ${LINT_FINDING_LIMIT}`,
+        p,
       ),
     ]);
 
-    const findings: GraphLintFinding[] = [];
-
-    for (const row of orphanNodes.rows) {
-      findings.push({
-        severity: "warning",
-        code: "orphan_node",
-        entityTable: "node",
-        entityId: String(row.id),
-        message: `Node has no graph edges: ${row.title}`,
-      });
-    }
-
-    for (const row of missingEvidence.rows) {
-      findings.push({
-        severity: "warning",
-        code: "missing_evidence",
-        entityTable: "node",
-        entityId: String(row.id),
-        message: `Node has no evidence annotation: ${row.title}`,
-      });
-    }
-
-    for (const row of duplicateTitles.rows) {
-      findings.push({
-        severity: "warning",
-        code: "duplicate_title",
-        count: Number(row.count),
-        message: `Multiple nodes share title: ${row.title_key}`,
-      });
-    }
-
-    for (const row of danglingEdges.rows) {
-      findings.push({
-        severity: "error",
-        code: "dangling_edge",
-        entityTable: "edge",
-        entityId: String(row.id),
-        message: "Edge points at a missing or deleted node.",
-      });
-    }
-
-    // weak_evidence: a citation that is present but probably wrong. Group the
-    // joined rows per node, score against the best cited unit, flag under the
-    // floor — capped so a bulk mis-ingest cannot flood the report.
-    const evidenceByNode = new Map<string, { title: string; nodeText: string; units: string[] }>();
+    // Rows per cited unit; group them per note for the support score.
+    const cited = new Map<string, { id: string; title: string; nodeText: string; units: string[] }>();
     for (const row of evidenceRows.rows) {
       const id = String(row.id);
-      const entry = evidenceByNode.get(id) ?? {
-        title: String(row.title),
-        nodeText: `${row.title}\n${row.summary}\n${row.content}`,
-        units: [] as string[],
-      };
+      const entry = cited.get(id) ?? { id, title: String(row.title), nodeText: `${row.title}\n${row.summary}\n${row.content}`, units: [] };
       entry.units.push(String(row.unit_text));
-      evidenceByNode.set(id, entry);
+      cited.set(id, entry);
     }
-    let weakEvidenceCount = 0;
-    for (const [id, entry] of evidenceByNode) {
-      if (weakEvidenceCount >= 50) break;
-      const score = evidenceSupportScore(entry.nodeText, entry.units);
-      if (score < WEAK_EVIDENCE_FLOOR) {
-        findings.push({
-          severity: "warning",
-          code: "weak_evidence",
-          entityTable: "node",
-          entityId: id,
-          message: `Cited evidence supports ${(score * 100).toFixed(0)}% of the node's content terms (floor ${WEAK_EVIDENCE_FLOOR * 100}%): ${entry.title}`,
-        });
-        weakEvidenceCount += 1;
-      }
-    }
-
-    for (const row of reconcileFlags.rows) {
-      findings.push(reconcileLintFinding({
+    return buildLintReport({
+      nodes: Number(nodeCount.rows[0]?.count ?? 0),
+      edges: Number(edgeCount.rows[0]?.count ?? 0),
+      orphans: orphanNodes.rows.map((row) => ({ id: String(row.id), title: String(row.title) })),
+      missingEvidence: missingEvidence.rows.map((row) => ({ id: String(row.id), title: String(row.title) })),
+      duplicateTitles: duplicateTitles.rows.map((row) => ({ title: String(row.title_key), count: Number(row.count) })),
+      danglingEdgeIds: danglingEdges.rows.map((row) => String(row.id)),
+      cited: [...cited.values()],
+      revivedSupersessions: revivedSupersessions.rows.map((row) => ({ edgeId: String(row.id), fromTitle: String(row.from_title), toTitle: String(row.to_title) })),
+      reconcileFlags: reconcileFlags.rows.map((row) => ({
         code: row.code as ReconcileFlagCode,
         node: { id: String(row.node_id), title: String(row.node_title), slug: String(row.node_slug) },
         other: { id: String(row.other_id), title: String(row.other_title), slug: String(row.other_slug) },
         detail: String(row.detail ?? ""),
-      }));
-    }
-
-    const errors = findings.filter((finding) => finding.severity === "error").length;
-    const warnings = findings.filter((finding) => finding.severity === "warning").length;
-
-    return {
-      generatedAt: new Date().toISOString(),
-      summary: {
-        nodes: Number(nodeCount.rows[0]?.count ?? 0),
-        edges: Number(edgeCount.rows[0]?.count ?? 0),
-        findings: findings.length,
-        errors,
-        warnings,
-      },
-      findings,
-    };
+      })),
+    });
   }
 
   async recordReconcileFlags(
@@ -2356,7 +2277,7 @@ export class PgGraphStore implements GraphStore {
         actorUuid,
       );
       await client.query("commit");
-      return await this.snapshotForView(view);
+      return await this.snapshotForView(view, ownerScope(context));
     } catch (error) {
       await client.query("rollback");
       throw error;
@@ -2393,7 +2314,7 @@ export class PgGraphStore implements GraphStore {
       params,
     );
     if (result.rowCount === 0) return null;
-    return await this.snapshotForView(mapView(result.rows[0]));
+    return await this.snapshotForView(mapView(result.rows[0]), scope);
   }
 
   async deleteView(input: DeleteViewInput, context?: GraphOperationContext): Promise<{ deleted: boolean; view: GraphView | null }> {
@@ -2484,7 +2405,7 @@ export class PgGraphStore implements GraphStore {
     const heartbeat = this.startLeaseHeartbeat(claimed.job.id, claimed.claimant);
     let outcome: { status: "succeeded"; result: GraphJobResult } | { status: "failed"; error: string };
     try {
-      outcome = { status: "succeeded", result: await this.performJobTraced(claimed.job) };
+      outcome = { status: "succeeded", result: await this.jobRunner(this.jobHost(), claimed.job) };
     } catch (error) {
       outcome = { status: "failed", error: error instanceof Error ? error.message : "Unknown job error" };
     } finally {
@@ -2492,9 +2413,14 @@ export class PgGraphStore implements GraphStore {
       // report a lease we gave up on purpose.
       heartbeat.stop();
     }
-    return outcome.status === "succeeded"
-      ? await this.finishJob(claimed.job, claimed.claimant, "succeeded", outcome.result, null, context)
-      : await this.finishJob(claimed.job, claimed.claimant, "failed", null, outcome.error, context);
+    if (outcome.status === "failed") return this.finishJob(claimed.job, claimed.claimant, "failed", null, outcome.error, context);
+    const finished = await this.finishJob(claimed.job, claimed.claimant, "succeeded", outcome.result, null, context);
+    const next = followUpRequest(finished);
+    if (next) {
+      const { throttleSeconds: _throttle, ...input } = next;
+      await this.enqueueJob(input, context);
+    }
+    return finished;
   }
 
   private startLeaseHeartbeat(jobId: string, claimant: string): { stop(): void } {
@@ -2596,77 +2522,21 @@ export class PgGraphStore implements GraphStore {
    * dedupe key the job would take, so operator-triggered lints with their own
    * keys never count.
    */
-  private async enqueueMaintenanceJobs(
+  private async enqueueRequests(
     client: pg.PoolClient,
+    requests: JobRequest[],
     context: GraphOperationContext | undefined,
     actorUuid: string | null,
-    kinds: Array<GraphJob["kind"]>,
   ): Promise<void> {
-    const scope = ownerScope(context);
-    for (const kind of kinds) {
-      const scoped = kind === "lint_graph" && scope.scoped && scope.ownerId !== null;
-      const dedupeKey = scoped ? `maintenance:${kind}:${scope.ownerId}` : `maintenance:${kind}`;
-      if (kind === "lint_graph" && await this.lintSucceededRecently(client, dedupeKey)) continue;
-      await this.enqueueJobWithClient(client, {
-        kind,
-        payload: scoped ? { reason: "graph_mutation", ownerId: scope.ownerId } : { reason: "graph_mutation" },
-        priority: kind === "refresh_embeddings" ? 40 : 60,
-        dedupeKey,
-      }, context, actorUuid);
+    for (const request of requests) {
+      if (request.throttleSeconds > 0 && await this.succeededWithin(client, request.kind, request.dedupeKey, request.throttleSeconds)) continue;
+      const { throttleSeconds: _throttle, ...input } = request;
+      await this.enqueueJobWithClient(client, input, context, actorUuid);
     }
-    await this.enqueueRecallSelfTest(client, scope, context, actorUuid);
   }
 
-  /**
-   * The daily "can the graph still find its own notes" check.
-   *
-   * It rides the same mutation path as lint rather than a scheduler, because
-   * this codebase has no scheduler and a health check nobody remembers to run
-   * is not a feature. Its own throttle is a day, not lint's ten minutes: a
-   * self-test is twenty recalls, and what it measures — whether a new note is
-   * shadowed by the cluster it landed in — changes over weeks.
-   *
-   * Lowest priority in the queue. Nothing waits on this, and it must never
-   * delay an embedding refresh a live recall is about to want.
-   */
-  private async enqueueRecallSelfTest(
-    client: pg.PoolClient,
-    scope: ReturnType<typeof ownerScope>,
-    context: GraphOperationContext | undefined,
-    actorUuid: string | null,
-  ): Promise<void> {
-    const interval = selfTestMinIntervalSeconds();
-    if (interval <= 0) return;
-    // Owner-scoped like lint: a self-test must ask the graph the way its owner
-    // would, or it probes a pool they cannot see and reports blind spots that
-    // are not theirs.
-    const scoped = scope.scoped && scope.ownerId !== null;
-    const dedupeKey = scoped
-      ? `maintenance:recall_self_test:${scope.ownerId}`
-      : "maintenance:recall_self_test";
-    if (await this.maintenanceSucceededRecently(client, "recall_self_test", dedupeKey, interval)) return;
-    await this.enqueueJobWithClient(client, {
-      kind: "recall_self_test",
-      payload: scoped
-        ? { reason: "graph_mutation", ownerId: scope.ownerId }
-        : { reason: "graph_mutation" },
-      priority: 80,
-      dedupeKey,
-    }, context, actorUuid);
-  }
-
-  private async lintSucceededRecently(client: pg.PoolClient, dedupeKey: string): Promise<boolean> {
-    return this.maintenanceSucceededRecently(client, "lint_graph", dedupeKey, lintMinIntervalSeconds());
-  }
-
-  /** Has this exact maintenance job succeeded inside its own throttle window? */
-  private async maintenanceSucceededRecently(
-    client: pg.PoolClient,
-    kind: GraphJob["kind"],
-    dedupeKey: string,
-    interval: number,
-  ): Promise<boolean> {
-    if (interval <= 0) return false;
+  /** Has a job of this kind and key succeeded within the window? */
+  private async succeededWithin(client: pg.PoolClient, kind: GraphJob["kind"], dedupeKey: string, seconds: number): Promise<boolean> {
     const recent = await client.query(
       `select 1
        from graph_job
@@ -2675,7 +2545,7 @@ export class PgGraphStore implements GraphStore {
          and status = 'succeeded'
          and finished_at > now() - make_interval(secs => $2::numeric)
        limit 1`,
-      [dedupeKey, interval, kind],
+      [dedupeKey, seconds, kind],
     );
     return (recent.rowCount ?? 0) > 0;
   }
@@ -2749,20 +2619,6 @@ export class PgGraphStore implements GraphStore {
    * absorb across nodes. The `dedupeJoined` return marker lets a caller
    * observe either absorption.
    */
-  private async enqueueReconcileJob(
-    client: pg.PoolClient,
-    context: GraphOperationContext | undefined,
-    actorUuid: string | null,
-    nodeId: string,
-  ): Promise<void> {
-    await this.enqueueJobWithClient(client, {
-      kind: "reconcile_node",
-      payload: { reason: "graph_mutation", nodeId, ownerId: ownerScope(context).ownerId },
-      priority: 30,
-      dedupeKey: `reconcile:${nodeId}`,
-    }, context, actorUuid);
-  }
-
   private async enqueueJobWithClient(
     client: pg.PoolClient,
     input: EnqueueJobInput,
@@ -2986,86 +2842,24 @@ export class PgGraphStore implements GraphStore {
    * rides along so a cost view can be read per account, and the kind becomes
    * the trace name so one job type can be compared with itself over time.
    */
-  private async performJobTraced(job: GraphJob): Promise<GraphJobResult> {
-    const ownerId = typeof job.payload.ownerId === "string" ? job.payload.ownerId : undefined;
-    return withTraceAttributes(
-      { ...(ownerId ? { userId: ownerId } : {}), tags: ["job", job.kind] },
-      () => observe(`job:${job.kind}`, {
-        asType: "span",
-        input: { kind: job.kind, jobId: job.id, payload: job.payload },
-      }, async (span) => {
-        const result = await this.performJob(job);
-        span.update({ output: result });
-        return result;
-      }),
-    );
+  private jobHost(): JobHost {
+    return {
+      store: this,
+      reconcileJudge: this.reconcileJudge,
+      prune: async () => ({ jobs: await this.pruneTerminalJobs(), events: await this.pruneEvents() }),
+      refreshEmbeddings: (owner, limit) => this.refreshEmbeddings(owner, limit),
+    };
   }
 
-  private async performJob(job: GraphJob): Promise<GraphJobResult> {
-    if (job.kind === "lint_graph") {
-      // payload.ownerId scopes the lint to one tenant, the same contract as
-      // refresh_embeddings below. Absent means the whole graph, which only an
-      // operator-triggered enqueue produces; a mutation always carries its owner.
-      const payloadOwner = asRecord(job.payload).ownerId;
-      const ownerId = typeof payloadOwner === "string" ? payloadOwner : null;
-      const report = await this.lint(ownerId ? { ownerId } : undefined);
-      const prunedJobs = await this.pruneTerminalJobs();
-      const prunedEvents = await this.pruneEvents();
-      // Carry the findings themselves (capped) — counts alone are not actionable.
-      const result: GraphJobResultMap["lint_graph"] = {
-        ownerId,
-        lint: { ...report.summary, findings: report.findings.slice(0, 200) },
-        prunedJobs,
-        prunedEvents,
-      };
-      return result;
-    }
-
-    if (job.kind === "recall_self_test") {
-      const payload = asRecord(job.payload);
-      const ownerId = typeof payload.ownerId === "string" ? payload.ownerId : null;
-      const sampleSize = typeof payload.sampleSize === "number" ? payload.sampleSize : undefined;
-      // Owner-scoped like every other read: a self-test must ask the graph the
-      // way its owner would, or it measures a pool they cannot see.
-      const result: GraphJobResultMap["recall_self_test"] = await runRecallSelfTest(
-        this,
-        sampleSize === undefined ? {} : { sampleSize },
-        ownerId ? { ownerId } : undefined,
-      );
-      return result;
-    }
-
-    if (job.kind === "reconcile_node") {
-      const payload = asRecord(job.payload);
-      const nodeId = typeof payload.nodeId === "string" ? payload.nodeId : null;
-      if (!nodeId) throw new Error("reconcile_node: payload.nodeId is required");
-      const ownerId = typeof payload.ownerId === "string" ? payload.ownerId : null;
-      const result: GraphJobResultMap["reconcile_node"] = await performReconcileNode(this, { nodeId, ownerId }, this.reconcileJudge);
-      return result;
-    }
-
-    if (job.kind === "refresh_obsidian_projection") {
-      const projection = buildObsidianVaultExport(
-        await this.exportMarkdown(),
-        await this.timeline(),
-        await this.exportGraph(),
-      );
-      const result: GraphJobResultMap["refresh_obsidian_projection"] = {
-        manifest: projection.manifest,
-        fileCount: Object.keys(projection.files).length,
-      };
-      return result;
-    }
-
-    const provider = createEmbeddingProviderFromEnv();
+  /**
+   * One bounded embedding batch. `ownerId` scopes the whole run to one tenant:
+   * a bulk importer can ask "is MY data indexed yet?" and drain just its own
+   * slice; null is global (the background worker's mode). The count and the
+   * backfill take the same filter or the drain math lies.
+   */
+  private async refreshEmbeddings(ownerId: string | null, limit: number): Promise<RefreshEmbeddingsResult> {
+    const provider = this.embeddings;
     const model = provider?.model ?? process.env.TROVE_EMBEDDING_MODEL ?? "unconfigured";
-    // payload.ownerId scopes the whole job to one tenant: a bulk importer can
-    // ask "is MY data indexed yet?" and drain just its own slice instead of
-    // waiting for the entire corpus. Absent means global (the background
-    // worker's mode). The count and the backfill must take the same filter or
-    // the drain math lies.
-    const payloadOwner = asRecord(job.payload).ownerId;
-    const ownerId = typeof payloadOwner === "string" ? payloadOwner : null;
 
     // Chunk whatever is still unchunked BEFORE counting, so the count sees the
     // rows this run is about to be asked to embed. Sources ingested before
@@ -3114,22 +2908,20 @@ export class PgGraphStore implements GraphStore {
     };
 
     if (!provider) {
-      const result: GraphJobResultMap["refresh_embeddings"] = {
-        provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "none",
+      return {
+        provider: "none",
         model,
         status: "skipped_no_embedding_provider",
         ownerId,
         chunkedSources,
         missing,
       };
-      return result;
     }
 
-    const limit = Number(asRecord(job.payload).limit ?? process.env.TROVE_EMBEDDING_JOB_LIMIT ?? 256);
-    const embedded = await this.refreshMissingEmbeddings(provider, Number.isFinite(limit) ? limit : 256, ownerId, missing);
+    const embedded = await this.refreshMissingEmbeddings(provider, limit, ownerId, missing);
     // Only once a source's chunks are all embedded do its per-line vectors go.
     const retiredTextUnitVectors = await this.retireTextUnitVectors(model, ownerId);
-    const result: GraphJobResultMap["refresh_embeddings"] = {
+    return {
       provider: process.env.TROVE_EMBEDDING_PROVIDER ?? "openai",
       model,
       status: "refreshed",
@@ -3139,7 +2931,6 @@ export class PgGraphStore implements GraphStore {
       missingBefore: missing,
       embedded,
     };
-    return result;
   }
 
   /**
@@ -3660,7 +3451,7 @@ export class PgGraphStore implements GraphStore {
 
   /** For each note, the nearest team note by meaning, when it is close enough to be the same fact. */
   private async closestTeamNotes(nodeIds: string[], team: string): Promise<Map<string, { slug: string; title: string; distance: number }>> {
-    const provider = createEmbeddingProviderFromEnv();
+    const provider = this.embeddings;
     if (!provider || nodeIds.length === 0) return new Map();
     // ponytail: compares each listed note with every team note, a vector index if teams reach thousands of notes.
     const result = await this.pool.query(
@@ -3691,7 +3482,7 @@ export class PgGraphStore implements GraphStore {
     );
     const found = new Map<string, { slug: string; title: string; score: number; match: SimilarNote["match"] }>();
     for (const row of titles.rows) found.set(String(row.id), { slug: String(row.slug), title: String(row.title), score: Number(row.score), match: "title" });
-    const provider = createEmbeddingProviderFromEnv();
+    const provider = this.embeddings;
     if (provider) {
       try {
         const { nodes } = await this.semanticSearch(
@@ -3935,8 +3726,9 @@ export class PgGraphStore implements GraphStore {
            and from_node_id = any($1::uuid[])
            and to_node_id = any($1::uuid[])
            and ($2::uuid[] is null or id = any($2::uuid[]))
+           and ($3 or owner_id = any($4::uuid[]))
          order by predicate, id`,
-        [nodeIds, candidateEdgeIds],
+        [nodeIds, candidateEdgeIds, !scope.scoped, scope.readOwnerIds],
       );
       return {
         rootNodeId: rootNodeId && nodeIdSet.has(rootNodeId) ? rootNodeId : rootNodeId ?? null,
@@ -3970,8 +3762,9 @@ export class PgGraphStore implements GraphStore {
          where deleted_at is null and expired_at is null
            and from_node_id = any($1::uuid[])
            and to_node_id = any($1::uuid[])
+           and ($2 or owner_id = any($3::uuid[]))
          order by predicate, id`,
-        [nodeIds],
+        [nodeIds, !scope.scoped, scope.readOwnerIds],
       );
       return {
         rootNodeId: null,
@@ -3983,14 +3776,15 @@ export class PgGraphStore implements GraphStore {
     return { rootNodeId: null, nodeIds: [], edgeIds: [] };
   }
 
-  private async snapshotForView(view: GraphView): Promise<GraphViewSnapshot> {
+  private async snapshotForView(view: GraphView, scope: OwnerScope): Promise<GraphViewSnapshot> {
     const nodeResult = view.includedNodeIds.length === 0 ? { rows: [] } : await this.pool.query(
       `select n.id, n.type, n.slug, n.title, n.summary, nr.content, n.current_revision_id, n.updated_at, n.access_count, n.last_accessed_at
        from node n
        left join node_revision nr on nr.id = n.current_revision_id
        where n.deleted_at is null and n.id = any($1::uuid[])
+         and ($2 or n.owner_id = any($3::uuid[]))
        order by array_position($1::uuid[], n.id)`,
-      [view.includedNodeIds],
+      [view.includedNodeIds, !scope.scoped, scope.readOwnerIds],
     );
     const nodeIds = new Set(nodeResult.rows.map((row) => String(row.id)));
     const edgeResult = view.includedEdgeIds.length === 0 ? { rows: [] } : await this.pool.query(
@@ -4000,8 +3794,9 @@ export class PgGraphStore implements GraphStore {
          and e.id = any($1::uuid[])
          and e.from_node_id = any($2::uuid[])
          and e.to_node_id = any($2::uuid[])
+         and ($3 or e.owner_id = any($4::uuid[]))
        order by array_position($1::uuid[], e.id)`,
-      [view.includedEdgeIds, [...nodeIds]],
+      [view.includedEdgeIds, [...nodeIds], !scope.scoped, scope.readOwnerIds],
     );
 
     return {
@@ -4216,50 +4011,9 @@ function stripReadResult(read: ReadResult): GraphNode {
   return node;
 }
 
-/**
- * Reciprocal Rank Fusion over the per-mode ranked lists: each item scores
- * 1/(60 + rank) per list it appears in (1-based rank), ordered by fused score.
- * Ties break to the best single-list rank, then id for determinism.
- */
-function reciprocalRankFusion<T extends { id: string }>(...lists: T[][]): T[] {
-  const fused = new Map<string, { item: T; score: number; bestRank: number }>();
-  for (const list of lists) {
-    list.forEach((item, index) => {
-      const rank = index + 1;
-      const existing = fused.get(item.id);
-      if (existing) {
-        existing.score += 1 / (60 + rank);
-        existing.bestRank = Math.min(existing.bestRank, rank);
-        const incoming = (item as { distance?: number }).distance;
-        if (incoming !== undefined) {
-          const current = (existing.item as { distance?: number }).distance;
-          if (current === undefined || incoming < current) {
-            existing.item = { ...existing.item, distance: incoming };
-          }
-        }
-      } else {
-        fused.set(item.id, { item, score: 1 / (60 + rank), bestRank: rank });
-      }
-    });
-  }
-  return [...fused.values()]
-    .sort((left, right) =>
-      right.score - left.score ||
-      left.bestRank - right.bestRank ||
-      left.item.id.localeCompare(right.item.id))
-    .map((entry) => entry.item);
-}
 
 // Semantic hits farther than this cosine distance are noise. Input wins, then
 // the env override, then the default.
-function maxSemanticDistanceFor(input: SearchInput): number {
-  if (typeof input.maxSemanticDistance === "number" && Number.isFinite(input.maxSemanticDistance)) {
-    return input.maxSemanticDistance;
-  }
-  const fromEnv = Number(process.env.TROVE_SEMANTIC_MAX_DISTANCE);
-  if (process.env.TROVE_SEMANTIC_MAX_DISTANCE && Number.isFinite(fromEnv)) return fromEnv;
-  return 0.55;
-}
 
 /**
  * Closed versions of a triple whose world-time interval still covers
