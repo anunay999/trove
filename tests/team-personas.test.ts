@@ -417,4 +417,43 @@ describe("team personas over HTTP and MCP", { skip: databaseUrl ? false : "requi
     assert.ok(solo.json.atoms.length > 0);
     assert.ok(solo.json.atoms.every((atom: { space?: string }) => atom.space === undefined), "a solo user got space labels");
   });
+
+  it("the dashboard reads mine, the team's or both, and only a member's own team", async () => {
+    const get = async (persona: string, path: string) => {
+      const response = await fetch(`${baseUrl}${path}`, { headers: { authorization: `Bearer ${keys[persona]}` } });
+      return { status: response.status, json: (await response.json()) as any };
+    };
+    const team = await remember("alice", `Deploy freeze ${MARK}`, `No deploys on Fridays ${MARK}.`, "team");
+    const mine = await remember("bob", `Bob scratch ${MARK}`, `Bob's own note ${MARK}.`, "mine");
+    const ids = (snapshot: { nodes: Array<{ id: string }> }) => snapshot.nodes.map((node) => node.id);
+
+    const bobMine = await get("bob", "/v1/graph");
+    assert.ok(ids(bobMine.json).includes(mine.json.node.id));
+    assert.ok(!ids(bobMine.json).includes(team.json.node.id), "mine scope showed a team note");
+
+    const bobTeam = await get("bob", "/v1/graph?scope=team");
+    assert.equal(bobTeam.status, 200);
+    assert.ok(ids(bobTeam.json).includes(team.json.node.id));
+    assert.ok(!ids(bobTeam.json).includes(mine.json.node.id), "team scope showed a private note");
+    assert.ok(bobTeam.json.teamNodeIds.includes(team.json.node.id));
+
+    const bobAll = await get("bob", "/v1/graph?scope=all");
+    assert.ok(ids(bobAll.json).includes(team.json.node.id) && ids(bobAll.json).includes(mine.json.node.id));
+    assert.ok(!bobAll.json.teamNodeIds.includes(mine.json.node.id), "a private note was marked team");
+
+    const aliceAll = await get("alice", "/v1/graph?scope=all");
+    assert.ok(!ids(aliceAll.json).includes(mine.json.node.id), "alice saw bob's private note");
+    const carolTeam = await get("carol", "/v1/graph?scope=team");
+    assert.ok(!ids(carolTeam.json).includes(team.json.node.id), "another team saw Acme's note");
+
+    assert.equal((await get("bob", "/v1/stats?scope=team")).status, 200);
+    assert.equal((await get("bob", "/v1/stats?scope=all")).json.error, "invalid_scope");
+    assert.equal((await get("sam", "/v1/graph?scope=team")).json.error, "no_team");
+    const bobMe = (await get("bob", "/v1/me")).json;
+    assert.equal(bobMe.hasTeam, true);
+    assert.equal(bobMe.teamOrgId, acme.clerkOrgId);
+    const samMe = (await get("sam", "/v1/me")).json;
+    assert.equal(samMe.hasTeam, false);
+    assert.equal(samMe.teamOrgId, null);
+  });
 });

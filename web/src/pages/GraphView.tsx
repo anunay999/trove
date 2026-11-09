@@ -22,6 +22,7 @@ import {
   fetchSource,
   type GraphSnapshot,
   type NodeDetail,
+  type Scope,
   type NodeType,
   type SourceDocument,
 } from "@/lib/api";
@@ -125,16 +126,27 @@ function railSizing(): { defaultSize: number; minSizePx: number; maxSizePx: numb
   };
 }
 
+const SCOPE_SEARCH: Record<Scope, string> = { mine: "Search your memories", team: "Search team memories", all: "Search memories" };
+
+/** Team memories in the All view get this ring; the fill keeps the type colour. */
+const teamInk = (dark: boolean) => (dark ? "#34d399" : "#0f8a63");
+
 export function GraphView({
   snapshot,
   dark,
   layoutOwner,
+  scope = "mine",
+  onScopeChange,
 }: {
   snapshot: GraphSnapshot | null;
   dark: boolean;
   /** Whose layout this is. Null means do not restore and do not save. */
   layoutOwner: string | null;
+  scope?: Scope;
+  /** Set only when the caller is in a team; without it the scope control is hidden. */
+  onScopeChange?: (scope: Scope) => void;
 }) {
+  const teamIds = useMemo(() => new Set(snapshot?.teamNodeIds ?? []), [snapshot]);
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const graphRef = useRef<any>(null);
@@ -560,6 +572,15 @@ export function GraphView({
             ctx.arc(node.x ?? 0, node.y ?? 0, radius, 0, 2 * Math.PI);
             ctx.fillStyle = typeColor(node.type, dark);
             ctx.fill();
+            // Ownership is a ring, never a fill. While a chat lights a node the ring belongs to retrieval.
+            if (scope === "all" && !lit && teamIds.has(node.id)) {
+              // A gap before the ring keeps it readable on the green type fills too.
+              ctx.lineWidth = 1.5 / globalScale;
+              ctx.strokeStyle = teamInk(dark);
+              ctx.beginPath();
+              ctx.arc(node.x ?? 0, node.y ?? 0, radius + 2.6 / globalScale, 0, 2 * Math.PI);
+              ctx.stroke();
+            }
             if (lit && !dimmed) {
               // The ring carries the retrieval state; the fill keeps carrying
               // the node's type, so the graph never stops being itself.
@@ -638,15 +659,44 @@ export function GraphView({
         </div>
       )}
 
-      <section aria-label="Graph view controls" className={`absolute left-4 z-10 rounded-xl border border-border/70 bg-card p-1 shadow-sm ${chatOpen && narrow ? "top-4" : "bottom-20"}`}>
-        <Theme theme={gothicTheme} mode={dark ? "dark" : "light"}>
-          <ToggleButtonGroup label="Graph dimensions" type="single" size="sm" value={mode}
-            onChange={(value) => { if (value === "2d" || value === "3d") { setMode(value); setThreeDError(false); setHoverId(null); } }}>
-            <ToggleButton value="2d" label="2D" />
-            <ToggleButton value="3d" label="3D" />
-          </ToggleButtonGroup>
-        </Theme>
-      </section>
+      {snapshot && snapshot.nodes.length === 0 ? (
+        <div role="status" className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center">
+          <h2 className="text-[17px] font-medium">{scope === "team" ? "No team memories yet" : "No memories yet"}</h2>
+          <p className="max-w-sm text-sm leading-relaxed text-muted-foreground">
+            {scope === "mine"
+              ? "Tell your agent to remember something."
+              : "Tell your agent to save a memory to the team, or ask it which of your memories to share."}
+          </p>
+        </div>
+      ) : null}
+
+      <div className={`absolute left-4 z-10 flex flex-wrap items-center gap-3 ${chatOpen && narrow ? "top-4" : "bottom-20"}`}>
+        <section aria-label="Graph view controls" className="rounded-xl border border-border/70 bg-card p-1 shadow-sm">
+          <Theme theme={gothicTheme} mode={dark ? "dark" : "light"}>
+            <ToggleButtonGroup label="Graph dimensions" type="single" size="sm" value={mode}
+              onChange={(value) => { if (value === "2d" || value === "3d") { setMode(value); setThreeDError(false); setHoverId(null); } }}>
+              <ToggleButton value="2d" label="2D" />
+              <ToggleButton value="3d" label="3D" />
+            </ToggleButtonGroup>
+          </Theme>
+        </section>
+        {/* ponytail: the 3D scene has no team ring yet; the legend says what 2D shows. */}
+        {scope === "all" && mode === "2d" ? (
+          <p className="flex h-9 items-center gap-3.5 rounded-xl border border-border/70 bg-card px-3 text-xs shadow-sm">
+            <span className="flex items-center gap-1.5">
+              <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden><circle cx="7" cy="7" r="3.5" className="fill-muted-foreground" /></svg>
+              Mine
+            </span>
+            <span className="flex items-center gap-1.5">
+              <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden>
+                <circle cx="7" cy="7" r="5.6" fill="none" stroke={teamInk(dark)} strokeWidth="1.6" />
+                <circle cx="7" cy="7" r="3.5" className="fill-muted-foreground" />
+              </svg>
+              Team
+            </span>
+          </p>
+        ) : null}
+      </div>
       {mode === "3d" && !chatOpen ? <p className="pointer-events-none absolute bottom-20 right-4 text-xs text-muted-foreground">Drag to orbit · Scroll to zoom</p> : null}
       {threeDError ? <p role="status" className="absolute bottom-32 left-4 z-10 max-w-xs rounded-lg border border-border bg-card p-3 text-sm">3D could not load on this device. You can keep exploring in 2D.</p> : null}
 
@@ -660,14 +710,26 @@ export function GraphView({
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={onSearchKey}
-              placeholder="Search your memories"
-              aria-label="Search your memories"
+              placeholder={SCOPE_SEARCH[scope]}
+              aria-label={SCOPE_SEARCH[scope]}
               className="h-11 min-w-0 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
             />
             <kbd className="shrink-0 rounded-md border border-border/60 px-1.5 text-xs text-muted-foreground">
               ⌘K
             </kbd>
           </div>
+          {onScopeChange ? (
+            <div className="border-t border-border/70 p-2">
+              <Theme theme={gothicTheme} mode={dark ? "dark" : "light"}>
+                <ToggleButtonGroup label="Whose memories" type="single" size="sm" value={scope}
+                  onChange={(value) => { if (value === "mine" || value === "team" || value === "all") onScopeChange(value); }}>
+                  <ToggleButton value="mine" label="Mine" />
+                  <ToggleButton value="team" label="Team" />
+                  <ToggleButton value="all" label="All" />
+                </ToggleButtonGroup>
+              </Theme>
+            </div>
+          ) : null}
           {matches.length > 0 ? (
             <div className="border-t border-border/70 p-2">
               {matches.map((node, index) => (
@@ -858,6 +920,11 @@ export function GraphView({
                 aria-hidden
               />
               {selected.type}
+              {teamIds.has(selected.id) ? (
+                <span className="ml-1 rounded-full bg-emerald-600/10 px-2 py-0.5 text-[11px] font-medium text-emerald-800 dark:bg-emerald-400/15 dark:text-emerald-300">
+                  Team
+                </span>
+              ) : null}
             </p>
             <button
               type="button"

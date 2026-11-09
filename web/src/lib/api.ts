@@ -32,7 +32,12 @@ export type GraphEdge = {
 export type GraphSnapshot = {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  /** Present for the team and all scopes: which nodes live in the team's shared space. */
+  teamNodeIds?: string[];
 };
+
+/** Whose memories a dashboard read shows. Overview takes mine or team; Graph also takes all. */
+export type Scope = "mine" | "team" | "all";
 
 export type CountRow = { key: string; count: number };
 
@@ -181,7 +186,8 @@ async function sendJson<T>(path: string, options: { method?: string; body?: unkn
   return response.json() as Promise<T>;
 }
 
-export const fetchStats = (): Promise<Stats> => getJson<Stats>("/v1/stats");
+const scoped = (path: string, scope: Scope) => (scope === "mine" ? path : `${path}?scope=${scope}`);
+export const fetchStats = (scope: Exclude<Scope, "all"> = "mine"): Promise<Stats> => getJson<Stats>(scoped("/v1/stats", scope));
 
 /** A companion skill's markdown, frontmatter stripped. Public route; no auth. */
 export async function fetchSkillBody(name: string): Promise<string> {
@@ -190,7 +196,7 @@ export async function fetchSkillBody(name: string): Promise<string> {
   const raw = await response.text();
   return raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "").trim();
 }
-export const fetchGraph = (): Promise<GraphSnapshot> => getJson<GraphSnapshot>("/v1/graph");
+export const fetchGraph = (scope: Scope = "mine"): Promise<GraphSnapshot> => getJson<GraphSnapshot>(scoped("/v1/graph", scope));
 
 export type SourceDocument = {
   id: string;
@@ -344,6 +350,10 @@ export type Me = {
   identity: Identity | null;
   /** The account being viewed, when an admin is impersonating. */
   impersonating: Identity | null;
+  /** The active team has a shared space this caller can read. */
+  hasTeam?: boolean;
+  /** Clerk organization of the active team; null in a personal tenant. */
+  teamOrgId?: string | null;
 };
 
 export type ApiKeySummary = {

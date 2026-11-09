@@ -6,7 +6,46 @@ import { ActivityHeatmap } from "@/components/ActivityHeatmap";
 import { RecentActivity } from "@/components/RecentActivity";
 import { HealthCard } from "@/components/HealthCard";
 import { typeColor, OTHER_LIGHT, OTHER_DARK, formatWhen } from "@/lib/viz";
-import type { NodeType, Stats } from "@/lib/api";
+import { ToggleButton, ToggleButtonGroup } from "@astryxdesign/core/ToggleButton";
+import { Theme } from "@astryxdesign/core/theme";
+import { gothicTheme } from "@/themes/gothic";
+import type { NodeType, Scope, Stats } from "@/lib/api";
+
+type OverviewScope = Exclude<Scope, "all">;
+
+export function Overview({ stats, dark, scope = "mine", onScopeChange }: {
+  stats: Stats | null;
+  dark: boolean;
+  scope?: OverviewScope;
+  /** Set only for team members; without it the scope control is hidden. */
+  onScopeChange?: (scope: OverviewScope) => void;
+}) {
+  return (
+    <div className="flex flex-col">
+      {onScopeChange ? (
+        <div className="pb-6">
+          <Theme theme={gothicTheme} mode={dark ? "dark" : "light"}>
+            <ToggleButtonGroup label="Whose memories" type="single" size="sm" value={scope}
+              onChange={(value) => { if (value === "mine" || value === "team") onScopeChange(value); }}>
+              <ToggleButton value="mine" label="Mine" />
+              <ToggleButton value="team" label="Team" />
+            </ToggleButtonGroup>
+          </Theme>
+        </div>
+      ) : null}
+      {stats && stats.totals.nodes === 0 && scope === "team" ? (
+        <div role="status" className="flex flex-col items-center gap-2 border-y px-6 py-28 text-center">
+          <h2 className="text-[17px] font-medium">No team memories yet</h2>
+          <p className="max-w-sm text-sm leading-relaxed text-muted-foreground">
+            Tell your agent to save a memory to the team, or ask it which of your memories to share.
+          </p>
+        </div>
+      ) : (
+        <OverviewBody stats={stats} dark={dark} />
+      )}
+    </div>
+  );
+}
 
 // Editorial layout: open sections separated by hairlines, not boxed cards.
 function Section({ title, meta, children, className = "" }: {
@@ -26,7 +65,7 @@ function Section({ title, meta, children, className = "" }: {
   );
 }
 
-export function Overview({ stats, dark }: { stats: Stats | null; dark: boolean }) {
+function OverviewBody({ stats, dark }: { stats: Stats | null; dark: boolean }) {
   if (!stats) {
     return (
       <div className="flex flex-col gap-8 pt-4">

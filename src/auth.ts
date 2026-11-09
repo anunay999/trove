@@ -31,6 +31,8 @@ export type AuthContext = {
   sharedOwnerIds?: string[] | undefined;
   /** The active tenant; unset for service tokens, local dev and impersonation. */
   tenantId?: string | undefined;
+  /** Clerk organization of the active tenant; null for a personal one. */
+  teamOrgId?: string | undefined;
   /** Auth disabled (local/CI): bypass owner scoping, see the whole graph. */
   superuser?: boolean | undefined;
   /** Admin "view as": the account being impersonated. `identity` stays the real admin. */
@@ -46,7 +48,7 @@ export const IMPERSONATE_HEADER = "x-trove-impersonate";
  * `resolveOAuthToken` handles Clerk `oat_*` OAuth access tokens from browser
  * MCP connectors. Any may return null to signal "not mine / not valid".
  */
-export type ResolvedSpaces = { tenantId: string | null; ownerId: string; sharedOwnerIds: string[] };
+export type ResolvedSpaces = { tenantId: string | null; ownerId: string; sharedOwnerIds: string[]; clerkOrgId?: string | null };
 
 export type AuthResolvers = {
   resolveApiKey?: (secret: string) => Promise<{ actorId: string; scopes: TroveScope[]; ownerId?: string; identity?: AuthIdentity; spaces?: ResolvedSpaces } | null>;
@@ -189,7 +191,7 @@ function withSpaces(
 ): AuthContext {
   const { spaces, ...context } = resolved;
   if (!spaces) return { ...context, ownerId: userId };
-  return { ...context, ownerId: spaces.ownerId, sharedOwnerIds: spaces.sharedOwnerIds, tenantId: spaces.tenantId ?? undefined };
+  return { ...context, ownerId: spaces.ownerId, sharedOwnerIds: spaces.sharedOwnerIds, tenantId: spaces.tenantId ?? undefined, teamOrgId: spaces.clerkOrgId ?? undefined };
 }
 
 /**
@@ -231,7 +233,7 @@ export async function applyImpersonation(
   }
 
   // ponytail: view-as shows the target's personal space only; their team spaces would need their active tenant.
-  return { ...context, impersonating: impersonated, ownerId: impersonated.userId, sharedOwnerIds: undefined, tenantId: undefined, superuser: false };
+  return { ...context, impersonating: impersonated, ownerId: impersonated.userId, sharedOwnerIds: undefined, tenantId: undefined, teamOrgId: undefined, superuser: false };
 }
 
 /**

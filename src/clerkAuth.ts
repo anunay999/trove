@@ -45,7 +45,7 @@ export function activeOrgFromClaims(payload: Record<string, unknown>): ActiveOrg
 }
 
 function toResolvedSpaces(spaces: Spaces): ResolvedSpaces {
-  return { tenantId: spaces.tenantId, ownerId: spaces.ownerId, sharedOwnerIds: spaces.sharedOwnerIds };
+  return { tenantId: spaces.tenantId, ownerId: spaces.ownerId, sharedOwnerIds: spaces.sharedOwnerIds, clerkOrgId: spaces.clerkOrgId };
 }
 
 /**
