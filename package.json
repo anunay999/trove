@@ -61,7 +61,7 @@
   },
   "dependencies": {
     "@clerk/backend": "^3.24.0",
-    "@hono/node-server": "^2.1.5",
+    "@hono/node-server": "^2.1.6",
     "@langfuse/otel": "^5.11.0",
     "@langfuse/tracing": "^5.11.0",
     "@modelcontextprotocol/client": "^2.3.1",
