@@ -2,6 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState, type ReactNod
 import { AuthenticateWithRedirectCallback } from "@clerk/clerk-react";
 import { GITHUB_PATH } from "@/lib/brandIcons";
 import { clearLayout, layoutOwnerKey } from "@/lib/graphLayoutCache";
+import { defaultSignedOutView, type SignedOutView } from "@/lib/signedOutView";
 import { Overview } from "@/pages/Overview";
 // The force-graph library is the biggest thing we ship. Split it out so the
 // landing, which most visitors never scroll past, doesn't download the explorer.
@@ -111,9 +112,7 @@ export default function App() {
    * and it is still the DEFAULT on a deployment with no Clerk, where a key is
    * genuinely the only credential that exists.
    */
-  const [signedOutView, setSignedOutView] = useState<"landing" | "connect">(
-    isAppHost && !clerkEnabled ? "connect" : "landing",
-  );
+  const [signedOutView, setSignedOutView] = useState<SignedOutView>(() => defaultSignedOutView(clerkEnabled));
   // OAuth providers bounce back to #/sso-callback after the drawer has
   // unmounted; a mounted Clerk callback component must finish the handshake.
   const [ssoCallback] = useState(() => window.location.hash.includes("sso-callback"));
@@ -224,7 +223,9 @@ export default function App() {
   const dashboardReady = !error && (signedIn ? !isWaitlisted : tokenMode || authDisabled);
   const clerkSettling = clerkEnabled && !clerkLoaded;
   const showLanding = isFrontDoor;
-  const showConnect = !signedIn && !dashboardReady && signedOutView === "connect";
+  // Without Clerk the key form is the default view, so wait for /v1/me first:
+  // a server with auth off needs no key, and the form must not flash at it.
+  const showConnect = !signedIn && !dashboardReady && signedOutView === "connect" && (clerkEnabled || authProbed);
   // Everything else a signed-out visitor to the app host can be: not the
   // landing (that is the front door's job), not the key form, and never the
   // dashboard branches below — those read `stats` and would render an empty
@@ -237,7 +238,7 @@ export default function App() {
     clearLayout();
     setImpersonation(null);
     setTokenDashboard(false);
-    setSignedOutView(isAppHost && !clerkEnabled ? "connect" : "landing");
+    setSignedOutView(defaultSignedOutView(clerkEnabled));
     setStats(null);
     setSnapshot(null);
     setError(null);
@@ -519,7 +520,9 @@ export default function App() {
               if (typeof value === "string" && value.trim()) {
                 window.localStorage.setItem("trove_token", value.trim());
                 setTokenDashboard(true);
-                setSignedOutView("landing");
+                // Without Clerk this stays on the key form, so a key the
+                // server refuses brings the form back instead of a bare 401.
+                setSignedOutView(defaultSignedOutView(clerkEnabled));
                 void load();
               }
             }}
